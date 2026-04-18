@@ -54,12 +54,16 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         tg_resp = MagicMock()
         tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
         tg_resp.raise_for_status = MagicMock()
-        tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
+        tg_client_instance = tg_client_cls.return_value.__enter__.return_value
+        tg_client_instance.post.return_value = tg_resp
 
         import run_daily
         monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
         rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
+        assert len(tg_client_instance.post.call_args_list) == 1
+        sent_data = tg_client_instance.post.call_args_list[0].kwargs.get("data", {})
+        assert sent_data["parse_mode"] == "MarkdownV2"
 
     # Verify archive file was written
     summary_path = tmp_path / "archive" / "2026" / "04" / "17" / "summary.md"

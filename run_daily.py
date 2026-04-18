@@ -155,7 +155,7 @@ def _run(date_str: str) -> int:
         retry_max_attempts=cfg.retry.max_attempts,
         retry_backoff_seconds=cfg.retry.backoff_seconds,
     )
-    tg.send(out.concise_md)
+    tg.send(out.concise_md, parse_mode="MarkdownV2")
     log.info("TG push complete")
 
     log.info("✓ run_daily complete for %s", date_str)

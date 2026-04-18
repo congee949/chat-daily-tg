@@ -1,91 +1,114 @@
 # wx-daily-tg
 
-Daily WeChat group summary → Telegram bot, powered by local CLIProxyAPI (uses your Claude Code subscription, no paid API key).
+每天自动导出微信群消息，整理成一份简短日报发到 Telegram，同时把详细内容和长期值得跟踪的信息存到本地。
 
-## What it does
+## 这是什么
 
-Every morning at 08:00 (macOS launchd):
-1. Exports yesterday's messages from configured WeChat groups via `wx-cli`
-2. Summarizes via Claude (through local CLIProxyAPI)
-3. Pushes concise summary to your Telegram bot
-4. Archives detailed summary + raw exports under `~/wx-daily/archive/YYYY/MM/DD/`
-5. Extracts long-term opportunities (invite codes, bank products) → `permanent.jsonl`
-6. Extracts short-term opportunities (arbitrage, bugs) → `hot-leads/` with 14-day rolloff
-7. Scans for death signals ("关门了" / "封了") to auto-mark dead items
+这个项目每天早上会自动做 4 件事：
 
-## Setup (one-time)
+1. 读取指定微信群前一天的聊天记录
+2. 生成一份适合手机看的简报
+3. 把简报发到 Telegram
+4. 把详细版、长期机会和短期热点保存到本地
 
-1. Install wx-cli and run `sudo wx init` (see wx-cli docs — requires codesign WeChat.app)
-2. Install & configure CLIProxyAPI, start it on `127.0.0.1:8317`
-3. Create Telegram bot via @BotFather, obtain token + your chat_id
-4. `cd /Users/Apple/projects/wx-daily-tg && python3 -m venv venv && source venv/bin/activate && pip install -e ".[dev]"`
-5. Configure `~/wx-daily/config.yaml` (list target groups, matching `wx sessions` output)
-6. Export these env vars in `~/.zshenv`:
-   ```
-   export CLIPROXY_API_KEY="..."
-   export TG_BOT_TOKEN="..."
-   export TG_CHAT_ID="..."
-   ```
-7. Run `./scripts/install-launchd.sh` to install the daily schedule
+适合用来长期跟踪：
 
-## Run manually
+- 群里的机会和活动
+- 已经失效的路子
+- 哪些信息值得继续观察
+
+## 项目结构
+
+这个仓库是“代码仓库”，真正每天产生的数据默认放在另一个目录：
+
+- 代码：`/Users/Apple/Projects/wx-daily-tg`
+- 数据：`/Users/Apple/wx-daily`
+
+本地数据目录大致长这样：
+
+```text
+~/wx-daily/
+├── config.yaml
+├── permanent.jsonl
+├── permanent.md
+├── hot-leads/
+├── archive/
+└── logs/
+```
+
+其中：
+
+- `archive/` 里是每天的原始导出和详细总结
+- `hot-leads/` 里是最近 14 天内还活着的短期机会
+- `permanent.jsonl` / `permanent.md` 是长期机会库
+- `logs/` 里是运行日志
+
+## 运行前准备
+
+你需要先准备好这几样东西：
+
+1. 微信聊天导出能力
+2. 本地可用的大模型接口
+3. Telegram 机器人和 chat id
+
+环境变量示例：
 
 ```bash
-source venv/bin/activate
-python run_daily.py              # yesterday (default)
+export CLIPROXY_API_KEY="..."
+export TG_BOT_TOKEN="..."
+export TG_CHAT_ID="..."
+```
+
+## 配置
+
+主要配置文件在：
+
+```text
+~/wx-daily/config.yaml
+```
+
+这里可以设置：
+
+- 要监控的群名
+- 每天几点跑
+- 时区
+- 使用哪个模型
+- Telegram 机器人配置
+
+## 手动运行
+
+```bash
+cd /Users/Apple/Projects/wx-daily-tg
+source .venv/bin/activate
+python run_daily.py
 python run_daily.py --date 2026-04-17
 ```
 
-## Test
+## 测试
 
 ```bash
+cd /Users/Apple/Projects/wx-daily-tg
+source .venv/bin/activate
 pytest -v
 ```
 
-All 55 unit tests should pass.
+## 现在已经解决的问题
 
-## Upgrade model
+- Telegram 发送时改成了真正适合 Telegram 的格式
+- 不再把标题和加粗原样显示成 `###`、`**`
+- 发送失败时会重试
+- 每次运行后会把详细版落到本地
 
-Edit `~/wx-daily/config.yaml` `llm.model` field. No code change. Validate available models:
+## 常见问题
 
-```bash
-curl -s http://127.0.0.1:8317/v1/models \
-  -H "Authorization: Bearer $CLIPROXY_API_KEY" | \
-  python3 -c "import json,sys; d=json.load(sys.stdin); print('\n'.join(m['id'] for m in d['data']))"
-```
+**Telegram 收到的内容为什么看起来像“源码”？**
 
-Current: `claude-sonnet-4-6`. Alternate for Chinese: `kimi-k2.5`.
+因为 Telegram 自己支持的格式跟普通 Markdown 不一样。如果直接把常见的标题、加粗符号塞进去，Telegram 往往不会按预期显示。这个仓库现在已经针对 Telegram 做了单独处理。
 
-## Troubleshooting
+**为什么 `/Users/Apple/wx-daily` 里没有 git？**
 
-- **No TG message arrives:** `tail -f ~/wx-daily/logs/*.log` — check for Telegram API errors
-- **Export empty:** WeChat must be running + logged in when launchd fires. If Mac was asleep, launchd fires on wake.
-- **Model not available:** `/v1/models` should list it. Check CLIProxyAPI `config.yaml`.
-- **LLM timeout:** default is 300s. Bump `llm.timeout` in config.yaml if Claude runs long on big prompts.
-- **launchd not firing:** `launchctl list | grep wx-daily-tg` — should show 1 entry.
+因为那个目录存的是每天跑出来的数据，不是代码仓库。真正的代码在 `/Users/Apple/Projects/wx-daily-tg`。
 
-## Data layout
+## 备注
 
-```
-~/wx-daily/
-├── config.yaml
-├── permanent.jsonl          # long-term opportunities (invite codes, products)
-├── permanent.md             # human-readable view (auto-generated)
-├── hot-leads/
-│   ├── latest.md            # 14-day rolling active window (auto-generated)
-│   └── 2026/04/17.md        # that day's new hot leads (only if non-empty)
-├── archive/
-│   └── 2026/04/17/
-│       ├── <group>.md       # raw wx-cli exports
-│       └── summary.md       # LLM-generated detailed summary
-└── logs/
-    └── 2026-04-17.log
-```
-
-## Architecture
-
-Single-machine Python 3.11+ pipeline. All components local. See `docs/specs/2026-04-18-design.md` for design decisions and `docs/plans/2026-04-18-wx-daily-tg.md` for implementation.
-
-## License
-
-Personal use.
+这是一个个人本地项目，默认围绕 macOS、本地运行和你的现有环境来设计。

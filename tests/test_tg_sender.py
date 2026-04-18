@@ -1,7 +1,12 @@
 from pytest_httpx import HTTPXMock
 import pytest
 import httpx
-from wx_daily_tg.tg_sender import TelegramSender, split_message
+from wx_daily_tg.tg_sender import (
+    TelegramSender,
+    split_message,
+    escape_markdown_v2,
+    format_markdownish_for_telegram,
+)
 
 
 def test_split_message_short_returns_single_chunk():
@@ -31,6 +36,45 @@ def test_send_message_calls_telegram_api(httpx_mock: HTTPXMock):
     assert "text=hello" in body
 
 
+def test_send_message_with_markdownv2_sets_parse_mode(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send("hello", parse_mode="MarkdownV2")
+    req = httpx_mock.get_request()
+    body = req.read().decode()
+    assert "parse_mode=MarkdownV2" in body
+
+
+def test_markdown_v2_escapes_special_chars():
+    assert escape_markdown_v2("hello_world") == "hello\\_world"
+    assert escape_markdown_v2("[]") == "\\[\\]"
+    assert escape_markdown_v2("a(b)c") == "a\\(b\\)c"
+    assert escape_markdown_v2("- item") == "\\- item"
+    assert escape_markdown_v2("### title") == "\\#\\#\\# title"
+    assert escape_markdown_v2("1. wow!") == "1\\. wow\\!"
+
+
+def test_format_markdownish_for_telegram_preserves_supported_structure():
+    text = "\n".join([
+        "### 日期概览",
+        "2026-04-17 共3个群。",
+        "",
+        "- **bankproduct** | 恒生开户",
+        "- activity | 美团返现50元!",
+    ])
+    assert format_markdownish_for_telegram(text) == "\n".join([
+        "*日期概览*",
+        "2026\\-04\\-17 共3个群。",
+        "",
+        "• *bankproduct* \\| 恒生开户",
+        "• activity \\| 美团返现50元\\!",
+    ])
+
+
 @pytest.mark.httpx_mock(can_send_already_matched_responses=True)
 def test_send_long_message_splits_into_multiple_calls(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
@@ -55,6 +99,42 @@ def test_send_raises_on_http_error(httpx_mock: HTTPXMock):
     s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_backoff_seconds=[0, 0, 0])
     with pytest.raises(httpx.HTTPStatusError):
         s.send("hello")
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+def test_send_markdownv2_does_not_fallback_on_parse_error(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": False, "description": "Bad Request: Can't parse entities: unexpected"},
+        status_code=400,
+    )
+    s = TelegramSender(
+        bot_token="-TOKEN-",
+        chat_id="12345",
+        retry_max_attempts=1,
+        retry_backoff_seconds=[0],
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        s.send("hello", parse_mode="MarkdownV2")
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 1
+    first_body = requests[0].read().decode()
+    assert "parse_mode=MarkdownV2" in first_body
+
+
+def test_send_markdownv2_formats_message_before_send(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send("### 标题\n- **词**", parse_mode="MarkdownV2")
+    req = httpx_mock.get_request()
+    body = req.read().decode()
+    assert "parse_mode=MarkdownV2" in body
+    assert "text=%2A%E6%A0%87%E9%A2%98%2A%0A%E2%80%A2+%2A%E8%AF%8D%2A" in body
 
 
 @pytest.mark.httpx_mock(can_send_already_matched_responses=True)

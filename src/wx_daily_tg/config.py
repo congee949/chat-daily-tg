@@ -19,7 +19,7 @@ class LLM(BaseModel):
     endpoint: str
     model: str
     api_key_env: str
-    max_tokens: int = 8000
+    max_tokens: int = 16000
     timeout: float = 300.0
 
 

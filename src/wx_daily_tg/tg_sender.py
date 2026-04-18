@@ -1,10 +1,75 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+import re
 import httpx
 import logging
 import time
-
 log = logging.getLogger(__name__)
+
+
+def escape_markdown_v2(text: str) -> str:
+    """Escape all MarkdownV2 special characters for Telegram safely."""
+    specials = {
+        "_", "*", "[", "]", "(", ")", "~", "`", ">",
+        "#", "+", "-", "=", "|", "{", "}", ".", "!",
+    }
+    out: list[str] = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch in specials:
+            out.append(f"\\{ch}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+)$")
+_BULLET_RE = re.compile(r"^\s*-\s+(.+)$")
+
+
+def format_markdownish_for_telegram(text: str) -> str:
+    """Convert simple markdown-ish summary text into Telegram-safe MarkdownV2.
+
+    Supports:
+    - headings like `### Title` -> `*Title*`
+    - bullet lines like `- item` -> `• item`
+    - bold spans like `**word**` -> `*word*`
+    Everything else is escaped so arbitrary content remains safe.
+    """
+    out_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            out_lines.append("")
+            continue
+
+        heading = _HEADING_RE.match(line)
+        if heading:
+            out_lines.append(f"*{_format_inline_markdownish(heading.group(1).strip())}*")
+            continue
+
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            out_lines.append(f"• {_format_inline_markdownish(bullet.group(1).strip())}")
+            continue
+
+        out_lines.append(_format_inline_markdownish(line))
+    return "\n".join(out_lines)
+
+
+def _format_inline_markdownish(text: str) -> str:
+    parts: list[str] = []
+    last_end = 0
+    for match in _BOLD_RE.finditer(text):
+        if match.start() > last_end:
+            parts.append(escape_markdown_v2(text[last_end:match.start()]))
+        parts.append(f"*{escape_markdown_v2(match.group(1))}*")
+        last_end = match.end()
+    if last_end < len(text):
+        parts.append(escape_markdown_v2(text[last_end:]))
+    return "".join(parts)
 
 
 def split_message(text: str, limit: int = 4096) -> list[str]:
@@ -34,15 +99,17 @@ class TelegramSender:
 
     def _send_one(self, text: str, parse_mode: str | None = None) -> int:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        data = {"chat_id": self.chat_id, "text": text}
-        if parse_mode is not None:
-            data["parse_mode"] = parse_mode
-
         last_exc: Exception | None = None
         attempts = 0
         while attempts < self.retry_max_attempts:
             try:
                 with httpx.Client(timeout=self.timeout) as c:
+                    payload = text
+                    if parse_mode == "MarkdownV2":
+                        payload = format_markdownish_for_telegram(text)
+                    data = {"chat_id": self.chat_id, "text": payload}
+                    if parse_mode is not None:
+                        data["parse_mode"] = parse_mode
                     r = c.post(url, data=data)
                     r.raise_for_status()
                     body = r.json()

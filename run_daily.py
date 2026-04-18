@@ -63,7 +63,7 @@ def _run(date_str: str) -> int:
     api_key = os.environ[cfg.llm.api_key_env]
     llm = LLMClient(
         endpoint=cfg.llm.endpoint, model=cfg.llm.model, api_key=api_key,
-        max_tokens=cfg.llm.max_tokens,
+        max_tokens=cfg.llm.max_tokens, timeout=cfg.llm.timeout,
         retry_max_attempts=cfg.retry.max_attempts,
         retry_backoff_seconds=cfg.retry.backoff_seconds,
     )

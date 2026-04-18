@@ -13,7 +13,7 @@ class LLMClient:
     model: str
     api_key: str
     max_tokens: int = 8000
-    timeout: float = 120.0
+    timeout: float = 300.0
     retry_max_attempts: int = 3
     retry_backoff_seconds: list = field(default_factory=lambda: [5, 15, 60])
 

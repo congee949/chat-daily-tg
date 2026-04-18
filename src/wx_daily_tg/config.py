@@ -20,6 +20,7 @@ class LLM(BaseModel):
     model: str
     api_key_env: str
     max_tokens: int = 8000
+    timeout: float = 300.0
 
 
 class Telegram(BaseModel):

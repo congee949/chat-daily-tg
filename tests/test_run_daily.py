@@ -61,3 +61,46 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     summary_path = tmp_path / "archive" / "2026" / "04" / "17" / "summary.md"
     assert summary_path.exists()
     assert "Detailed" in summary_path.read_text(encoding="utf-8")
+
+
+def test_run_daily_main_catches_exceptions_and_notifies(tmp_path, monkeypatch):
+    """If the pipeline raises, main() should log, notify, and return 1."""
+    import wx_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+
+    # Minimal config that will cause _run to fail (no such config file)
+    # Actually — we'll make _run raise by patching it directly
+    import run_daily
+    monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+
+    # Write a valid config (so load_config succeeds) but make _run raise
+    (tmp_path / "config.yaml").write_text(
+        """
+groups: [G1]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100, timeout: 30.0}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    from unittest.mock import patch, MagicMock
+
+    # Patch _run to raise an exception
+    with patch("run_daily._run", side_effect=RuntimeError("simulated pipeline failure")), \
+         patch("run_daily.notify_failure") as notify:
+        rc = run_daily.main(date_str="2026-04-17")
+
+    assert rc == 1
+    # Notifier should have been called with a failure title
+    assert notify.call_count == 1
+    call_kwargs = notify.call_args.kwargs if notify.call_args.kwargs else {}
+    # Accept either kwarg or positional
+    args = notify.call_args.args
+    title = call_kwargs.get("title") or (args[0] if args else "")
+    message = call_kwargs.get("message") or (args[1] if len(args) > 1 else "")
+    assert "wx-daily-tg 失败" in title
+    assert "RuntimeError" in message
+    assert "simulated pipeline failure" in message

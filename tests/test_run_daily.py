@@ -10,6 +10,10 @@ def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
 
     # Write a minimal config
     (tmp_path / "config.yaml").write_text(

@@ -78,6 +78,54 @@ def _run(date_str: str) -> int:
 
     (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
 
+    # 4.5. Persist opportunities
+    from datetime import datetime as _dt
+    from wx_daily_tg.db import PermanentDB, PermanentEntry
+    from wx_daily_tg.hot_leads import HotLead, append_day_leads, regenerate_latest
+    from wx_daily_tg.permanent_md import regenerate_permanent_md
+    from wx_daily_tg.paths import (
+        PERMANENT_JSONL, PERMANENT_MD, HOT_LEADS_DIR, HOT_LEADS_LATEST,
+    )
+
+    pdb = PermanentDB(PERMANENT_JSONL)
+    for i, add in enumerate(out.opportunities.get("permanent_additions", [])):
+        entry = PermanentEntry(
+            id=f"{date_str}-perm-{i:03d}",
+            captured_at=_dt.now().isoformat(),
+            source_group=add.get("source_group", ""),
+            source_sender=add.get("source_sender", ""),
+            category=add.get("category", "misc"),
+            type=add.get("type", "permanent"),
+            title=add.get("title", ""),
+            content=add.get("content", ""),
+            url=add.get("url"),
+            expires_at=add.get("expires_at"),
+            notes=add.get("notes"),
+        )
+        pdb.append(entry)
+        log.info("permanent add: %s", entry.title)
+
+    hot_leads_new: list[HotLead] = []
+    for i, add in enumerate(out.opportunities.get("hot_leads_additions", [])):
+        lead = HotLead(
+            id=f"{date_str}-hot-{i:03d}",
+            captured_at=date_str,
+            title=add.get("title", ""),
+            summary=add.get("summary", ""),
+            category=add.get("category", "arbitrage"),
+            source_group=add.get("source_group", ""),
+            source_sender=add.get("source_sender", ""),
+            status="alive",
+            risk_notes=add.get("risk_notes"),
+        )
+        hot_leads_new.append(lead)
+    append_day_leads(HOT_LEADS_DIR, date_str, hot_leads_new)
+    log.info("hot leads added: %d", len(hot_leads_new))
+
+    # Regenerate derived views
+    regenerate_permanent_md(PERMANENT_JSONL, PERMANENT_MD)
+    regenerate_latest(HOT_LEADS_DIR, HOT_LEADS_LATEST, retention_days=cfg.hot_leads.retention_days)
+
     bot_token = os.environ[cfg.telegram.bot_token_env]
     chat_id = os.environ[cfg.telegram.chat_id_env]
     tg = TelegramSender(

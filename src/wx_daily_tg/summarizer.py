@@ -11,14 +11,17 @@ class SummaryOutput:
     opportunities: dict
 
 
-_FENCE_RE = re.compile(r"```(\w+)\s+(\w+)\n(.*?)```", re.DOTALL)
+_FENCE_RE = re.compile(r"```(\w+)\s+(\w+)\r?\n(.*?)```", re.DOTALL)
 
 
 def parse_summary_output(text: str) -> SummaryOutput:
     """Parse the triple-fence LLM output into structured pieces.
 
     Expects fences in order: `markdown concise`, `markdown detailed`, `json opportunities`.
+    Normalizes CRLF/CR line endings to LF before parsing.
+    Raises ValueError on missing fences or malformed opportunities JSON.
     """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     fences = {}
     for m in _FENCE_RE.finditer(text):
         lang, tag, body = m.group(1), m.group(2), m.group(3).strip()
@@ -27,7 +30,10 @@ def parse_summary_output(text: str) -> SummaryOutput:
     for key in required:
         if key not in fences:
             raise ValueError(f"missing fence {key[0]} {key[1]}")
-    opportunities = json.loads(fences[("json", "opportunities")])
+    try:
+        opportunities = json.loads(fences[("json", "opportunities")])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"opportunities fence is not valid JSON: {exc}") from exc
     return SummaryOutput(
         concise_md=fences[("markdown", "concise")],
         detailed_md=fences[("markdown", "detailed")],

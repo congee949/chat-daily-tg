@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.apple.wx-daily-tg</string>
+    <string>com.wx-daily-tg.agent</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Users/Apple/projects/wx-daily-tg/venv/bin/python</string>

@@ -45,23 +45,25 @@ def test_send_long_message_splits_into_multiple_calls(httpx_mock: HTTPXMock):
     assert len(reqs) >= 3
 
 
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
 def test_send_raises_on_http_error(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url="https://api.telegram.org/bot-TOKEN-/sendMessage",
         method="POST",
         status_code=429,
     )
-    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_backoff_seconds=[0, 0, 0])
     with pytest.raises(httpx.HTTPStatusError):
         s.send("hello")
 
 
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
 def test_send_raises_on_ok_false(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url="https://api.telegram.org/bot-TOKEN-/sendMessage",
         method="POST",
         json={"ok": False, "description": "Bad Request: chat not found"},
     )
-    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_backoff_seconds=[0, 0, 0])
     with pytest.raises(RuntimeError, match="Telegram API error"):
         s.send("hello")

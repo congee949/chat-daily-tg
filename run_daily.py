@@ -11,6 +11,7 @@ from wx_daily_tg.llm_client import LLMClient
 from wx_daily_tg.paths import CONFIG_PATH
 from wx_daily_tg.summarizer import run_summary
 from wx_daily_tg.tg_sender import TelegramSender
+from wx_daily_tg.wx_exporter import export_group
 
 
 def yesterday_iso() -> str:
@@ -29,7 +30,6 @@ def main(date_str: str | None = None) -> int:
     groups_with_content: list[tuple[str, str]] = []
     for group in cfg.groups:
         out_path = archive_dir / f"{safe_filename(group)}.md"
-        from wx_daily_tg.wx_exporter import export_group
         try:
             result = export_group(
                 group_name=group, since=date_str, until=next_day, out_path=out_path,

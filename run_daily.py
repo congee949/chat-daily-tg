@@ -2,16 +2,21 @@
 from __future__ import annotations
 import argparse
 from datetime import date, timedelta
+import logging
 import os
 import sys
 
 from wx_daily_tg.archive import safe_filename, prepare_archive_day
 from wx_daily_tg.config import load_config
 from wx_daily_tg.llm_client import LLMClient
-from wx_daily_tg.paths import CONFIG_PATH
+from wx_daily_tg.logging_setup import configure_logging
+from wx_daily_tg.notifier import notify_failure
+from wx_daily_tg.paths import CONFIG_PATH, log_file_for
 from wx_daily_tg.summarizer import run_summary
 from wx_daily_tg.tg_sender import TelegramSender
 from wx_daily_tg.wx_exporter import export_group
+
+log = logging.getLogger("run_daily")
 
 
 def yesterday_iso() -> str:
@@ -21,11 +26,20 @@ def yesterday_iso() -> str:
 def main(date_str: str | None = None) -> int:
     if date_str is None:
         date_str = yesterday_iso()
+    configure_logging(log_file_for(date_str))
+    try:
+        return _run(date_str)
+    except Exception as e:
+        log.exception("pipeline failed: %s", e)
+        notify_failure("wx-daily-tg 失败", f"{type(e).__name__}: {e}\n日志: {log_file_for(date_str)}")
+        return 1
+
+
+def _run(date_str: str) -> int:
     next_day = (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
-
     cfg = load_config(CONFIG_PATH)
+    log.info("config loaded: %d groups, model=%s", len(cfg.groups), cfg.llm.model)
 
-    # 1. Export each group
     archive_dir = prepare_archive_day(date_str)
     groups_with_content: list[tuple[str, str]] = []
     for group in cfg.groups:
@@ -34,44 +48,47 @@ def main(date_str: str | None = None) -> int:
             result = export_group(
                 group_name=group, since=date_str, until=next_day, out_path=out_path,
             )
-            print(f"[export] {group}: {result.message_count} msgs → {out_path}")
+            log.info("exported %s: %d msgs", group, result.message_count)
         except Exception as e:
-            print(f"[export][WARN] {group}: {e}", file=sys.stderr)
+            log.warning("export failed for %s: %s", group, e)
             continue
         content = out_path.read_text(encoding="utf-8")
         if content.strip():
             groups_with_content.append((group, content))
 
     if not groups_with_content:
-        print("[run_daily] no content exported, aborting", file=sys.stderr)
+        log.error("no content exported, aborting")
         return 1
 
-    # 2. LLM summarize
     api_key = os.environ[cfg.llm.api_key_env]
     llm = LLMClient(
-        endpoint=cfg.llm.endpoint,
-        model=cfg.llm.model,
-        api_key=api_key,
+        endpoint=cfg.llm.endpoint, model=cfg.llm.model, api_key=api_key,
         max_tokens=cfg.llm.max_tokens,
+        retry_max_attempts=cfg.retry.max_attempts,
+        retry_backoff_seconds=cfg.retry.backoff_seconds,
     )
     detail_path = str(archive_dir / "summary.md")
+    log.info("calling LLM for summary…")
     out = run_summary(
-        llm_client=llm,
-        date=date_str,
-        groups_with_content=groups_with_content,
-        detail_path=detail_path,
+        llm_client=llm, date=date_str,
+        groups_with_content=groups_with_content, detail_path=detail_path,
     )
+    log.info("LLM returned: concise=%d chars, detailed=%d chars",
+             len(out.concise_md), len(out.detailed_md))
 
-    # 3. Write detailed archive
     (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
 
-    # 4. Push Telegram
     bot_token = os.environ[cfg.telegram.bot_token_env]
     chat_id = os.environ[cfg.telegram.chat_id_env]
-    tg = TelegramSender(bot_token=bot_token, chat_id=chat_id)
+    tg = TelegramSender(
+        bot_token=bot_token, chat_id=chat_id,
+        retry_max_attempts=cfg.retry.max_attempts,
+        retry_backoff_seconds=cfg.retry.backoff_seconds,
+    )
     tg.send(out.concise_md)
+    log.info("TG push complete")
 
-    print(f"[run_daily] ✓ complete for {date_str}")
+    log.info("✓ run_daily complete for %s", date_str)
     return 0
 
 

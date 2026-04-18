@@ -52,8 +52,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         tg_resp.raise_for_status = MagicMock()
         tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
 
-        from run_daily import main
-        rc = main(date_str="2026-04-17")
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
 
     # Verify archive file was written

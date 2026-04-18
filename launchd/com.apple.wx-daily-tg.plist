@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple.wx-daily-tg</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/Apple/projects/wx-daily-tg/venv/bin/python</string>
+        <string>/Users/Apple/projects/wx-daily-tg/run_daily.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/Apple/projects/wx-daily-tg</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/Apple/wx-daily/logs/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Apple/wx-daily/logs/stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>CLIPROXY_API_KEY</key>
+        <string>REPLACE_WITH_REAL_KEY</string>
+        <key>TG_BOT_TOKEN</key>
+        <string>REPLACE_WITH_REAL_TOKEN</string>
+        <key>TG_CHAT_ID</key>
+        <string>REPLACE_WITH_REAL_CHAT_ID</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# macOS
+.DS_Store
+
+# Local secrets / runtime
+.env
+*.log
+
+# Never commit real data
+/data/
+/output/

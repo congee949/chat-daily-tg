@@ -11,7 +11,7 @@ def test_safe_filename_keeps_chinese_and_emoji():
 
 
 def test_prepare_archive_day_creates_nested_dirs(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr("wx_daily_tg.archive.ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr("wx_daily_tg.paths.ARCHIVE_DIR", tmp_path / "archive")
     p = prepare_archive_day("2026-04-17")
     assert p == tmp_path / "archive" / "2026" / "04" / "17"
     assert p.is_dir()

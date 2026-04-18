@@ -68,10 +68,24 @@ def _run(date_str: str) -> int:
         retry_backoff_seconds=cfg.retry.backoff_seconds,
     )
     detail_path = str(archive_dir / "summary.md")
+    from wx_daily_tg.context_builder import (
+        active_permanent_summary, active_hot_leads_summary,
+    )
+    from wx_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR
+
+    perm_ctx = active_permanent_summary(PERMANENT_JSONL)
+    hot_ctx = active_hot_leads_summary(
+        HOT_LEADS_DIR, retention_days=cfg.hot_leads.retention_days,
+    )
+    log.info("LLM context: permanent=%d chars, hot_leads=%d chars",
+             len(perm_ctx), len(hot_ctx))
+
     log.info("calling LLM for summary…")
     out = run_summary(
         llm_client=llm, date=date_str,
         groups_with_content=groups_with_content, detail_path=detail_path,
+        active_permanent_summary=perm_ctx,
+        active_hot_leads_summary=hot_ctx,
     )
     log.info("LLM returned: concise=%d chars, detailed=%d chars",
              len(out.concise_md), len(out.detailed_md))

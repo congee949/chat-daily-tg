@@ -23,3 +23,19 @@ def test_regenerate_groups_by_category(tmp_path: Path):
     assert "Bitget invite" in text
     assert "恒生线上开户" in text
     assert "e1" in text
+
+
+def test_regenerate_escapes_pipe_in_title(tmp_path: Path):
+    db_path = tmp_path / "p.jsonl"
+    md_path = tmp_path / "p.md"
+    db = PermanentDB(db_path)
+    db.append(PermanentEntry(
+        id="e1", captured_at="2026-04-17", source_group="G", source_sender="A",
+        category="invite_code", type="permanent",
+        title="Plan A | Plan B", content="code|value",
+    ))
+    regenerate_permanent_md(db_path, md_path)
+    text = md_path.read_text(encoding="utf-8")
+    # Literal pipes should be escaped (\\|)
+    assert "Plan A \\| Plan B" in text
+    assert "code\\|value" in text

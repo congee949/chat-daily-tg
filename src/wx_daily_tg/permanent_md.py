@@ -4,6 +4,11 @@ from pathlib import Path
 from wx_daily_tg.db import PermanentDB
 
 
+def _esc(s: str) -> str:
+    """Escape pipe chars for markdown table cells."""
+    return str(s).replace("|", "\\|")
+
+
 CATEGORY_LABELS = {
     "invite_code": "邀请码 / 推荐码",
     "bank_product": "银行 / 金融产品",
@@ -30,11 +35,11 @@ def regenerate_permanent_md(db_path: Path, md_path: Path) -> None:
         for e in entries:
             status_icon = {"alive": "✅", "likely_dead": "⚠️", "dead": "💀", "unknown": "❓"}.get(e.status, "?")
             row = (
-                f"| {status_icon} {e.status} | {e.title} | {e.content} "
-                f"| {e.source_group} / {e.source_sender} | {e.captured_at} | `{e.id}` |"
+                f"| {status_icon} {e.status} | {_esc(e.title)} | {_esc(e.content)} "
+                f"| {_esc(e.source_group)} / {_esc(e.source_sender)} | {e.captured_at} | `{e.id}` |"
             )
             lines.append(row)
         lines.append("")
 
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.write_text("\n".join(lines), encoding="utf-8")
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

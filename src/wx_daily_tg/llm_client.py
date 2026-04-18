@@ -14,7 +14,7 @@ class LLMClient:
     def chat(self, prompt: str, system: str | None = None) -> tuple[str, dict]:
         """Single-turn completion. Returns (content, usage_dict)."""
         messages = []
-        if system:
+        if system is not None:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 

@@ -42,17 +42,17 @@ def append_day_leads(root: Path, date_str: str, leads: list[HotLead]) -> Path | 
 
     md_lines = [f"# {date_str} 热点板新增", ""]
     for lead in leads:
-        md_lines.extend([
+        block = [
             f"## {lead.title}",
             f"- 出处：{lead.source_group} / {lead.source_sender}",
             f"- 分类：{lead.category}",
             f"- 摘要：{lead.summary}",
             f"- 状态：{lead.status}",
-            f"- ID：`{lead.id}`",
-            "",
-        ])
+        ]
         if lead.risk_notes:
-            md_lines.insert(-1, f"- 风险：{lead.risk_notes}")
+            block.append(f"- 风险：{lead.risk_notes}")
+        block.extend([f"- ID：`{lead.id}`", ""])
+        md_lines.extend(block)
     md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     # JSONL

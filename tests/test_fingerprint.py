@@ -40,3 +40,37 @@ def test_extract_phones():
     assert "13812345678" in phones
     assert "15987654321" in phones
     assert "12345" not in phones
+
+
+def test_extract_urls_preserves_parenthesized_path():
+    t = "See https://en.wikipedia.org/wiki/Foo_(bar) for details"
+    urls = extract_urls(t)
+    assert "https://en.wikipedia.org/wiki/Foo_(bar)" in urls
+
+
+def test_extract_urls_cdn_blacklist_anchors_to_host():
+    # Legitimate URL containing 'emoji' in hostname should NOT be blocked
+    # (previous bare-substring blacklist would have blocked it)
+    t = "check https://emojipedia.org/face"
+    assert "https://emojipedia.org/face" in extract_urls(t)
+
+
+def test_extract_md5s_broad_tag_names():
+    xml = '<keymd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</keymd5>' \
+          '<imgmd5>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</imgmd5>' \
+          '<thumbmd5>cccccccccccccccccccccccccccccccc</thumbmd5>' \
+          '<videothumbmd5>dddddddddddddddddddddddddddddddd</videothumbmd5>'
+    md5s = extract_md5s(xml)
+    assert len(md5s) == 4
+    assert "a" * 32 in md5s
+    assert "d" * 32 in md5s
+
+
+def test_extract_invite_codes_referral_word_boundary():
+    # 'referralShopAbc123' in URL path should NOT extract "ShopAbc123"
+    url_text = "https://app.com/referralShopAbc123?x=1"
+    assert extract_invite_codes(url_text) == []
+
+    # but genuine 'referral ABC12345' should extract
+    real = "referral ABC12345 enjoy"
+    assert "ABC12345" in extract_invite_codes(real)

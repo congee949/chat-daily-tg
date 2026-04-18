@@ -136,6 +136,14 @@ def _run(date_str: str) -> int:
     append_day_leads(HOT_LEADS_DIR, date_str, hot_leads_new)
     log.info("hot leads added: %d", len(hot_leads_new))
 
+    from wx_daily_tg.death_signals import apply_death_signals as _apply_ds
+    n_updated = _apply_ds(
+        signals=out.opportunities.get("death_signals", []),
+        db_path=PERMANENT_JSONL,
+        hot_leads_root=HOT_LEADS_DIR,
+    )
+    log.info("death signals applied: %d", n_updated)
+
     # Regenerate derived views
     regenerate_permanent_md(PERMANENT_JSONL, PERMANENT_MD)
     regenerate_latest(HOT_LEADS_DIR, HOT_LEADS_LATEST, retention_days=cfg.hot_leads.retention_days)

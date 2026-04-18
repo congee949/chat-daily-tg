@@ -41,3 +41,24 @@ def test_short_text_not_deduped():
         {"group": "G2", "sender": "B", "time": "10:01", "content": "好的"},
     ]
     assert find_cross_group_dupes(msgs) == []
+
+
+def test_message_with_multiple_fingerprints_appears_in_each_group():
+    msgs = [
+        {"group": "G1", "sender": "A", "time": "10:00",
+         "content": "Visit https://x.com and call 13812345678"},
+        {"group": "G2", "sender": "B", "time": "10:05",
+         "content": "https://x.com is cool"},
+        {"group": "G3", "sender": "C", "time": "10:10",
+         "content": "Ring 13812345678 please"},
+    ]
+    groups = find_cross_group_dupes(msgs)
+    keys = {g.key.kind for g in groups}
+    assert "url" in keys
+    assert "phone" in keys
+    # The G1 message should appear in BOTH the url group (with G2) AND the phone group (with G3)
+    g1_msg = msgs[0]
+    url_group = next(g for g in groups if g.key.kind == "url")
+    phone_group = next(g for g in groups if g.key.kind == "phone")
+    assert g1_msg in url_group.messages
+    assert g1_msg in phone_group.messages

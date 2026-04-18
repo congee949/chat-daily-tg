@@ -13,7 +13,7 @@ class DedupKey:
     value: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class DupeGroup:
     key: DedupKey
     messages: list[dict]
@@ -27,6 +27,12 @@ def find_cross_group_dupes(messages: list[dict]) -> list[DupeGroup]:
     """Return list of DupeGroup where each group has messages from ≥2 distinct groups.
 
     Input message dicts must have keys: group, sender, time, content.
+
+    NOTE: A single message containing multiple fingerprint types (e.g., both a URL
+    and a phone number, where both appear in a message from another group) will
+    appear in multiple returned DupeGroup entries—one per matching key. Callers
+    that care about message-level uniqueness across the result set must dedupe
+    by message identity themselves.
     """
     key_to_msgs: dict[DedupKey, list[dict]] = {}
 

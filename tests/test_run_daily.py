@@ -88,6 +88,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     summary_path = tmp_path / "archive" / "2026" / "04" / "17" / "summary.md"
     assert summary_path.exists()
     assert "Detailed" in summary_path.read_text(encoding="utf-8")
+    concise_path = tmp_path / "archive" / "2026" / "04" / "17" / "concise.md"
+    assert concise_path.exists()
+    assert "Concise" in concise_path.read_text(encoding="utf-8")
 
 
 def test_run_daily_main_catches_exceptions_and_notifies(tmp_path, monkeypatch):

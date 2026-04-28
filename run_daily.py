@@ -127,6 +127,7 @@ def _run(date_str: str) -> int:
     log.info("LLM returned: concise=%d chars, detailed=%d chars",
              len(out.concise_md), len(out.detailed_md))
 
+    (archive_dir / "concise.md").write_text(out.concise_md, encoding="utf-8")
     (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
 
     # 4.5. Persist opportunities

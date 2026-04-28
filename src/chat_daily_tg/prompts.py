@@ -7,32 +7,38 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
 
 第一个 fence：
 ```markdown concise
-(给 Telegram 手机端用的精简版，≤1500 字)
+(给 Telegram 手机端用的精简版，≤1600 字)
 格式规则：
 - 只使用三种 markdown 结构：`### 标题`、`- 列表项`、`**加粗**`
 - 不要使用 `|` 表格（TG 不渲染）；有多个字段时写成竖向的 key: value 或多行
 - 不要使用 `1.` `2.` 有序列表，改用 `-`
-- 每条列表项尽量一行内写完，信息密度优先
+- 每条列表项尽量 1 行，最多 2 行；先给结论，再给判断/动作
 - 使用「形式 A」：不要按微信/Telegram分块，而是按信息价值统一排序
-- 每条重点必须在句末标来源：`（微信 / 群名 / HH:MM）` 或 `（Telegram / 群名 / HH:MM）`
-- 来源平台只能复制原始记录中每个来源块的「来源标签」，不要根据群名、聊天内容或工具名称猜测平台
-- 例如来源块写的是 `微信 / OpenCLI 交流群`，输出时必须仍写 `微信 / OpenCLI 交流群`，不能改成 Telegram
+- 使用 Emoji 做少量视觉分区，标题必须带 Emoji；列表项不要堆 Emoji
+- 每条重点必须在句末标短来源：`（群名 / HH:MM）`，不要写 `微信 /` 或 `Telegram /`
+- 如果同一条来自多个群，合并为：`（群A / HH:MM；群B / HH:MM）`
+- 来源群名只能使用每个来源块里的「精简来源标签」，不要根据内容猜测
+- 不要把来源尾注写得过长；需要 sender 时只在人物很关键时写：`（群名 / sender / HH:MM）`
 
 结构：
-### 今日总览
-(2-3 句话总述今天处理了哪些来源、整体信息密度和主话题)
+### 🌅 今日总览
+- 2-3 条短 bullet，总述今天最重要的主线、信息密度和行动优先级
 
-### 值得关注
-- **类型**：内容、判断和下一步（来源 / 群名 / 时间）
-- **类型**：内容、判断和下一步（来源 / 群名 / 时间）
+### 💰 钱 / 活动
+- **主题**：结论 + 是否值得做 + 风险/下一步（群名 / HH:MM）
 
-### 待验证
-- 需要验证的链接、兑换码、传闻、风控说法；没有就写“无明显待验证项”
+### 🧠 AI / 工具
+- **主题**：结论 + 是否值得关注 + 下一步（群名 / HH:MM）
 
-### 噪声与统计
-- 简述哪些来源闲聊/短回复/表情较多，以及哪些来源信息密度较高
+### ⚠️ 风险 / 待验证
+- 风控、诈骗、传闻、链接、兑换码、政策变化；没有就写“无明显待验证项”
 
-末尾附一行：详情：<path>
+### 🔗 资源
+- 只放 3-6 个最值得打开的链接或工具；没有就省略本节
+
+### 🧾 详情
+- 本地详细版：<path>
+
 ```
 
 第二个 fence：
@@ -118,7 +124,10 @@ def build_user_prompt(
     active_permanent_summary / active_hot_leads_summary: existing DB context for death-signal detection.
     """
     groups_block = "\n\n".join(
-        f"### === 来源: {name} ===\n\n来源标签：{name}\n\n{content}"
+        f"### === 来源: {name} ===\n\n"
+        f"完整来源标签：{name}\n"
+        f"精简来源标签：{concise_source_label(name)}\n\n"
+        f"{content}"
         for name, content in groups_with_content
     )
     context = ""
@@ -140,8 +149,17 @@ def build_user_prompt(
 
 ## 今日原始聊天记录
 
-说明：每个来源块的标题中已经标明来源，例如 `微信 / 群名` 或 `Telegram / 群名`。
-在精简版中不要分来源分块，但每条重点必须保留来源标签。
+说明：每个来源块的标题中已经标明完整来源，例如 `微信 / 群名` 或 `Telegram / 群名`。
+在精简版中不要分来源分块，每条重点末尾使用「精简来源标签 / 时间」，不要写平台名。
+在详细版中可以保留完整平台来源。
 
 {groups_block}
 """
+
+
+def concise_source_label(source_name: str) -> str:
+    """Return the group-only source label used in mobile summaries."""
+    parts = [p.strip() for p in source_name.split("/")]
+    if len(parts) >= 2 and parts[0] in {"微信", "Telegram"}:
+        return " / ".join(parts[1:]).strip()
+    return source_name.strip()

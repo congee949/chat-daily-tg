@@ -29,6 +29,55 @@ _HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+)$")
 _BULLET_RE = re.compile(r"^\s*-\s+(.+)$")
 
 
+def escape_html(text: str) -> str:
+    """Escape the three characters Telegram HTML parse mode treats as special."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_html_for_telegram(text: str) -> str:
+    """Convert simple markdown-ish summary text into Telegram-safe HTML.
+
+    Supports:
+    - `### Title` → `<b>Title</b>`
+    - `- item` → `• item`
+    - `**word**` → `<b>word</b>`
+    Everything else is HTML-escaped. Pipes, dots, parens, hyphens pass through
+    unchanged (unlike MarkdownV2), so pipe-separated lists stay readable.
+    """
+    out_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            out_lines.append("")
+            continue
+
+        heading = _HEADING_RE.match(line)
+        if heading:
+            out_lines.append(f"<b>{_format_inline_html(heading.group(1).strip())}</b>")
+            continue
+
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            out_lines.append(f"• {_format_inline_html(bullet.group(1).strip())}")
+            continue
+
+        out_lines.append(_format_inline_html(line))
+    return "\n".join(out_lines)
+
+
+def _format_inline_html(text: str) -> str:
+    parts: list[str] = []
+    last_end = 0
+    for match in _BOLD_RE.finditer(text):
+        if match.start() > last_end:
+            parts.append(escape_html(text[last_end:match.start()]))
+        parts.append(f"<b>{escape_html(match.group(1))}</b>")
+        last_end = match.end()
+    if last_end < len(text):
+        parts.append(escape_html(text[last_end:]))
+    return "".join(parts)
+
+
 def format_markdownish_for_telegram(text: str) -> str:
     """Convert simple markdown-ish summary text into Telegram-safe MarkdownV2.
 
@@ -107,6 +156,8 @@ class TelegramSender:
                     payload = text
                     if parse_mode == "MarkdownV2":
                         payload = format_markdownish_for_telegram(text)
+                    elif parse_mode == "HTML":
+                        payload = format_html_for_telegram(text)
                     data = {"chat_id": self.chat_id, "text": payload}
                     if parse_mode is not None:
                         data["parse_mode"] = parse_mode

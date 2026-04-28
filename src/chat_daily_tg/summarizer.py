@@ -50,7 +50,7 @@ def run_summary(
     active_hot_leads_summary: str = "",
 ) -> SummaryOutput:
     """Call LLM with summarization prompts and parse result."""
-    from wx_daily_tg.prompts import SUMMARIZER_SYSTEM, build_user_prompt
+    from chat_daily_tg.prompts import SUMMARIZER_SYSTEM, build_user_prompt
 
     user_prompt = build_user_prompt(
         date=date,

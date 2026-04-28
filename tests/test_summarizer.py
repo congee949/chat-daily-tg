@@ -1,5 +1,5 @@
 import pytest
-from wx_daily_tg.summarizer import parse_summary_output, SummaryOutput
+from chat_daily_tg.summarizer import parse_summary_output, SummaryOutput
 
 
 SAMPLE_OUTPUT = """```markdown concise
@@ -59,3 +59,13 @@ d
 ```"""
     with pytest.raises(ValueError, match="not valid JSON"):
         parse_summary_output(bad)
+
+
+def test_prompt_requires_unified_source_tagged_concise_output():
+    from chat_daily_tg.prompts import SUMMARIZER_SYSTEM
+
+    assert "形式 A" in SUMMARIZER_SYSTEM
+    assert "不要按微信/Telegram分块" in SUMMARIZER_SYSTEM
+    assert "每条重点必须" in SUMMARIZER_SYSTEM
+    assert "（微信 / 群名 / HH:MM）" in SUMMARIZER_SYSTEM
+    assert "（Telegram / 群名 / HH:MM）" in SUMMARIZER_SYSTEM

@@ -1,7 +1,7 @@
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.hot_leads import HotLead, append_day_leads, load_all_leads
-from wx_daily_tg.death_signals import apply_death_signals
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.hot_leads import HotLead, append_day_leads, load_all_leads
+from chat_daily_tg.death_signals import apply_death_signals
 
 
 def test_apply_high_confidence_marks_dead(tmp_path: Path):

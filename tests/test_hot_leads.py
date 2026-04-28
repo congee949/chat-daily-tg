@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.hot_leads import (
+from chat_daily_tg.hot_leads import (
     HotLead, append_day_leads, regenerate_latest, load_all_leads,
 )
 
@@ -67,7 +67,7 @@ def test_mark_lead_status_updates_jsonl(tmp_path: Path):
     )
     append_day_leads(tmp_path, "2026-04-17", [lead])
 
-    from wx_daily_tg.hot_leads import mark_lead_status
+    from chat_daily_tg.hot_leads import mark_lead_status
     updated = mark_lead_status(tmp_path, "lead-x", status="dead", death_signal="关门了")
     assert updated is True
 
@@ -79,6 +79,6 @@ def test_mark_lead_status_updates_jsonl(tmp_path: Path):
 
 
 def test_mark_lead_status_returns_false_if_not_found(tmp_path: Path):
-    from wx_daily_tg.hot_leads import mark_lead_status
+    from chat_daily_tg.hot_leads import mark_lead_status
     # No leads exist yet
     assert mark_lead_status(tmp_path, "nonexistent", status="dead") is False

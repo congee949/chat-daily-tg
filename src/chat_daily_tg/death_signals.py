@@ -1,8 +1,8 @@
 from __future__ import annotations
 import logging
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
-from wx_daily_tg.hot_leads import load_all_leads, mark_lead_status
+from chat_daily_tg.db import PermanentDB
+from chat_daily_tg.hot_leads import load_all_leads, mark_lead_status
 
 log = logging.getLogger(__name__)
 

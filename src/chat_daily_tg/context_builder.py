@@ -1,8 +1,8 @@
 from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
-from wx_daily_tg.hot_leads import load_all_leads
+from chat_daily_tg.db import PermanentDB
+from chat_daily_tg.hot_leads import load_all_leads
 
 
 def active_permanent_summary(db_path: Path, max_items: int = 50) -> str:

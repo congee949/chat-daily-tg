@@ -1,7 +1,7 @@
 [project]
-name = "wx-daily-tg"
+name = "chat-daily-tg"
 version = "0.1.0"
-description = "Daily WeChat group summary to Telegram via local LLM proxy"
+description = "Daily multi-source chat summary to Telegram with local archive"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",

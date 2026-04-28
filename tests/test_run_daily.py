@@ -3,9 +3,9 @@ from unittest.mock import patch, MagicMock
 
 
 def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
-    """Mock wx_exporter, llm, tg, and verify orchestrator ties them together."""
+    """Mock chat exporters, llm, tg, and verify orchestrator ties them together."""
     # Patch DATA_DIR to tmp
-    import wx_daily_tg.paths as paths
+    import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
@@ -18,7 +18,17 @@ def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
     # Write a minimal config
     (tmp_path / "config.yaml").write_text(
         """
-groups: [G1]
+sources:
+  wechat:
+    groups: [G1]
+  telegram:
+    enabled: true
+    db_path: "/tmp/tg.db"
+    sync_before_export: false
+    chats:
+      - id: "-1001"
+        name: "TG1"
+        limit: 50
 llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
 telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 """,
@@ -36,16 +46,19 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         "```"
     )
 
-    with patch("wx_daily_tg.wx_exporter.subprocess.run") as run, \
-         patch("wx_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
-         patch("wx_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
-        # wx subprocess writes a file at -o path
-        def fake_run(cmd, **kw):
-            i = cmd.index("-o")
-            Path(cmd[i+1]).parent.mkdir(parents=True, exist_ok=True)
-            Path(cmd[i+1]).write_text("# group export\nsample\n", encoding="utf-8")
-            return MagicMock(returncode=0, stdout="已导出 3 条消息", stderr="")
-        run.side_effect = fake_run
+    with patch("chat_daily_tg.wx_exporter.subprocess.run") as run, \
+         patch("run_daily.export_chat") as mock_export_chat, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        # wx writes markdown to stdout (no -o flag)
+        fake_stdout = "# group export\n\n> 导出 3 条消息\n\n### 2026-04-17 10:00\n\n**A**: hi\n"
+        run.return_value = MagicMock(returncode=0, stdout=fake_stdout, stderr="")
+        mock_export_chat.return_value = MagicMock(
+            group_name="TG1",
+            message_count=2,
+            skipped_count=1,
+            content="# Telegram: TG1\n\n[Telegram / TG1 / 10:00 / A] hello\n",
+        )
 
         # llm.chat returns (content, usage)
         mock_chat.return_value = (llm_content, {"total_tokens": 10})
@@ -61,9 +74,12 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
         rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
+        prompt = mock_chat.call_args.args[0]
+        assert "### === 群: 微信 / G1 ===" in prompt
+        assert "### === 群: Telegram / TG1 ===" in prompt
         assert len(tg_client_instance.post.call_args_list) == 1
         sent_data = tg_client_instance.post.call_args_list[0].kwargs.get("data", {})
-        assert sent_data["parse_mode"] == "MarkdownV2"
+        assert sent_data["parse_mode"] == "HTML"
 
     # Verify archive file was written
     summary_path = tmp_path / "archive" / "2026" / "04" / "17" / "summary.md"
@@ -73,7 +89,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 
 def test_run_daily_main_catches_exceptions_and_notifies(tmp_path, monkeypatch):
     """If the pipeline raises, main() should log, notify, and return 1."""
-    import wx_daily_tg.paths as paths
+    import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
@@ -109,6 +125,6 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     args = notify.call_args.args
     title = call_kwargs.get("title") or (args[0] if args else "")
     message = call_kwargs.get("message") or (args[1] if len(args) > 1 else "")
-    assert "wx-daily-tg 失败" in title
+    assert "chat-daily-tg 失败" in title
     assert "RuntimeError" in message
     assert "simulated pipeline failure" in message

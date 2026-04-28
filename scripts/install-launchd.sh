@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${CLIPROXY_API_KEY:?Set CLIPROXY_API_KEY env var before running}"
+: "${KIMI_API_KEY:?Set KIMI_API_KEY env var before running}"
 : "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN env var before running}"
 : "${TG_CHAT_ID:?Set TG_CHAT_ID env var before running}"
 
-PROJECT=/Users/Apple/projects/wx-daily-tg
-LABEL="com.wx-daily-tg.agent"
+PROJECT=/Users/Apple/Projects/chat-daily-tg
+LABEL="com.chat-daily-tg.agent"
 SRC="$PROJECT/launchd/${LABEL}.plist"
 DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/wx-daily/logs"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/chat-daily/logs"
 
 # Render plist with Python (safe against | or & in secrets)
 python3 - "$SRC" "$DST" <<'PY'
@@ -18,7 +18,7 @@ import os, sys, pathlib
 src, dst = sys.argv[1], sys.argv[2]
 text = pathlib.Path(src).read_text()
 for placeholder, envvar in [
-    ("REPLACE_WITH_REAL_KEY", "CLIPROXY_API_KEY"),
+    ("REPLACE_WITH_REAL_KEY", "KIMI_API_KEY"),
     ("REPLACE_WITH_REAL_TOKEN", "TG_BOT_TOKEN"),
     ("REPLACE_WITH_REAL_CHAT_ID", "TG_CHAT_ID"),
 ]:
@@ -35,4 +35,4 @@ launchctl load "$DST"
 
 echo "✓ launchd agent loaded: $DST"
 # grep with || true so missing match doesn't abort the script
-launchctl list | grep wx-daily-tg || true
+launchctl list | grep chat-daily-tg || true

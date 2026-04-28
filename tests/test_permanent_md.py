@@ -1,6 +1,6 @@
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.permanent_md import regenerate_permanent_md
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.permanent_md import regenerate_permanent_md
 
 
 def test_regenerate_groups_by_category(tmp_path: Path):

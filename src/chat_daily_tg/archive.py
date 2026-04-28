@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from wx_daily_tg.paths import archive_dir_for
+from chat_daily_tg.paths import archive_dir_for
 
 
 def safe_filename(name: str) -> str:

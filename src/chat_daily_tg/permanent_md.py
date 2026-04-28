@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
+from chat_daily_tg.db import PermanentDB
 
 
 def _esc(s: str) -> str:

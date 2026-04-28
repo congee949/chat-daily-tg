@@ -1,4 +1,4 @@
-# wx-daily-tg Implementation Plan
+# chat-daily-tg Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,16 +8,16 @@
 
 **Tech Stack:** Python 3.11+, `httpx` (HTTP client), `pyyaml` (config), `pydantic` (data validation), `tenacity` (retry), `pytest` (tests), launchd (scheduling), `wx-cli` (WeChat data), CLIProxyAPI (LLM proxy).
 
-**Spec reference:** `/Users/Apple/projects/wx-daily-tg/docs/specs/2026-04-18-design.md`
+**Spec reference:** `/Users/Apple/projects/chat-daily-tg/docs/specs/2026-04-18-design.md`
 
 ---
 
 ## Project File Structure
 
 ```
-/Users/Apple/projects/wx-daily-tg/
+/Users/Apple/projects/chat-daily-tg/
 ├── run_daily.py                        # Entry point (orchestrator)
-├── src/wx_daily_tg/
+├── src/chat_daily_tg/
 │   ├── __init__.py                     # Package marker
 │   ├── paths.py                        # Path constants (data dir, log dir, ...)
 │   ├── config.py                       # Load & validate config.yaml
@@ -52,16 +52,16 @@
 │   ├── test_hot_leads.py
 │   └── test_death_signals.py
 ├── launchd/
-│   └── com.apple.wx-daily-tg.plist
+│   └── com.apple.chat-daily-tg.plist
 ├── docs/
 │   ├── specs/2026-04-18-design.md
-│   └── plans/2026-04-18-wx-daily-tg.md  # this file
+│   └── plans/2026-04-18-chat-daily-tg.md  # this file
 ├── pyproject.toml
 ├── README.md
 └── .gitignore
 ```
 
-**Data directory (not in git):** `~/wx-daily/` — config.yaml, permanent.jsonl, permanent.md, hot-leads/, archive/, logs/
+**Data directory (not in git):** `~/chat-daily/` — config.yaml, permanent.jsonl, permanent.md, hot-leads/, archive/, logs/
 
 ---
 
@@ -72,26 +72,26 @@ Assumes: wx-cli already installed, codesign completed, `sudo wx init` run, 3 gro
 ### Task 0.0: Project scaffold + git init
 
 **Files:**
-- Create: `/Users/Apple/projects/wx-daily-tg/.gitignore`
-- Create: `/Users/Apple/projects/wx-daily-tg/pyproject.toml`
-- Create: `/Users/Apple/projects/wx-daily-tg/README.md`
-- Create: `/Users/Apple/projects/wx-daily-tg/src/wx_daily_tg/__init__.py`
-- Create: `/Users/Apple/projects/wx-daily-tg/tests/conftest.py` (empty)
+- Create: `/Users/Apple/projects/chat-daily-tg/.gitignore`
+- Create: `/Users/Apple/projects/chat-daily-tg/pyproject.toml`
+- Create: `/Users/Apple/projects/chat-daily-tg/README.md`
+- Create: `/Users/Apple/projects/chat-daily-tg/src/chat_daily_tg/__init__.py`
+- Create: `/Users/Apple/projects/chat-daily-tg/tests/conftest.py` (empty)
 
 - [ ] **Step 1: Initialize git repo and create Python project skeleton**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 git init
 python3 -m venv venv
 source venv/bin/activate
-mkdir -p src/wx_daily_tg tests/fixtures launchd
-touch src/wx_daily_tg/__init__.py tests/__init__.py tests/conftest.py
+mkdir -p src/chat_daily_tg tests/fixtures launchd
+touch src/chat_daily_tg/__init__.py tests/__init__.py tests/conftest.py
 ```
 
 - [ ] **Step 2: Write `.gitignore`**
 
-Create `/Users/Apple/projects/wx-daily-tg/.gitignore`:
+Create `/Users/Apple/projects/chat-daily-tg/.gitignore`:
 
 ```gitignore
 # Python
@@ -121,11 +121,11 @@ venv/
 
 - [ ] **Step 3: Write `pyproject.toml`**
 
-Create `/Users/Apple/projects/wx-daily-tg/pyproject.toml`:
+Create `/Users/Apple/projects/chat-daily-tg/pyproject.toml`:
 
 ```toml
 [project]
-name = "wx-daily-tg"
+name = "chat-daily-tg"
 version = "0.1.0"
 description = "Daily WeChat group summary to Telegram via local LLM proxy"
 requires-python = ">=3.11"
@@ -159,7 +159,7 @@ addopts = "-v --tb=short"
 - [ ] **Step 4: Install deps**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source venv/bin/activate
 pip install -e ".[dev]"
 ```
@@ -168,15 +168,15 @@ Expected: installs httpx, pyyaml, pydantic, tenacity, pytest without error.
 
 - [ ] **Step 5: Minimal README**
 
-Create `/Users/Apple/projects/wx-daily-tg/README.md`:
+Create `/Users/Apple/projects/chat-daily-tg/README.md`:
 
 ```markdown
-# wx-daily-tg
+# chat-daily-tg
 
 Daily WeChat group summary to Telegram via local CLIProxyAPI.
 
 See `docs/specs/2026-04-18-design.md` for design.
-See `docs/plans/2026-04-18-wx-daily-tg.md` for implementation plan.
+See `docs/plans/2026-04-18-chat-daily-tg.md` for implementation plan.
 
 ## Run
 
@@ -195,7 +195,7 @@ pytest
 - [ ] **Step 6: First commit**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 git add .gitignore pyproject.toml README.md src/ tests/ docs/
 git commit -m "chore: scaffold project with pyproject.toml and git"
 ```
@@ -282,7 +282,7 @@ source ~/.zshenv
 ```bash
 curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
   -d "chat_id=${TG_CHAT_ID}" \
-  -d "text=wx-daily-tg 配置检查通过"
+  -d "text=chat-daily-tg 配置检查通过"
 ```
 
 Expected: your Telegram app pings and shows the test message.
@@ -320,20 +320,20 @@ Expected: non-zero line count, confirms wx-cli still works.
 ### Task 1.1: Config loader with Pydantic validation
 
 **Files:**
-- Create: `src/wx_daily_tg/paths.py`
-- Create: `src/wx_daily_tg/config.py`
+- Create: `src/chat_daily_tg/paths.py`
+- Create: `src/chat_daily_tg/config.py`
 - Create: `tests/test_config.py`
-- Create: `~/wx-daily/config.yaml` (sample)
+- Create: `~/chat-daily/config.yaml` (sample)
 
 - [ ] **Step 1: Write path constants module**
 
-Create `src/wx_daily_tg/paths.py`:
+Create `src/chat_daily_tg/paths.py`:
 
 ```python
 from __future__ import annotations
 from pathlib import Path
 
-DATA_DIR = Path.home() / "wx-daily"
+DATA_DIR = Path.home() / "chat-daily"
 CONFIG_PATH = DATA_DIR / "config.yaml"
 PERMANENT_JSONL = DATA_DIR / "permanent.jsonl"
 PERMANENT_MD = DATA_DIR / "permanent.md"
@@ -366,7 +366,7 @@ Create `tests/test_config.py`:
 ```python
 from pathlib import Path
 import pytest
-from wx_daily_tg.config import Config, load_config
+from chat_daily_tg.config import Config, load_config
 
 
 def test_load_config_reads_yaml(tmp_path: Path):
@@ -417,16 +417,16 @@ def test_load_config_missing_groups_raises(tmp_path: Path):
 - [ ] **Step 3: Run tests, verify they fail**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source venv/bin/activate
 pytest tests/test_config.py -v
 ```
 
-Expected: FAIL — `ModuleNotFoundError: wx_daily_tg.config` or similar.
+Expected: FAIL — `ModuleNotFoundError: chat_daily_tg.config` or similar.
 
 - [ ] **Step 4: Implement config module**
 
-Create `src/wx_daily_tg/config.py`:
+Create `src/chat_daily_tg/config.py`:
 
 ```python
 from __future__ import annotations
@@ -502,8 +502,8 @@ Expected: 2 PASSED.
 - [ ] **Step 6: Create the real user config file**
 
 ```bash
-mkdir -p ~/wx-daily
-cat > ~/wx-daily/config.yaml <<'YAML'
+mkdir -p ~/chat-daily
+cat > ~/chat-daily/config.yaml <<'YAML'
 groups:
   - "贝利知识星球VIP群❤️"
   - "贝利知识星球VIP2️⃣群❤️"
@@ -543,7 +543,7 @@ If any group name came back different in Task 0.3, substitute that exact name he
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/wx_daily_tg/paths.py src/wx_daily_tg/config.py tests/test_config.py
+git add src/chat_daily_tg/paths.py src/chat_daily_tg/config.py tests/test_config.py
 git commit -m "feat(config): pydantic-validated YAML config loader"
 ```
 
@@ -552,7 +552,7 @@ git commit -m "feat(config): pydantic-validated YAML config loader"
 ### Task 1.2: wx-cli export wrapper
 
 **Files:**
-- Create: `src/wx_daily_tg/wx_exporter.py`
+- Create: `src/chat_daily_tg/wx_exporter.py`
 - Create: `tests/test_wx_exporter.py`
 
 - [ ] **Step 1: Write failing test using subprocess mock**
@@ -562,12 +562,12 @@ Create `tests/test_wx_exporter.py`:
 ```python
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from wx_daily_tg.wx_exporter import export_group
+from chat_daily_tg.wx_exporter import export_group
 
 
 def test_export_group_builds_correct_command(tmp_path: Path):
     out_path = tmp_path / "out.md"
-    with patch("wx_daily_tg.wx_exporter.subprocess.run") as run:
+    with patch("chat_daily_tg.wx_exporter.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0, stdout="已导出 42 条消息", stderr="")
         result = export_group(
             group_name="贝利VIP",
@@ -593,7 +593,7 @@ def test_export_group_builds_correct_command(tmp_path: Path):
 
 def test_export_group_nonzero_exit_raises(tmp_path: Path):
     out_path = tmp_path / "out.md"
-    with patch("wx_daily_tg.wx_exporter.subprocess.run") as run:
+    with patch("chat_daily_tg.wx_exporter.subprocess.run") as run:
         run.return_value = MagicMock(returncode=1, stdout="", stderr="group not found")
         import pytest
         with pytest.raises(RuntimeError, match="group not found"):
@@ -610,7 +610,7 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement wx_exporter module**
 
-Create `src/wx_daily_tg/wx_exporter.py`:
+Create `src/chat_daily_tg/wx_exporter.py`:
 
 ```python
 from __future__ import annotations
@@ -673,7 +673,7 @@ Expected: 2 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/wx_exporter.py tests/test_wx_exporter.py
+git add src/chat_daily_tg/wx_exporter.py tests/test_wx_exporter.py
 git commit -m "feat(wx_exporter): subprocess wrapper around wx export"
 ```
 
@@ -682,7 +682,7 @@ git commit -m "feat(wx_exporter): subprocess wrapper around wx export"
 ### Task 1.3: Archive writer (place exports under archive/YYYY/MM/DD/)
 
 **Files:**
-- Create: `src/wx_daily_tg/archive.py`
+- Create: `src/chat_daily_tg/archive.py`
 - Create: `tests/test_archive.py`
 
 - [ ] **Step 1: Write failing test**
@@ -691,7 +691,7 @@ Create `tests/test_archive.py`:
 
 ```python
 from pathlib import Path
-from wx_daily_tg.archive import safe_filename, prepare_archive_day
+from chat_daily_tg.archive import safe_filename, prepare_archive_day
 
 
 def test_safe_filename_replaces_slashes_and_colons():
@@ -703,7 +703,7 @@ def test_safe_filename_keeps_chinese_and_emoji():
 
 
 def test_prepare_archive_day_creates_nested_dirs(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr("wx_daily_tg.archive.ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr("chat_daily_tg.archive.ARCHIVE_DIR", tmp_path / "archive")
     p = prepare_archive_day("2026-04-17")
     assert p == tmp_path / "archive" / "2026" / "04" / "17"
     assert p.is_dir()
@@ -719,12 +719,12 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement archive module**
 
-Create `src/wx_daily_tg/archive.py`:
+Create `src/chat_daily_tg/archive.py`:
 
 ```python
 from __future__ import annotations
 from pathlib import Path
-from wx_daily_tg.paths import ARCHIVE_DIR, archive_dir_for
+from chat_daily_tg.paths import ARCHIVE_DIR, archive_dir_for
 
 
 def safe_filename(name: str) -> str:
@@ -754,7 +754,7 @@ Expected: 3 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/archive.py tests/test_archive.py
+git add src/chat_daily_tg/archive.py tests/test_archive.py
 git commit -m "feat(archive): safe filename + archive day directory helper"
 ```
 
@@ -763,7 +763,7 @@ git commit -m "feat(archive): safe filename + archive day directory helper"
 ### Task 1.4: LLM client (CLIProxyAPI via OpenAI-compat)
 
 **Files:**
-- Create: `src/wx_daily_tg/llm_client.py`
+- Create: `src/chat_daily_tg/llm_client.py`
 - Create: `tests/test_llm_client.py`
 
 - [ ] **Step 1: Write failing test using httpx mock**
@@ -774,7 +774,7 @@ Create `tests/test_llm_client.py`:
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
-from wx_daily_tg.llm_client import LLMClient
+from chat_daily_tg.llm_client import LLMClient
 
 
 def test_chat_completion_posts_correct_shape(httpx_mock: HTTPXMock):
@@ -813,7 +813,7 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement LLM client**
 
-Create `src/wx_daily_tg/llm_client.py`:
+Create `src/chat_daily_tg/llm_client.py`:
 
 ```python
 from __future__ import annotations
@@ -869,11 +869,11 @@ Expected: 1 PASSED.
 - [ ] **Step 5: Smoke-test against real CLIProxyAPI**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source venv/bin/activate
 python -c "
 import os
-from wx_daily_tg.llm_client import LLMClient
+from chat_daily_tg.llm_client import LLMClient
 c = LLMClient(
     endpoint='http://127.0.0.1:8317/v1',
     model='claude-sonnet-4-6',
@@ -891,7 +891,7 @@ Expected: prints a short Chinese reply and token usage with non-zero total_token
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/llm_client.py tests/test_llm_client.py
+git add src/chat_daily_tg/llm_client.py tests/test_llm_client.py
 git commit -m "feat(llm_client): CLIProxyAPI OpenAI-compat client"
 ```
 
@@ -900,7 +900,7 @@ git commit -m "feat(llm_client): CLIProxyAPI OpenAI-compat client"
 ### Task 1.5: Telegram sender (with 4096-char message splitting)
 
 **Files:**
-- Create: `src/wx_daily_tg/tg_sender.py`
+- Create: `src/chat_daily_tg/tg_sender.py`
 - Create: `tests/test_tg_sender.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -910,7 +910,7 @@ Create `tests/test_tg_sender.py`:
 ```python
 from pytest_httpx import HTTPXMock
 import pytest
-from wx_daily_tg.tg_sender import TelegramSender, split_message
+from chat_daily_tg.tg_sender import TelegramSender, split_message
 
 
 def test_split_message_short_returns_single_chunk():
@@ -963,7 +963,7 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement tg_sender**
 
-Create `src/wx_daily_tg/tg_sender.py`:
+Create `src/chat_daily_tg/tg_sender.py`:
 
 ```python
 from __future__ import annotations
@@ -1027,9 +1027,9 @@ Expected: 4 PASSED.
 ```bash
 python -c "
 import os
-from wx_daily_tg.tg_sender import TelegramSender
+from chat_daily_tg.tg_sender import TelegramSender
 s = TelegramSender(bot_token=os.environ['TG_BOT_TOKEN'], chat_id=os.environ['TG_CHAT_ID'])
-s.send('wx-daily-tg: tg_sender smoke test ✓')
+s.send('chat-daily-tg: tg_sender smoke test ✓')
 "
 ```
 
@@ -1038,7 +1038,7 @@ Expected: message arrives in your Telegram chat with the bot.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/tg_sender.py tests/test_tg_sender.py
+git add src/chat_daily_tg/tg_sender.py tests/test_tg_sender.py
 git commit -m "feat(tg_sender): Telegram Bot API client with message splitting"
 ```
 
@@ -1047,13 +1047,13 @@ git commit -m "feat(tg_sender): Telegram Bot API client with message splitting"
 ### Task 1.6: Prompts module (summarization prompt v1)
 
 **Files:**
-- Create: `src/wx_daily_tg/prompts.py`
+- Create: `src/chat_daily_tg/prompts.py`
 
 No unit tests — prompts are content, verified by smoke tests in Task 1.7.
 
 - [ ] **Step 1: Write prompts module**
 
-Create `src/wx_daily_tg/prompts.py`:
+Create `src/chat_daily_tg/prompts.py`:
 
 ```python
 from __future__ import annotations
@@ -1181,7 +1181,7 @@ def build_user_prompt(
 - [ ] **Step 2: Commit**
 
 ```bash
-git add src/wx_daily_tg/prompts.py
+git add src/chat_daily_tg/prompts.py
 git commit -m "feat(prompts): LLM summarization prompt v1"
 ```
 
@@ -1190,7 +1190,7 @@ git commit -m "feat(prompts): LLM summarization prompt v1"
 ### Task 1.7: Summarizer (parses LLM triple-fence output)
 
 **Files:**
-- Create: `src/wx_daily_tg/summarizer.py`
+- Create: `src/chat_daily_tg/summarizer.py`
 - Create: `tests/test_summarizer.py`
 
 - [ ] **Step 1: Write failing tests for parsing**
@@ -1198,7 +1198,7 @@ git commit -m "feat(prompts): LLM summarization prompt v1"
 Create `tests/test_summarizer.py`:
 
 ```python
-from wx_daily_tg.summarizer import parse_summary_output, SummaryOutput
+from chat_daily_tg.summarizer import parse_summary_output, SummaryOutput
 
 
 SAMPLE_OUTPUT = """```markdown concise
@@ -1247,7 +1247,7 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement summarizer**
 
-Create `src/wx_daily_tg/summarizer.py`:
+Create `src/chat_daily_tg/summarizer.py`:
 
 ```python
 from __future__ import annotations
@@ -1296,7 +1296,7 @@ def run_summary(
     active_hot_leads_summary: str = "",
 ) -> SummaryOutput:
     """Call LLM with summarization prompts and parse result."""
-    from wx_daily_tg.prompts import SUMMARIZER_SYSTEM, build_user_prompt
+    from chat_daily_tg.prompts import SUMMARIZER_SYSTEM, build_user_prompt
 
     user_prompt = build_user_prompt(
         date=date,
@@ -1320,7 +1320,7 @@ Expected: 2 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/summarizer.py tests/test_summarizer.py
+git add src/chat_daily_tg/summarizer.py tests/test_summarizer.py
 git commit -m "feat(summarizer): triple-fence LLM output parser + orchestration"
 ```
 
@@ -1345,12 +1345,12 @@ from datetime import date
 def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
     """Mock wx_exporter, llm, tg, and verify orchestrator ties them together."""
     # Patch DATA_DIR to tmp
-    import wx_daily_tg.paths as paths
+    import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
-    import wx_daily_tg.archive as archive
+    import chat_daily_tg.archive as archive
     monkeypatch.setattr(archive, "ARCHIVE_DIR", tmp_path / "archive")
 
     # Write a minimal config
@@ -1366,9 +1366,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     monkeypatch.setenv("TT", "fake")
     monkeypatch.setenv("TC", "123")
 
-    with patch("wx_daily_tg.wx_exporter.subprocess.run") as run, \
-         patch("wx_daily_tg.llm_client.httpx.Client") as llm_client_cls, \
-         patch("wx_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+    with patch("chat_daily_tg.wx_exporter.subprocess.run") as run, \
+         patch("chat_daily_tg.llm_client.httpx.Client") as llm_client_cls, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
         # wx subprocess
         run.return_value = MagicMock(returncode=0, stdout="已导出 3 条消息", stderr="")
         # llm returns a valid triple-fence
@@ -1414,22 +1414,22 @@ Expected: FAIL — `run_daily` module missing.
 
 - [ ] **Step 3: Implement orchestrator**
 
-Create `/Users/Apple/projects/wx-daily-tg/run_daily.py`:
+Create `/Users/Apple/projects/chat-daily-tg/run_daily.py`:
 
 ```python
-"""Entry point for wx-daily-tg. Run once per day at 08:00 local time."""
+"""Entry point for chat-daily-tg. Run once per day at 08:00 local time."""
 from __future__ import annotations
 import argparse
 from datetime import date, timedelta
 import os
 import sys
 
-from wx_daily_tg.archive import safe_filename, prepare_archive_day
-from wx_daily_tg.config import load_config
-from wx_daily_tg.llm_client import LLMClient
-from wx_daily_tg.paths import CONFIG_PATH
-from wx_daily_tg.summarizer import run_summary
-from wx_daily_tg.tg_sender import TelegramSender
+from chat_daily_tg.archive import safe_filename, prepare_archive_day
+from chat_daily_tg.config import load_config
+from chat_daily_tg.llm_client import LLMClient
+from chat_daily_tg.paths import CONFIG_PATH
+from chat_daily_tg.summarizer import run_summary
+from chat_daily_tg.tg_sender import TelegramSender
 
 
 def yesterday_iso() -> str:
@@ -1448,7 +1448,7 @@ def main(date_str: str | None = None) -> int:
     groups_with_content: list[tuple[str, str]] = []
     for group in cfg.groups:
         out_path = archive_dir / f"{safe_filename(group)}.md"
-        from wx_daily_tg.wx_exporter import export_group
+        from chat_daily_tg.wx_exporter import export_group
         try:
             result = export_group(
                 group_name=group, since=date_str, until=next_day, out_path=out_path,
@@ -1512,22 +1512,22 @@ Expected: 1 PASSED.
 - [ ] **Step 5: End-to-end smoke test on real data (2026-04-17)**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source venv/bin/activate
 python run_daily.py --date 2026-04-17
 ```
 
 Expected behaviors:
 - Prints `[export] 贝利知识星球VIP群❤️: N msgs → ...` for each group
-- Writes `~/wx-daily/archive/2026/04/17/<group>.md` for each group
-- Writes `~/wx-daily/archive/2026/04/17/summary.md` with detailed summary
+- Writes `~/chat-daily/archive/2026/04/17/<group>.md` for each group
+- Writes `~/chat-daily/archive/2026/04/17/summary.md` with detailed summary
 - Sends a Telegram message to `@Taoli98Bot` with concise summary
 - Exits 0
 
 Verify:
 
 ```bash
-ls -la ~/wx-daily/archive/2026/04/17/
+ls -la ~/chat-daily/archive/2026/04/17/
 ```
 
 - [ ] **Step 6: Commit**
@@ -1544,8 +1544,8 @@ git commit -m "feat(orchestrator): MVP run_daily pipeline with archive + TG push
 ### Task 2.1: Retry wrapper using tenacity
 
 **Files:**
-- Modify: `src/wx_daily_tg/llm_client.py` (add retry)
-- Modify: `src/wx_daily_tg/tg_sender.py` (add retry)
+- Modify: `src/chat_daily_tg/llm_client.py` (add retry)
+- Modify: `src/chat_daily_tg/tg_sender.py` (add retry)
 - Create: `tests/test_retry.py`
 
 - [ ] **Step 1: Write failing test for retry on 500**
@@ -1555,7 +1555,7 @@ Create `tests/test_retry.py`:
 ```python
 from pytest_httpx import HTTPXMock
 import pytest
-from wx_daily_tg.llm_client import LLMClient
+from chat_daily_tg.llm_client import LLMClient
 
 
 def test_llm_client_retries_on_500(httpx_mock: HTTPXMock):
@@ -1587,7 +1587,7 @@ Expected: FAIL — `LLMClient.__init__` takes no `retry_max_attempts`.
 
 - [ ] **Step 3: Add retry support to LLMClient**
 
-Modify `src/wx_daily_tg/llm_client.py`:
+Modify `src/chat_daily_tg/llm_client.py`:
 
 ```python
 from __future__ import annotations
@@ -1660,7 +1660,7 @@ class LLMClient:
         raise last_exc
 ```
 
-Similarly modify `src/wx_daily_tg/tg_sender.py`:
+Similarly modify `src/chat_daily_tg/tg_sender.py`:
 
 ```python
 from __future__ import annotations
@@ -1746,7 +1746,7 @@ Expected: all prior tests still pass (~15 tests).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/llm_client.py src/wx_daily_tg/tg_sender.py tests/test_retry.py
+git add src/chat_daily_tg/llm_client.py src/chat_daily_tg/tg_sender.py tests/test_retry.py
 git commit -m "feat(retry): tenacity-based retry for LLM and TG clients"
 ```
 
@@ -1755,7 +1755,7 @@ git commit -m "feat(retry): tenacity-based retry for LLM and TG clients"
 ### Task 2.2: macOS notifier
 
 **Files:**
-- Create: `src/wx_daily_tg/notifier.py`
+- Create: `src/chat_daily_tg/notifier.py`
 - Create: `tests/test_notifier.py`
 
 - [ ] **Step 1: Write failing test**
@@ -1764,17 +1764,17 @@ Create `tests/test_notifier.py`:
 
 ```python
 from unittest.mock import patch
-from wx_daily_tg.notifier import notify_failure
+from chat_daily_tg.notifier import notify_failure
 
 
 def test_notify_failure_calls_osascript():
-    with patch("wx_daily_tg.notifier.subprocess.run") as run:
-        notify_failure(title="wx-daily-tg 失败", message="pipeline 异常")
+    with patch("chat_daily_tg.notifier.subprocess.run") as run:
+        notify_failure(title="chat-daily-tg 失败", message="pipeline 异常")
         called = run.call_args[0][0]
         assert called[0] == "osascript"
         joined = " ".join(called)
         assert "display notification" in joined
-        assert "wx-daily-tg 失败" in joined
+        assert "chat-daily-tg 失败" in joined
         assert "pipeline 异常" in joined
 ```
 
@@ -1788,7 +1788,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement notifier**
 
-Create `src/wx_daily_tg/notifier.py`:
+Create `src/chat_daily_tg/notifier.py`:
 
 ```python
 from __future__ import annotations
@@ -1815,7 +1815,7 @@ Expected: 1 PASSED.
 - [ ] **Step 5: Live test**
 
 ```bash
-python -c "from wx_daily_tg.notifier import notify_failure; notify_failure('test', 'hello from wx-daily-tg')"
+python -c "from chat_daily_tg.notifier import notify_failure; notify_failure('test', 'hello from chat-daily-tg')"
 ```
 
 Expected: macOS notification banner appears briefly.
@@ -1823,7 +1823,7 @@ Expected: macOS notification banner appears briefly.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/notifier.py tests/test_notifier.py
+git add src/chat_daily_tg/notifier.py tests/test_notifier.py
 git commit -m "feat(notifier): macOS notification via osascript"
 ```
 
@@ -1832,12 +1832,12 @@ git commit -m "feat(notifier): macOS notification via osascript"
 ### Task 2.3: Logging setup + integrate into run_daily
 
 **Files:**
-- Create: `src/wx_daily_tg/logging_setup.py`
+- Create: `src/chat_daily_tg/logging_setup.py`
 - Modify: `run_daily.py`
 
 - [ ] **Step 1: Write logging setup**
 
-Create `src/wx_daily_tg/logging_setup.py`:
+Create `src/chat_daily_tg/logging_setup.py`:
 
 ```python
 from __future__ import annotations
@@ -1860,7 +1860,7 @@ def configure_logging(log_file: Path, level: int = logging.INFO) -> None:
 Modify `run_daily.py`:
 
 ```python
-"""Entry point for wx-daily-tg. Run once per day at 08:00 local time."""
+"""Entry point for chat-daily-tg. Run once per day at 08:00 local time."""
 from __future__ import annotations
 import argparse
 from datetime import date, timedelta
@@ -1868,14 +1868,14 @@ import logging
 import os
 import sys
 
-from wx_daily_tg.archive import safe_filename, prepare_archive_day
-from wx_daily_tg.config import load_config
-from wx_daily_tg.llm_client import LLMClient
-from wx_daily_tg.logging_setup import configure_logging
-from wx_daily_tg.notifier import notify_failure
-from wx_daily_tg.paths import CONFIG_PATH, log_file_for
-from wx_daily_tg.summarizer import run_summary
-from wx_daily_tg.tg_sender import TelegramSender
+from chat_daily_tg.archive import safe_filename, prepare_archive_day
+from chat_daily_tg.config import load_config
+from chat_daily_tg.llm_client import LLMClient
+from chat_daily_tg.logging_setup import configure_logging
+from chat_daily_tg.notifier import notify_failure
+from chat_daily_tg.paths import CONFIG_PATH, log_file_for
+from chat_daily_tg.summarizer import run_summary
+from chat_daily_tg.tg_sender import TelegramSender
 
 log = logging.getLogger("run_daily")
 
@@ -1892,7 +1892,7 @@ def main(date_str: str | None = None) -> int:
         return _run(date_str)
     except Exception as e:
         log.exception("pipeline failed: %s", e)
-        notify_failure("wx-daily-tg 失败", f"{type(e).__name__}: {e}\n日志: {log_file_for(date_str)}")
+        notify_failure("chat-daily-tg 失败", f"{type(e).__name__}: {e}\n日志: {log_file_for(date_str)}")
         return 1
 
 
@@ -1905,7 +1905,7 @@ def _run(date_str: str) -> int:
     groups_with_content: list[tuple[str, str]] = []
     for group in cfg.groups:
         out_path = archive_dir / f"{safe_filename(group)}.md"
-        from wx_daily_tg.wx_exporter import export_group
+        from chat_daily_tg.wx_exporter import export_group
         try:
             result = export_group(
                 group_name=group, since=date_str, until=next_day, out_path=out_path,
@@ -1967,7 +1967,7 @@ if __name__ == "__main__":
 python run_daily.py --date 2026-04-17
 ```
 
-Expected: log lines prefixed with timestamps; `~/wx-daily/logs/2026-04-17.log` file written.
+Expected: log lines prefixed with timestamps; `~/chat-daily/logs/2026-04-17.log` file written.
 
 - [ ] **Step 4: Test failure path**
 
@@ -1975,12 +1975,12 @@ Expected: log lines prefixed with timestamps; `~/wx-daily/logs/2026-04-17.log` f
 CLIPROXY_API_KEY="bad-key" python run_daily.py --date 2026-04-17
 ```
 
-Expected: pipeline fails, macOS notification banner appears, `~/wx-daily/logs/2026-04-17.log` has exception stacktrace, exit code 1.
+Expected: pipeline fails, macOS notification banner appears, `~/chat-daily/logs/2026-04-17.log` has exception stacktrace, exit code 1.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/logging_setup.py run_daily.py
+git add src/chat_daily_tg/logging_setup.py run_daily.py
 git commit -m "feat(logging): structured logging + failure notification path"
 ```
 
@@ -1989,12 +1989,12 @@ git commit -m "feat(logging): structured logging + failure notification path"
 ### Task 2.4: launchd plist + installer script
 
 **Files:**
-- Create: `launchd/com.apple.wx-daily-tg.plist`
+- Create: `launchd/com.apple.chat-daily-tg.plist`
 - Create: `scripts/install-launchd.sh`
 
 - [ ] **Step 1: Write plist template**
 
-Create `/Users/Apple/projects/wx-daily-tg/launchd/com.apple.wx-daily-tg.plist`:
+Create `/Users/Apple/projects/chat-daily-tg/launchd/com.apple.chat-daily-tg.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2002,14 +2002,14 @@ Create `/Users/Apple/projects/wx-daily-tg/launchd/com.apple.wx-daily-tg.plist`:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.apple.wx-daily-tg</string>
+    <string>com.apple.chat-daily-tg</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/Apple/projects/wx-daily-tg/venv/bin/python</string>
-        <string>/Users/Apple/projects/wx-daily-tg/run_daily.py</string>
+        <string>/Users/Apple/projects/chat-daily-tg/venv/bin/python</string>
+        <string>/Users/Apple/projects/chat-daily-tg/run_daily.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/Apple/projects/wx-daily-tg</string>
+    <string>/Users/Apple/projects/chat-daily-tg</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -2020,9 +2020,9 @@ Create `/Users/Apple/projects/wx-daily-tg/launchd/com.apple.wx-daily-tg.plist`:
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Users/Apple/wx-daily/logs/stdout.log</string>
+    <string>/Users/Apple/chat-daily/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/Apple/wx-daily/logs/stderr.log</string>
+    <string>/Users/Apple/chat-daily/logs/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -2040,7 +2040,7 @@ Create `/Users/Apple/projects/wx-daily-tg/launchd/com.apple.wx-daily-tg.plist`:
 
 - [ ] **Step 2: Write installer script that fills in secrets from env and deploys**
 
-Create `/Users/Apple/projects/wx-daily-tg/scripts/install-launchd.sh`:
+Create `/Users/Apple/projects/chat-daily-tg/scripts/install-launchd.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -2050,11 +2050,11 @@ set -euo pipefail
 : "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN env var before running}"
 : "${TG_CHAT_ID:?Set TG_CHAT_ID env var before running}"
 
-PROJECT=/Users/Apple/projects/wx-daily-tg
-SRC="$PROJECT/launchd/com.apple.wx-daily-tg.plist"
-DST="$HOME/Library/LaunchAgents/com.apple.wx-daily-tg.plist"
+PROJECT=/Users/Apple/projects/chat-daily-tg
+SRC="$PROJECT/launchd/com.apple.chat-daily-tg.plist"
+DST="$HOME/Library/LaunchAgents/com.apple.chat-daily-tg.plist"
 
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/wx-daily/logs"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/chat-daily/logs"
 
 # Render plist with secrets inlined
 sed \
@@ -2068,14 +2068,14 @@ launchctl unload "$DST" 2>/dev/null || true
 launchctl load "$DST"
 
 echo "✓ launchd agent loaded: $DST"
-launchctl list | grep wx-daily-tg
+launchctl list | grep chat-daily-tg
 ```
 
 - [ ] **Step 3: Make script executable, verify syntax**
 
 ```bash
-chmod +x /Users/Apple/projects/wx-daily-tg/scripts/install-launchd.sh
-bash -n /Users/Apple/projects/wx-daily-tg/scripts/install-launchd.sh
+chmod +x /Users/Apple/projects/chat-daily-tg/scripts/install-launchd.sh
+bash -n /Users/Apple/projects/chat-daily-tg/scripts/install-launchd.sh
 ```
 
 Expected: no output (syntax OK).
@@ -2083,20 +2083,20 @@ Expected: no output (syntax OK).
 - [ ] **Step 4: Run installer (loads launchd agent)**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source ~/.zshenv    # ensure env vars present
 ./scripts/install-launchd.sh
 ```
 
-Expected: prints `✓ launchd agent loaded` + a line like `- 0 com.apple.wx-daily-tg`.
+Expected: prints `✓ launchd agent loaded` + a line like `- 0 com.apple.chat-daily-tg`.
 
 - [ ] **Step 5: Trigger manually via launchctl to verify**
 
 ```bash
-launchctl start com.apple.wx-daily-tg
+launchctl start com.apple.chat-daily-tg
 # wait 30s
-ls -la ~/wx-daily/logs/
-cat ~/wx-daily/logs/stdout.log | tail -30
+ls -la ~/chat-daily/logs/
+cat ~/chat-daily/logs/stdout.log | tail -30
 ```
 
 Expected: log shows today's run (it will process yesterday's data), TG message arrives.
@@ -2104,7 +2104,7 @@ Expected: log shows today's run (it will process yesterday's data), TG message a
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 git add launchd/ scripts/
 git commit -m "feat(launchd): daily schedule via launchd + installer script"
 ```
@@ -2116,7 +2116,7 @@ git commit -m "feat(launchd): daily schedule via launchd + installer script"
 ### Task 3.1: Fingerprint extractors
 
 **Files:**
-- Create: `src/wx_daily_tg/fingerprint.py`
+- Create: `src/chat_daily_tg/fingerprint.py`
 - Create: `tests/test_fingerprint.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -2124,7 +2124,7 @@ git commit -m "feat(launchd): daily schedule via launchd + installer script"
 Create `tests/test_fingerprint.py`:
 
 ```python
-from wx_daily_tg.fingerprint import (
+from chat_daily_tg.fingerprint import (
     extract_urls, extract_invite_codes, extract_md5s, extract_phones,
 )
 
@@ -2178,7 +2178,7 @@ Expected: FAIL — module missing.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/fingerprint.py`:
+Create `src/chat_daily_tg/fingerprint.py`:
 
 ```python
 from __future__ import annotations
@@ -2240,7 +2240,7 @@ Expected: 5 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/fingerprint.py tests/test_fingerprint.py
+git add src/chat_daily_tg/fingerprint.py tests/test_fingerprint.py
 git commit -m "feat(fingerprint): URL/invite/MD5/phone extractors"
 ```
 
@@ -2249,7 +2249,7 @@ git commit -m "feat(fingerprint): URL/invite/MD5/phone extractors"
 ### Task 3.2: Cross-group deduplication
 
 **Files:**
-- Create: `src/wx_daily_tg/dedup.py`
+- Create: `src/chat_daily_tg/dedup.py`
 - Create: `tests/test_dedup.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -2257,7 +2257,7 @@ git commit -m "feat(fingerprint): URL/invite/MD5/phone extractors"
 Create `tests/test_dedup.py`:
 
 ```python
-from wx_daily_tg.dedup import find_cross_group_dupes, DedupKey
+from chat_daily_tg.dedup import find_cross_group_dupes, DedupKey
 
 
 def test_same_url_in_two_groups_is_dupe():
@@ -2312,14 +2312,14 @@ Expected: FAIL — module missing.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/dedup.py`:
+Create `src/chat_daily_tg/dedup.py`:
 
 ```python
 from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
-from wx_daily_tg.fingerprint import fingerprints_for
+from chat_daily_tg.fingerprint import fingerprints_for
 
 
 SHORT_TEXT_THRESHOLD = 30
@@ -2387,7 +2387,7 @@ Expected: 4 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/dedup.py tests/test_dedup.py
+git add src/chat_daily_tg/dedup.py tests/test_dedup.py
 git commit -m "feat(dedup): cross-group fingerprint + content-hash deduplication"
 ```
 
@@ -2396,7 +2396,7 @@ git commit -m "feat(dedup): cross-group fingerprint + content-hash deduplication
 ### Task 3.3: permanent.jsonl CRUD
 
 **Files:**
-- Create: `src/wx_daily_tg/db.py`
+- Create: `src/chat_daily_tg/db.py`
 - Create: `tests/test_db.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -2405,7 +2405,7 @@ Create `tests/test_db.py`:
 
 ```python
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.db import PermanentDB, PermanentEntry
 
 
 def test_append_and_read(tmp_path: Path):
@@ -2460,7 +2460,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/db.py`:
+Create `src/chat_daily_tg/db.py`:
 
 ```python
 from __future__ import annotations
@@ -2555,7 +2555,7 @@ Expected: 3 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/db.py tests/test_db.py
+git add src/chat_daily_tg/db.py tests/test_db.py
 git commit -m "feat(db): permanent.jsonl CRUD with rewrite-on-update"
 ```
 
@@ -2564,7 +2564,7 @@ git commit -m "feat(db): permanent.jsonl CRUD with rewrite-on-update"
 ### Task 3.4: permanent.md regeneration from JSONL
 
 **Files:**
-- Create: `src/wx_daily_tg/permanent_md.py`
+- Create: `src/chat_daily_tg/permanent_md.py`
 - Create: `tests/test_permanent_md.py`
 
 - [ ] **Step 1: Write failing test**
@@ -2573,8 +2573,8 @@ Create `tests/test_permanent_md.py`:
 
 ```python
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.permanent_md import regenerate_permanent_md
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.permanent_md import regenerate_permanent_md
 
 
 def test_regenerate_groups_by_category(tmp_path: Path):
@@ -2609,13 +2609,13 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/permanent_md.py`:
+Create `src/chat_daily_tg/permanent_md.py`:
 
 ```python
 from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
+from chat_daily_tg.db import PermanentDB
 
 
 CATEGORY_LABELS = {
@@ -2665,7 +2665,7 @@ Expected: 1 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/permanent_md.py tests/test_permanent_md.py
+git add src/chat_daily_tg/permanent_md.py tests/test_permanent_md.py
 git commit -m "feat(permanent_md): regenerate human-readable view from JSONL"
 ```
 
@@ -2674,7 +2674,7 @@ git commit -m "feat(permanent_md): regenerate human-readable view from JSONL"
 ### Task 3.5: Hot-leads board with 14-day roll-off
 
 **Files:**
-- Create: `src/wx_daily_tg/hot_leads.py`
+- Create: `src/chat_daily_tg/hot_leads.py`
 - Create: `tests/test_hot_leads.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -2684,7 +2684,7 @@ Create `tests/test_hot_leads.py`:
 ```python
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.hot_leads import (
+from chat_daily_tg.hot_leads import (
     HotLead, append_day_leads, regenerate_latest, load_all_leads,
 )
 
@@ -2754,7 +2754,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/hot_leads.py`:
+Create `src/chat_daily_tg/hot_leads.py`:
 
 ```python
 from __future__ import annotations
@@ -2911,7 +2911,7 @@ Expected: 4 PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/wx_daily_tg/hot_leads.py tests/test_hot_leads.py
+git add src/chat_daily_tg/hot_leads.py tests/test_hot_leads.py
 git commit -m "feat(hot_leads): day-file + latest aggregation with retention"
 ```
 
@@ -2931,10 +2931,10 @@ Open `run_daily.py` and insert before "# Push Telegram" block:
 ```python
     # 4.5. Persist opportunities
     from datetime import datetime as _dt
-    from wx_daily_tg.db import PermanentDB, PermanentEntry
-    from wx_daily_tg.hot_leads import HotLead, append_day_leads, regenerate_latest
-    from wx_daily_tg.permanent_md import regenerate_permanent_md
-    from wx_daily_tg.paths import (
+    from chat_daily_tg.db import PermanentDB, PermanentEntry
+    from chat_daily_tg.hot_leads import HotLead, append_day_leads, regenerate_latest
+    from chat_daily_tg.permanent_md import regenerate_permanent_md
+    from chat_daily_tg.paths import (
         PERMANENT_JSONL, PERMANENT_MD, HOT_LEADS_DIR, HOT_LEADS_LATEST,
     )
 
@@ -2995,10 +2995,10 @@ python run_daily.py --date 2026-04-17
 Expected:
 - Log shows `permanent add: <title>` entries
 - Log shows `hot leads added: N`
-- `~/wx-daily/permanent.jsonl` now has lines
-- `~/wx-daily/permanent.md` has tables
-- `~/wx-daily/hot-leads/2026/04/17.md` exists (if any hot leads)
-- `~/wx-daily/hot-leads/latest.md` exists with aggregated view
+- `~/chat-daily/permanent.jsonl` now has lines
+- `~/chat-daily/permanent.md` has tables
+- `~/chat-daily/hot-leads/2026/04/17.md` exists (if any hot leads)
+- `~/chat-daily/hot-leads/latest.md` exists with aggregated view
 
 - [ ] **Step 4: Commit**
 
@@ -3014,8 +3014,8 @@ git commit -m "feat: persist opportunities to permanent.jsonl + hot-leads board"
 ### Task 4.1: Extend prompt with active-opportunity context
 
 **Files:**
-- Modify: `src/wx_daily_tg/prompts.py` (already has context params)
-- Create: `src/wx_daily_tg/context_builder.py`
+- Modify: `src/chat_daily_tg/prompts.py` (already has context params)
+- Create: `src/chat_daily_tg/context_builder.py`
 - Create: `tests/test_context_builder.py`
 
 - [ ] **Step 1: Write failing test**
@@ -3025,9 +3025,9 @@ Create `tests/test_context_builder.py`:
 ```python
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.hot_leads import HotLead, append_day_leads
-from wx_daily_tg.context_builder import (
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.hot_leads import HotLead, append_day_leads
+from chat_daily_tg.context_builder import (
     active_permanent_summary, active_hot_leads_summary,
 )
 
@@ -3077,14 +3077,14 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/context_builder.py`:
+Create `src/chat_daily_tg/context_builder.py`:
 
 ```python
 from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
-from wx_daily_tg.hot_leads import load_all_leads
+from chat_daily_tg.db import PermanentDB
+from chat_daily_tg.hot_leads import load_all_leads
 
 
 def active_permanent_summary(db_path: Path, max_items: int = 50) -> str:
@@ -3142,10 +3142,10 @@ In `run_daily.py`, update the LLM call section. Find:
 Replace with:
 
 ```python
-    from wx_daily_tg.context_builder import (
+    from chat_daily_tg.context_builder import (
         active_permanent_summary, active_hot_leads_summary,
     )
-    from wx_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR
+    from chat_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR
 
     perm_ctx = active_permanent_summary(PERMANENT_JSONL)
     hot_ctx = active_hot_leads_summary(
@@ -3165,7 +3165,7 @@ Replace with:
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/context_builder.py tests/test_context_builder.py run_daily.py
+git add src/chat_daily_tg/context_builder.py tests/test_context_builder.py run_daily.py
 git commit -m "feat(context): pass active-opportunity summaries into LLM prompt"
 ```
 
@@ -3174,7 +3174,7 @@ git commit -m "feat(context): pass active-opportunity summaries into LLM prompt"
 ### Task 4.2: Apply LLM-returned death signals
 
 **Files:**
-- Create: `src/wx_daily_tg/death_signals.py`
+- Create: `src/chat_daily_tg/death_signals.py`
 - Create: `tests/test_death_signals.py`
 
 - [ ] **Step 1: Write failing tests**
@@ -3183,9 +3183,9 @@ Create `tests/test_death_signals.py`:
 
 ```python
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.hot_leads import HotLead, append_day_leads, load_all_leads
-from wx_daily_tg.death_signals import apply_death_signals
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.hot_leads import HotLead, append_day_leads, load_all_leads
+from chat_daily_tg.death_signals import apply_death_signals
 
 
 def test_apply_high_confidence_marks_dead(tmp_path: Path):
@@ -3262,14 +3262,14 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Create `src/wx_daily_tg/death_signals.py`:
+Create `src/chat_daily_tg/death_signals.py`:
 
 ```python
 from __future__ import annotations
 import logging
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB
-from wx_daily_tg.hot_leads import load_all_leads, mark_lead_status
+from chat_daily_tg.db import PermanentDB
+from chat_daily_tg.hot_leads import load_all_leads, mark_lead_status
 
 log = logging.getLogger(__name__)
 
@@ -3345,7 +3345,7 @@ Expected: 4 PASSED.
 In `run_daily.py`, after the `append_day_leads(...)` call and before the `regenerate_*` calls, insert:
 
 ```python
-    from wx_daily_tg.death_signals import apply_death_signals as _apply_ds
+    from chat_daily_tg.death_signals import apply_death_signals as _apply_ds
     n_updated = _apply_ds(
         signals=out.opportunities.get("death_signals", []),
         db_path=PERMANENT_JSONL,
@@ -3357,7 +3357,7 @@ In `run_daily.py`, after the `append_day_leads(...)` call and before the `regene
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wx_daily_tg/death_signals.py tests/test_death_signals.py run_daily.py
+git add src/chat_daily_tg/death_signals.py tests/test_death_signals.py run_daily.py
 git commit -m "feat(death_signals): mark permanent + hot-lead entries dead from LLM signals"
 ```
 
@@ -3375,7 +3375,7 @@ git commit -m "feat(death_signals): mark permanent + hot-lead entries dead from 
 Replace `README.md` with:
 
 ```markdown
-# wx-daily-tg
+# chat-daily-tg
 
 Daily WeChat group summary → Telegram bot, powered by local CLIProxyAPI.
 
@@ -3385,7 +3385,7 @@ Every morning at 08:00 (macOS launchd):
 1. Exports yesterday's messages from configured WeChat groups via `wx-cli`
 2. Summarizes via Claude (through local CLIProxyAPI, using your Claude Code subscription)
 3. Pushes concise summary to your Telegram bot
-4. Archives detailed summary + raw exports under `~/wx-daily/archive/YYYY/MM/DD/`
+4. Archives detailed summary + raw exports under `~/chat-daily/archive/YYYY/MM/DD/`
 5. Extracts long-term opportunities (invite codes, bank products) → `permanent.jsonl`
 6. Extracts short-term opportunities (arbitrage, bugs) → `hot-leads/` with 14-day rolloff
 7. Scans for death signals ("关门了" / "封了") to auto-mark dead items
@@ -3396,7 +3396,7 @@ Every morning at 08:00 (macOS launchd):
 2. Install & configure CLIProxyAPI, start it on `127.0.0.1:8317`
 3. Create Telegram bot via @BotFather, obtain token + your chat_id
 4. `pip install -e ".[dev]"` in project venv
-5. Configure `~/wx-daily/config.yaml` (list target groups)
+5. Configure `~/chat-daily/config.yaml` (list target groups)
 6. Export these env vars in `~/.zshenv`:
    - `CLIPROXY_API_KEY`
    - `TG_BOT_TOKEN`
@@ -3419,7 +3419,7 @@ pytest
 
 ## Upgrade model
 
-Edit `~/wx-daily/config.yaml` `llm.model` field. No code change. Validate:
+Edit `~/chat-daily/config.yaml` `llm.model` field. No code change. Validate:
 
 ```bash
 curl -s http://127.0.0.1:8317/v1/models \
@@ -3429,14 +3429,14 @@ curl -s http://127.0.0.1:8317/v1/models \
 
 ## Troubleshooting
 
-- No TG message: `tail -f ~/wx-daily/logs/*.log` — check for Telegram API errors
+- No TG message: `tail -f ~/chat-daily/logs/*.log` — check for Telegram API errors
 - Export empty: WeChat must be running + logged in when launchd fires. If Mac was asleep, launchd fires on wake.
 - Model not available: `/v1/models` should list it. Check CLIProxyAPI `config.yaml`.
 
 ## Data layout
 
 ```
-~/wx-daily/
+~/chat-daily/
 ├── config.yaml
 ├── permanent.jsonl
 ├── permanent.md
@@ -3454,7 +3454,7 @@ curl -s http://127.0.0.1:8317/v1/models \
 ## Design docs
 
 - Spec: `docs/specs/2026-04-18-design.md`
-- Plan: `docs/plans/2026-04-18-wx-daily-tg.md`
+- Plan: `docs/plans/2026-04-18-chat-daily-tg.md`
 ```
 
 - [ ] **Step 2: Commit**
@@ -3473,7 +3473,7 @@ git commit -m "docs: operator runbook README"
 - [ ] **Step 1: Clean run on yesterday to verify full pipeline**
 
 ```bash
-cd /Users/Apple/projects/wx-daily-tg
+cd /Users/Apple/projects/chat-daily-tg
 source venv/bin/activate
 python run_daily.py --date 2026-04-17
 ```
@@ -3486,7 +3486,7 @@ Expected:
 - [ ] **Step 2: Verify launchd agent will run tomorrow**
 
 ```bash
-launchctl list | grep wx-daily-tg
+launchctl list | grep chat-daily-tg
 ```
 
 Expected: one line, exit status 0 (means agent loaded OK).
@@ -3494,7 +3494,7 @@ Expected: one line, exit status 0 (means agent loaded OK).
 - [ ] **Step 3: Check next fire time**
 
 ```bash
-launchctl print gui/$(id -u)/com.apple.wx-daily-tg | grep -E "next|state"
+launchctl print gui/$(id -u)/com.apple.chat-daily-tg | grep -E "next|state"
 ```
 
 Expected: shows next scheduled time ~08:00 tomorrow.
@@ -3502,7 +3502,7 @@ Expected: shows next scheduled time ~08:00 tomorrow.
 - [ ] **Step 4: Review all paths populated**
 
 ```bash
-tree ~/wx-daily -L 3
+tree ~/chat-daily -L 3
 ```
 
 Expected: `config.yaml`, `permanent.*`, `hot-leads/latest.md`, `archive/2026/04/17/` all present.

@@ -1,6 +1,6 @@
 from pytest_httpx import HTTPXMock
 import pytest
-from wx_daily_tg.llm_client import LLMClient
+from chat_daily_tg.llm_client import LLMClient
 
 
 def test_llm_client_retries_on_500(httpx_mock: HTTPXMock):

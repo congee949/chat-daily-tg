@@ -1,7 +1,7 @@
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
-from wx_daily_tg.llm_client import LLMClient
+from chat_daily_tg.llm_client import LLMClient
 
 
 def test_chat_completion_posts_correct_shape(httpx_mock: HTTPXMock):

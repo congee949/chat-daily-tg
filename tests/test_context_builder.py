@@ -1,8 +1,8 @@
 from datetime import date, timedelta
 from pathlib import Path
-from wx_daily_tg.db import PermanentDB, PermanentEntry
-from wx_daily_tg.hot_leads import HotLead, append_day_leads
-from wx_daily_tg.context_builder import (
+from chat_daily_tg.db import PermanentDB, PermanentEntry
+from chat_daily_tg.hot_leads import HotLead, append_day_leads
+from chat_daily_tg.context_builder import (
     active_permanent_summary, active_hot_leads_summary,
 )
 

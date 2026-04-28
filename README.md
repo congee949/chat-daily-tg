@@ -31,6 +31,7 @@
 ├── config.yaml
 ├── permanent.jsonl
 ├── permanent.md
+├── repeat_topics.jsonl
 ├── hot-leads/
 ├── archive/
 └── logs/
@@ -41,6 +42,7 @@
 - `archive/` 里是每天的原始导出和详细总结
 - `hot-leads/` 里是最近 14 天内还活着的短期机会
 - `permanent.jsonl` / `permanent.md` 是长期机会库
+- `repeat_topics.jsonl` 是近 7 天重复话题库，用于把旧闻降权
 - `logs/` 里是运行日志
 
 ## 运行前准备
@@ -48,8 +50,8 @@
 你需要先准备好这几样东西：
 
 1. 微信聊天导出能力
-2. 已登录的 `tg-cli`（Telegram 来源使用它的本地 SQLite）
-3. 可用的大模型接口（默认使用 DeepSeek 官方 API）
+2. 已登录的 [`tg-cli`](https://github.com/public-clis/tg-cli)（Telegram 来源使用它的本地 SQLite）
+3. 可用的大模型接口（默认使用 [DeepSeek API](https://api-docs.deepseek.com/)）
 4. Telegram 机器人和 chat id
 
 环境变量示例：
@@ -134,30 +136,6 @@ cd /Users/Apple/Projects/chat-daily-tg
 source .venv/bin/activate
 pytest -v
 ```
-
-## Research loop
-
-如果要像 `autoresearch` 一样长期做可记录实验，可以用本仓库的 research loop。
-
-第一阶段不需要任何 API key，只用 fixture 和保存的样例输出验证解析、Telegram 渲染和结果记录：
-
-```bash
-python scripts/research_loop.py \
-  --experiment-id offline-sample-html \
-  --sample-output tests/fixtures/summary_output_sample.txt \
-  --parse-mode HTML
-```
-
-真实模型实验默认也只是 dry-run，不会发送 Telegram。详细说明见 `docs/research-loop.md`。
-
-## 现在已经解决的问题
-
-- Telegram 发送时改成了真正适合 Telegram 的格式
-- 微信和 Telegram 群消息会合并成同一份日报
-- 手机端按信息价值统一排序，每条重点标注来源
-- 不再把标题和加粗原样显示成 `###`、`**`
-- 发送失败时会重试
-- 每次运行后会把详细版落到本地
 
 ## 常见问题
 

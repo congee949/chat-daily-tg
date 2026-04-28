@@ -113,6 +113,7 @@ def test_prompt_requires_unified_source_tagged_concise_output():
     assert "### 💰 钱 / 活动" in SUMMARIZER_SYSTEM
     assert "### 🧠 AI / 工具" in SUMMARIZER_SYSTEM
     assert "### ⚠️ 风险 / 待验证" in SUMMARIZER_SYSTEM
+    assert "### 🔁 重复 / 旧闻" in SUMMARIZER_SYSTEM
 
 
 def test_build_user_prompt_includes_group_only_concise_source_label():

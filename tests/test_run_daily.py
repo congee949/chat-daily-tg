@@ -138,3 +138,96 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert "chat-daily-tg 失败" in title
     assert "RuntimeError" in message
     assert "simulated pipeline failure" in message
+
+
+def test_run_daily_adds_vision_markdown_to_summary_prompt(tmp_path, monkeypatch):
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+models:
+  summary: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+  vision:
+    enabled: true
+    endpoint: "http://vision"
+    model: "vision"
+    api_key_env: "VK"
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("VK", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+
+    from chat_daily_tg.media import MediaCandidate
+    from chat_daily_tg.vision import VisionAnalysis
+
+    candidate = MediaCandidate(
+        platform="微信",
+        group_name="G1",
+        timestamp="2026-04-17 10:00",
+        sender_name="A",
+        media_type="图片",
+        local_path="/tmp/a.png",
+        context="活动入口截图",
+        reason="高价值",
+        score=0.9,
+    )
+    analysis = VisionAnalysis(
+        candidate=candidate,
+        type="activity_poster",
+        value_score=0.8,
+        summary="图片里是活动入口",
+        key_facts=["满减活动"],
+        risk_flags=[],
+        should_include_in_daily=True,
+        reason="有活动信息",
+    )
+    llm_content = (
+        "```markdown concise\nConcise\n```\n\n"
+        "```markdown detailed\nDetailed\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("run_daily.analyze_media_candidates", return_value=[analysis]), \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1",
+            message_count=1,
+            content="# group\nmessage",
+            media_candidates=[candidate],
+        )
+        mock_chat.return_value = (llm_content, {"total_tokens": 10})
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        rc = run_daily.main(date_str="2026-04-17")
+
+    assert rc == 0
+    prompt = mock_chat.call_args.args[0]
+    assert "### === 来源: 图片理解 / 多来源 ===" in prompt
+    assert "图片里是活动入口" in prompt
+    assert (tmp_path / "archive" / "2026" / "04" / "17" / "vision.md").exists()

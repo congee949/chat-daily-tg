@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 from zoneinfo import ZoneInfo
+from chat_daily_tg.media import MediaCandidate, extract_telegram_media_candidates
 
 
 TG_BINARY = "tg"
@@ -21,6 +22,7 @@ class ExportResult:
     message_count: int
     content: str
     skipped_count: int = 0
+    media_candidates: list[MediaCandidate] | None = None
 
 
 _EMOJI_OR_SHORT_RE = re.compile(r"^[\W_]{1,8}$", re.UNICODE)
@@ -59,6 +61,7 @@ def export_chat(
         until=until,
         limit=limit,
     )
+    media_candidates = extract_telegram_media_candidates(rows, fallback_chat_name=chat_name)
     content_lines: list[str] = [f"# Telegram: {chat_name}", "", f"> 导出 {len(rows)} 条消息", ""]
     kept = 0
     skipped = 0
@@ -81,6 +84,7 @@ def export_chat(
         message_count=kept,
         content=content,
         skipped_count=skipped,
+        media_candidates=media_candidates,
     )
 
 

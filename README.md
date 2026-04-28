@@ -58,6 +58,7 @@
 
 ```bash
 export DEEPSEEK_API_KEY="..."
+export VISION_API_KEY="..."   # 可选：启用图片理解时需要
 export TG_BOT_TOKEN="..."
 export TG_CHAT_ID="..."
 ```
@@ -96,23 +97,31 @@ sources:
         name: "<telegram-chat-name>"
         limit: 500
 
-llm:
-  endpoint: "https://api.deepseek.com"
-  model: "deepseek-v4-pro"
-  api_key_env: "DEEPSEEK_API_KEY"
-  max_tokens: 12000
-  timeout: 600.0
-  extra_body:
-    reasoning_effort: "max"
-    thinking:
-      type: "enabled"
+models:
+  summary:
+    endpoint: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    api_key_env: "DEEPSEEK_API_KEY"
+    max_tokens: 12000
+    timeout: 600.0
+    extra_body:
+      reasoning_effort: "max"
+      thinking:
+        type: "enabled"
+  vision:
+    enabled: false
+    endpoint: "<openai-compatible-vision-endpoint>"
+    model: "<vision-model>"
+    api_key_env: "VISION_API_KEY"
 
 telegram:
   bot_token_env: "TG_BOT_TOKEN"
   chat_id_env: "TG_CHAT_ID"
 ```
 
-旧版顶层 `groups:` 仍可读取，会自动当作 `sources.wechat.groups`。
+旧版顶层 `groups:` 仍可读取，会自动当作 `sources.wechat.groups`。旧版 `llm:` 也仍可读取，会自动当作 `models.summary`。
+
+图片理解是可选功能。开启 `models.vision.enabled` 后，脚本会先用聊天上下文筛选可能有价值的图片，再把有本地路径且通过预筛的图片交给多模态模型。图片理解结果会作为额外来源进入日报；失败时只记录 warning，不影响文本日报发送。
 
 ## 手动运行
 

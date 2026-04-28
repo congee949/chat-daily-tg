@@ -11,10 +11,12 @@ from chat_daily_tg.config import load_config
 from chat_daily_tg.env import load_env_file
 from chat_daily_tg.llm_client import LLMClient
 from chat_daily_tg.logging_setup import configure_logging
+from chat_daily_tg.media import media_markdown, write_media_candidates
 from chat_daily_tg.notifier import notify_failure
 from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR, log_file_for
 from chat_daily_tg.summarizer import run_summary
 from chat_daily_tg.tg_sender import TelegramSender
+from chat_daily_tg.vision import VisionClient, analyze_media_candidates, vision_markdown, write_vision_analyses
 from chat_daily_tg.wx_exporter import export_group
 from chat_daily_tg.telegram_exporter import export_chat
 from chat_daily_tg.sanitize import sanitize_for_llm
@@ -46,11 +48,12 @@ def _run(date_str: str) -> int:
         "config loaded: wechat=%d telegram=%d model=%s",
         len(cfg.sources.wechat.groups),
         len(cfg.sources.telegram.chats) if cfg.sources.telegram.enabled else 0,
-        cfg.llm.model,
+        cfg.models.summary.model,
     )
 
     archive_dir = prepare_archive_day(date_str)
     groups_with_content: list[tuple[str, str]] = []
+    media_candidates = []
     for group in cfg.sources.wechat.groups:
         out_path = archive_dir / f"wechat-{safe_filename(group)}.md"
         try:
@@ -64,6 +67,7 @@ def _run(date_str: str) -> int:
         if result.content.strip():
             content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
             groups_with_content.append((f"微信 / {group}", content))
+        media_candidates.extend(getattr(result, "media_candidates", None) or [])
 
     if cfg.sources.telegram.enabled:
         for chat in cfg.sources.telegram.chats:
@@ -91,18 +95,43 @@ def _run(date_str: str) -> int:
             if result.content.strip():
                 content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
                 groups_with_content.append((f"Telegram / {chat.name}", content))
+            media_candidates.extend(getattr(result, "media_candidates", None) or [])
 
     if not groups_with_content:
         log.error("no content exported, aborting")
         return 1
 
-    api_key = os.environ[cfg.llm.api_key_env]
+    write_media_candidates(archive_dir / "media_candidates.jsonl", media_candidates)
+    (archive_dir / "media_candidates.md").write_text(media_markdown(media_candidates), encoding="utf-8")
+    log.info("media candidates: %d", len(media_candidates))
+
+    if cfg.models.vision and cfg.models.vision.enabled:
+        try:
+            vision_api_key = os.environ[cfg.models.vision.api_key_env]
+            vision_client = VisionClient(
+                endpoint=cfg.models.vision.endpoint,
+                model=cfg.models.vision.model,
+                api_key=vision_api_key,
+                timeout=cfg.models.vision.timeout,
+            )
+            analyses = analyze_media_candidates(client=vision_client, candidates=media_candidates)
+            write_vision_analyses(archive_dir / "vision.jsonl", analyses)
+            vision_md = vision_markdown(analyses)
+            (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")
+            if vision_md.strip():
+                groups_with_content.append(("图片理解 / 多来源", vision_md))
+            log.info("vision analyses included: %d", len(analyses))
+        except Exception as e:
+            log.warning("vision analysis skipped: %s", e)
+
+    summary_model = cfg.models.summary
+    api_key = os.environ[summary_model.api_key_env]
     llm = LLMClient(
-        endpoint=cfg.llm.endpoint, model=cfg.llm.model, api_key=api_key,
-        max_tokens=cfg.llm.max_tokens, timeout=cfg.llm.timeout,
+        endpoint=summary_model.endpoint, model=summary_model.model, api_key=api_key,
+        max_tokens=summary_model.max_tokens, timeout=summary_model.timeout,
         retry_max_attempts=cfg.retry.max_attempts,
         retry_backoff_seconds=cfg.retry.backoff_seconds,
-        extra_body=cfg.llm.extra_body,
+        extra_body=summary_model.extra_body,
     )
     detail_path = str(archive_dir / "summary.md")
     from chat_daily_tg.context_builder import (

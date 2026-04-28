@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from chat_daily_tg.media import MediaCandidate, extract_wx_media_candidates
 
 
 WX_BINARY = shutil.which("wx") or "/opt/homebrew/bin/wx"
@@ -15,6 +16,7 @@ class ExportResult:
     out_path: Path
     message_count: int
     content: str
+    media_candidates: list[MediaCandidate] | None = None
 
 
 _TS_HEADER = r"### \d{4}-\d{2}-\d{2} \d{2}:\d{2}"
@@ -74,10 +76,12 @@ def export_group(
     raw = proc.stdout
     m = _COUNT_RE.search(raw)
     count = int(m.group(1)) if m else 0
+    media_candidates = extract_wx_media_candidates(raw, group_name=group_name)
     cleaned = clean_wx_markdown(raw)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(cleaned, encoding="utf-8")
     return ExportResult(
         group_name=group_name, out_path=out_path,
         message_count=count, content=cleaned,
+        media_candidates=media_candidates,
     )

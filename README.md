@@ -57,8 +57,6 @@
 环境变量示例：
 
 ```bash
-export CLIPROXY_API_KEY="..."
-export CPA_API_KEY="..."
 export DEEPSEEK_API_KEY="..."
 export TG_BOT_TOKEN="..."
 export TG_CHAT_ID="..."
@@ -88,15 +86,14 @@ export TG_CHAT_ID="..."
 sources:
   wechat:
     groups:
-      - "微信群 A"
-      - "微信群 B"
+      - "<wechat-group-name>"
   telegram:
     enabled: true
     db_path: "~/Library/Application Support/tg-cli/messages.db"
     sync_before_export: true
     chats:
-      - id: "-100xxxxxxxxxx"
-        name: "Telegram 群 A"
+      - id: "<telegram-chat-id>"
+        name: "<telegram-chat-name>"
         limit: 500
 
 llm:

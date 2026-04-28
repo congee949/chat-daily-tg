@@ -6,11 +6,11 @@
     <string>com.chat-daily-tg.agent</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/Apple/Projects/chat-daily-tg/venv/bin/python</string>
-        <string>/Users/Apple/Projects/chat-daily-tg/run_daily.py</string>
+        <string>REPLACE_WITH_PROJECT_DIR/.venv/bin/python</string>
+        <string>REPLACE_WITH_PROJECT_DIR/run_daily.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/Apple/Projects/chat-daily-tg</string>
+    <string>REPLACE_WITH_PROJECT_DIR</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -21,9 +21,9 @@
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Users/Apple/chat-daily/logs/stdout.log</string>
+    <string>REPLACE_WITH_DATA_DIR/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/Apple/chat-daily/logs/stderr.log</string>
+    <string>REPLACE_WITH_DATA_DIR/logs/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

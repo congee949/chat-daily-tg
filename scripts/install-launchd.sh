@@ -5,12 +5,14 @@ set -euo pipefail
 : "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN env var before running}"
 : "${TG_CHAT_ID:?Set TG_CHAT_ID env var before running}"
 
-PROJECT=/Users/Apple/Projects/chat-daily-tg
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+DATA_DIR="${CHAT_DAILY_DATA_DIR:-$HOME/chat-daily}"
+export PROJECT DATA_DIR
 LABEL="com.chat-daily-tg.agent"
 SRC="$PROJECT/launchd/${LABEL}.plist"
 DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/chat-daily/logs"
+mkdir -p "$HOME/Library/LaunchAgents" "$DATA_DIR/logs"
 
 # Render plist with Python (safe against | or & in secrets)
 python3 - "$SRC" "$DST" <<'PY'
@@ -23,6 +25,8 @@ for placeholder, envvar in [
     ("REPLACE_WITH_REAL_CHAT_ID", "TG_CHAT_ID"),
 ]:
     text = text.replace(placeholder, os.environ[envvar])
+text = text.replace("REPLACE_WITH_PROJECT_DIR", os.environ["PROJECT"])
+text = text.replace("REPLACE_WITH_DATA_DIR", os.environ["DATA_DIR"])
 pathlib.Path(dst).write_text(text)
 PY
 

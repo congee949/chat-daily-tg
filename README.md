@@ -119,7 +119,7 @@ telegram:
   chat_id_env: "TG_CHAT_ID"
 ```
 
-旧版顶层 `groups:` 仍可读取，会自动当作 `sources.wechat.groups`。旧版 `llm:` 也仍可读取，会自动当作 `models.summary`。
+旧版顶层 `groups:` 仍可读取，会自动当作 `sources.wechat.groups`。
 
 图片理解是可选功能。开启 `models.vision.enabled` 后，脚本会先用聊天上下文筛选可能有价值的图片，再把有本地路径且通过预筛的图片交给多模态模型。图片理解结果会作为额外来源进入日报；失败时只记录 warning，不影响文本日报发送。
 
@@ -139,16 +139,6 @@ cd <repo>
 source .venv/bin/activate
 pytest -v
 ```
-
-## 常见问题
-
-**Telegram 收到的内容为什么看起来像“源码”？**
-
-因为 Telegram 自己支持的格式跟普通 Markdown 不一样。如果直接把常见的标题、加粗符号塞进去，Telegram 往往不会按预期显示。这个仓库现在已经针对 Telegram 做了单独处理。
-
-**为什么 `~/chat-daily` 里没有 git？**
-
-因为那个目录存的是每天跑出来的数据，不是代码仓库。真正的代码在本仓库目录。
 
 ## 备注
 

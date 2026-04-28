@@ -15,7 +15,7 @@ def test_chat_completion_posts_correct_shape(httpx_mock: HTTPXMock):
     )
     client = LLMClient(
         endpoint="http://127.0.0.1:8317/v1",
-        model="claude-sonnet-4-6",
+        model="test-summary-model",
         api_key="test-key",
         max_tokens=100,
     )
@@ -26,7 +26,7 @@ def test_chat_completion_posts_correct_shape(httpx_mock: HTTPXMock):
     sent = httpx_mock.get_request()
     assert sent.headers["Authorization"] == "Bearer test-key"
     body = sent.read().decode()
-    assert '"model":"claude-sonnet-4-6"' in body.replace(" ", "")
+    assert '"model":"test-summary-model"' in body.replace(" ", "")
     assert '"max_tokens":100' in body.replace(" ", "")
 
 

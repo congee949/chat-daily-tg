@@ -18,8 +18,8 @@ hot_leads:
   retention_days: 14
 llm:
   endpoint: "http://127.0.0.1:8317/v1"
-  model: "claude-sonnet-4-6"
-  api_key_env: "CLIPROXY_API_KEY"
+  model: "legacy-summary-model"
+  api_key_env: "LEGACY_API_KEY"
   max_tokens: 8000
   extra_body:
     reasoning_effort: "max"
@@ -39,8 +39,8 @@ sanitize:
     cfg = load_config(cfg_file)
     assert cfg.groups == ["Group A", "Group B"]
     assert cfg.sources.wechat.groups == ["Group A", "Group B"]
-    assert cfg.llm.model == "claude-sonnet-4-6"
-    assert cfg.models.summary.model == "claude-sonnet-4-6"
+    assert cfg.llm.model == "legacy-summary-model"
+    assert cfg.models.summary.model == "legacy-summary-model"
     assert cfg.llm.endpoint == "http://127.0.0.1:8317/v1"
     assert cfg.llm.extra_body["reasoning_effort"] == "max"
     assert cfg.llm.extra_body["thinking"]["type"] == "enabled"
@@ -112,7 +112,7 @@ models:
     mode: "auto"
     endpoint: "http://127.0.0.1:8317/v1"
     model: "gpt-image-2"
-    api_key_env: "CPA_API_KEY"
+    api_key_env: "IMAGE_API_KEY"
 telegram:
   bot_token_env: "TG_BOT_TOKEN"
   chat_id_env: "TG_CHAT_ID"

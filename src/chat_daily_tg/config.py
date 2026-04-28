@@ -25,6 +25,20 @@ class LLM(BaseModel):
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
+class OptionalModel(LLM):
+    enabled: bool = False
+
+
+class ImageModel(OptionalModel):
+    mode: Literal["off", "auto", "always"] = "off"
+
+
+class Models(BaseModel):
+    summary: LLM
+    vision: OptionalModel | None = None
+    image: ImageModel | None = None
+
+
 class Telegram(BaseModel):
     bot_token_env: str
     chat_id_env: str
@@ -67,7 +81,8 @@ class Config(BaseModel):
     todo: list[str] = Field(default_factory=list)
     schedule: Schedule = Field(default_factory=Schedule)
     hot_leads: HotLeads = Field(default_factory=HotLeads)
-    llm: LLM
+    llm: LLM | None = None
+    models: Models | None = None
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
@@ -81,6 +96,13 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def normalize_sources(self) -> "Config":
+        if self.models is None and self.llm is not None:
+            self.models = Models(summary=self.llm)
+        if self.models is not None and self.llm is None:
+            self.llm = self.models.summary
+        if self.models is None or self.llm is None:
+            raise ValueError("configure a summary model with models.summary or legacy llm")
+
         if self.groups is not None and not self.sources.wechat.groups:
             self.sources.wechat.groups = self.groups
         self.groups = self.sources.wechat.groups

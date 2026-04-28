@@ -40,6 +40,7 @@ sanitize:
     assert cfg.groups == ["Group A", "Group B"]
     assert cfg.sources.wechat.groups == ["Group A", "Group B"]
     assert cfg.llm.model == "claude-sonnet-4-6"
+    assert cfg.models.summary.model == "claude-sonnet-4-6"
     assert cfg.llm.endpoint == "http://127.0.0.1:8317/v1"
     assert cfg.llm.extra_body["reasoning_effort"] == "max"
     assert cfg.llm.extra_body["thinking"]["type"] == "enabled"
@@ -87,3 +88,40 @@ telegram:
     assert cfg.sources.telegram.chats[0].id == "-1003707563960"
     assert cfg.sources.telegram.chats[0].limit == 50
     assert cfg.sources.telegram.sync_before_export is False
+
+
+def test_load_config_reads_multi_model_yaml(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["微信 A"]
+models:
+  summary:
+    endpoint: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    api_key_env: "DEEPSEEK_API_KEY"
+  vision:
+    enabled: true
+    endpoint: "https://vision.example/v1"
+    model: "gemini"
+    api_key_env: "VISION_API_KEY"
+  image:
+    enabled: true
+    mode: "auto"
+    endpoint: "http://127.0.0.1:8317/v1"
+    model: "gpt-image-2"
+    api_key_env: "CPA_API_KEY"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.llm.model == "deepseek-v4-pro"
+    assert cfg.models.summary.api_key_env == "DEEPSEEK_API_KEY"
+    assert cfg.models.vision.enabled is True
+    assert cfg.models.vision.model == "gemini"
+    assert cfg.models.image.mode == "auto"

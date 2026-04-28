@@ -49,13 +49,14 @@
 
 1. 微信聊天导出能力
 2. 已登录的 `tg-cli`（Telegram 来源使用它的本地 SQLite）
-3. 本地可用的大模型接口
+3. 本地可用的大模型接口（默认使用本机 CPA / CLIProxyAPI）
 4. Telegram 机器人和 chat id
 
 环境变量示例：
 
 ```bash
 export CLIPROXY_API_KEY="..."
+export CPA_API_KEY="..."
 export TG_BOT_TOKEN="..."
 export TG_CHAT_ID="..."
 ```
@@ -97,10 +98,10 @@ sources:
         limit: 500
 
 llm:
-  endpoint: "https://api.moonshot.cn/v1"
-  model: "kimi-k2.6"
-  api_key_env: "KIMI_API_KEY"
-  max_tokens: 16000
+  endpoint: "http://127.0.0.1:8317/v1"
+  model: "gemini-3.1-pro-preview"
+  api_key_env: "CPA_API_KEY"
+  max_tokens: 4000
   timeout: 600.0
 
 telegram:

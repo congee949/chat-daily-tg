@@ -69,3 +69,4 @@ def test_prompt_requires_unified_source_tagged_concise_output():
     assert "每条重点必须" in SUMMARIZER_SYSTEM
     assert "（微信 / 群名 / HH:MM）" in SUMMARIZER_SYSTEM
     assert "（Telegram / 群名 / HH:MM）" in SUMMARIZER_SYSTEM
+    assert "来源平台只能复制" in SUMMARIZER_SYSTEM

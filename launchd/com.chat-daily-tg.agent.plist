@@ -28,7 +28,7 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>KIMI_API_KEY</key>
+        <key>CPA_API_KEY</key>
         <string>REPLACE_WITH_REAL_KEY</string>
         <key>TG_BOT_TOKEN</key>
         <string>REPLACE_WITH_REAL_TOKEN</string>

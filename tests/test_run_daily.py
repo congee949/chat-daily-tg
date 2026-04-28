@@ -75,8 +75,10 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
         prompt = mock_chat.call_args.args[0]
-        assert "### === 群: 微信 / G1 ===" in prompt
-        assert "### === 群: Telegram / TG1 ===" in prompt
+        assert "### === 来源: 微信 / G1 ===" in prompt
+        assert "来源标签：微信 / G1" in prompt
+        assert "### === 来源: Telegram / TG1 ===" in prompt
+        assert "来源标签：Telegram / TG1" in prompt
         assert len(tg_client_instance.post.call_args_list) == 1
         sent_data = tg_client_instance.post.call_args_list[0].kwargs.get("data", {})
         assert sent_data["parse_mode"] == "HTML"

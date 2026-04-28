@@ -15,6 +15,8 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
 - 每条列表项尽量一行内写完，信息密度优先
 - 使用「形式 A」：不要按微信/Telegram分块，而是按信息价值统一排序
 - 每条重点必须在句末标来源：`（微信 / 群名 / HH:MM）` 或 `（Telegram / 群名 / HH:MM）`
+- 来源平台只能复制原始记录中每个来源块的「来源标签」，不要根据群名、聊天内容或工具名称猜测平台
+- 例如来源块写的是 `微信 / OpenCLI 交流群`，输出时必须仍写 `微信 / OpenCLI 交流群`，不能改成 Telegram
 
 结构：
 ### 今日总览
@@ -116,7 +118,8 @@ def build_user_prompt(
     active_permanent_summary / active_hot_leads_summary: existing DB context for death-signal detection.
     """
     groups_block = "\n\n".join(
-        f"### === 群: {name} ===\n\n{content}" for name, content in groups_with_content
+        f"### === 来源: {name} ===\n\n来源标签：{name}\n\n{content}"
+        for name, content in groups_with_content
     )
     context = ""
     if active_permanent_summary or active_hot_leads_summary:

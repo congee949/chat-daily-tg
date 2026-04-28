@@ -11,3 +11,5 @@ def configure_logging(log_file: Path, level: int = logging.INFO) -> None:
         logging.FileHandler(log_file, encoding="utf-8"),
     ]
     logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

@@ -16,6 +16,7 @@ from chat_daily_tg.summarizer import run_summary
 from chat_daily_tg.tg_sender import TelegramSender
 from chat_daily_tg.wx_exporter import export_group
 from chat_daily_tg.telegram_exporter import export_chat
+from chat_daily_tg.sanitize import sanitize_for_llm
 
 log = logging.getLogger("run_daily")
 
@@ -59,7 +60,8 @@ def _run(date_str: str) -> int:
             log.warning("wechat export failed for %s: %s", group, e)
             continue
         if result.content.strip():
-            groups_with_content.append((f"微信 / {group}", result.content))
+            content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
+            groups_with_content.append((f"微信 / {group}", content))
 
     if cfg.sources.telegram.enabled:
         for chat in cfg.sources.telegram.chats:
@@ -85,7 +87,8 @@ def _run(date_str: str) -> int:
                 log.warning("telegram export failed for %s: %s", chat.name, e)
                 continue
             if result.content.strip():
-                groups_with_content.append((f"Telegram / {chat.name}", result.content))
+                content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
+                groups_with_content.append((f"Telegram / {chat.name}", content))
 
     if not groups_with_content:
         log.error("no content exported, aborting")

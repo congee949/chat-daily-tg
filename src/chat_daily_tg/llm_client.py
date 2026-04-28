@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import Any
 import httpx
 import logging
 import time
@@ -16,6 +17,7 @@ class LLMClient:
     timeout: float = 300.0
     retry_max_attempts: int = 3
     retry_backoff_seconds: list = field(default_factory=lambda: [5, 15, 60])
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def chat(self, prompt: str, system: str | None = None) -> tuple[str, dict]:
         messages = []
@@ -28,6 +30,7 @@ class LLMClient:
             "messages": messages,
             "max_tokens": self.max_tokens,
         }
+        payload.update(self.extra_body)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

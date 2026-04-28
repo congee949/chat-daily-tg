@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
+from typing import Any
 from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -21,6 +22,7 @@ class LLM(BaseModel):
     api_key_env: str
     max_tokens: int = 16000
     timeout: float = 300.0
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class Telegram(BaseModel):

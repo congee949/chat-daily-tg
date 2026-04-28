@@ -21,6 +21,10 @@ llm:
   model: "claude-sonnet-4-6"
   api_key_env: "CLIPROXY_API_KEY"
   max_tokens: 8000
+  extra_body:
+    reasoning_effort: "max"
+    thinking:
+      type: "enabled"
 telegram:
   bot_token_env: "TG_BOT_TOKEN"
   chat_id_env: "TG_CHAT_ID"
@@ -37,6 +41,8 @@ sanitize:
     assert cfg.sources.wechat.groups == ["Group A", "Group B"]
     assert cfg.llm.model == "claude-sonnet-4-6"
     assert cfg.llm.endpoint == "http://127.0.0.1:8317/v1"
+    assert cfg.llm.extra_body["reasoning_effort"] == "max"
+    assert cfg.llm.extra_body["thinking"]["type"] == "enabled"
     assert cfg.hot_leads.retention_days == 14
     assert cfg.schedule.timezone == "Asia/Shanghai"
     assert cfg.sanitize.enabled is False

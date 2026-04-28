@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${CPA_API_KEY:?Set CPA_API_KEY env var before running}"
+: "${DEEPSEEK_API_KEY:?Set DEEPSEEK_API_KEY env var before running}"
 : "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN env var before running}"
 : "${TG_CHAT_ID:?Set TG_CHAT_ID env var before running}"
 
@@ -18,7 +18,7 @@ import os, sys, pathlib
 src, dst = sys.argv[1], sys.argv[2]
 text = pathlib.Path(src).read_text()
 for placeholder, envvar in [
-    ("REPLACE_WITH_REAL_KEY", "CPA_API_KEY"),
+    ("REPLACE_WITH_REAL_KEY", "DEEPSEEK_API_KEY"),
     ("REPLACE_WITH_REAL_TOKEN", "TG_BOT_TOKEN"),
     ("REPLACE_WITH_REAL_CHAT_ID", "TG_CHAT_ID"),
 ]:

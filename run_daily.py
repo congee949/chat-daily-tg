@@ -8,10 +8,11 @@ import sys
 
 from chat_daily_tg.archive import safe_filename, prepare_archive_day
 from chat_daily_tg.config import load_config
+from chat_daily_tg.env import load_env_file
 from chat_daily_tg.llm_client import LLMClient
 from chat_daily_tg.logging_setup import configure_logging
 from chat_daily_tg.notifier import notify_failure
-from chat_daily_tg.paths import CONFIG_PATH, log_file_for
+from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR, log_file_for
 from chat_daily_tg.summarizer import run_summary
 from chat_daily_tg.tg_sender import TelegramSender
 from chat_daily_tg.wx_exporter import export_group
@@ -39,6 +40,7 @@ def main(date_str: str | None = None) -> int:
 
 def _run(date_str: str) -> int:
     next_day = (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+    load_env_file(DATA_DIR / ".env")
     cfg = load_config(CONFIG_PATH)
     log.info(
         "config loaded: wechat=%d telegram=%d model=%s",
@@ -100,6 +102,7 @@ def _run(date_str: str) -> int:
         max_tokens=cfg.llm.max_tokens, timeout=cfg.llm.timeout,
         retry_max_attempts=cfg.retry.max_attempts,
         retry_backoff_seconds=cfg.retry.backoff_seconds,
+        extra_body=cfg.llm.extra_body,
     )
     detail_path = str(archive_dir / "summary.md")
     from chat_daily_tg.context_builder import (

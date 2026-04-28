@@ -49,7 +49,7 @@
 
 1. 微信聊天导出能力
 2. 已登录的 `tg-cli`（Telegram 来源使用它的本地 SQLite）
-3. 本地可用的大模型接口（默认使用本机 CPA / CLIProxyAPI）
+3. 可用的大模型接口（默认使用 DeepSeek 官方 API）
 4. Telegram 机器人和 chat id
 
 环境变量示例：
@@ -57,9 +57,12 @@
 ```bash
 export CLIPROXY_API_KEY="..."
 export CPA_API_KEY="..."
+export DEEPSEEK_API_KEY="..."
 export TG_BOT_TOKEN="..."
 export TG_CHAT_ID="..."
 ```
+
+也可以把这些变量写到本地数据目录的 `~/chat-daily/.env`。这个文件不属于代码仓库，建议权限保持 `600`。
 
 ## 配置
 
@@ -98,11 +101,15 @@ sources:
         limit: 500
 
 llm:
-  endpoint: "http://127.0.0.1:8317/v1"
-  model: "gemini-3.1-pro-preview"
-  api_key_env: "CPA_API_KEY"
-  max_tokens: 4000
+  endpoint: "https://api.deepseek.com"
+  model: "deepseek-v4-pro"
+  api_key_env: "DEEPSEEK_API_KEY"
+  max_tokens: 12000
   timeout: 600.0
+  extra_body:
+    reasoning_effort: "max"
+    thinking:
+      type: "enabled"
 
 telegram:
   bot_token_env: "TG_BOT_TOKEN"

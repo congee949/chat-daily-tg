@@ -72,6 +72,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 
         import run_daily
         monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
         rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
         prompt = mock_chat.call_args.args[0]

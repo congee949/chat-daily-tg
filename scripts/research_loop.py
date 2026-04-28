@@ -13,8 +13,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from chat_daily_tg.config import load_config
+from chat_daily_tg.env import load_env_file
 from chat_daily_tg.llm_client import LLMClient
-from chat_daily_tg.paths import CONFIG_PATH
+from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR
 from chat_daily_tg.research_loop import ResearchSpec, append_result, run_research_once
 from chat_daily_tg.tg_sender import TelegramSender
 
@@ -24,6 +25,9 @@ def main() -> int:
     cfg = None
     llm = None
     tg = None
+
+    if args.sample_output is None or args.send_telegram:
+        load_env_file(DATA_DIR / ".env")
 
     if args.sample_output is None:
         cfg = load_config(args.config)
@@ -36,6 +40,7 @@ def main() -> int:
             timeout=cfg.llm.timeout,
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
+            extra_body=cfg.llm.extra_body,
         )
 
     if args.send_telegram:

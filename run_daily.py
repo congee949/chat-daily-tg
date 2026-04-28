@@ -106,16 +106,17 @@ def _run(date_str: str) -> int:
     )
     detail_path = str(archive_dir / "summary.md")
     from chat_daily_tg.context_builder import (
-        active_permanent_summary, active_hot_leads_summary,
+        active_permanent_summary, active_hot_leads_summary, active_repeat_topics_summary,
     )
-    from chat_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR
+    from chat_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR, REPEAT_TOPICS_JSONL
 
     perm_ctx = active_permanent_summary(PERMANENT_JSONL)
     hot_ctx = active_hot_leads_summary(
         HOT_LEADS_DIR, retention_days=cfg.hot_leads.retention_days,
     )
-    log.info("LLM context: permanent=%d chars, hot_leads=%d chars",
-             len(perm_ctx), len(hot_ctx))
+    repeat_ctx = active_repeat_topics_summary(REPEAT_TOPICS_JSONL, today=date_str)
+    log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars",
+             len(perm_ctx), len(hot_ctx), len(repeat_ctx))
 
     log.info("calling LLM for summary…")
     out = run_summary(
@@ -123,6 +124,7 @@ def _run(date_str: str) -> int:
         groups_with_content=groups_with_content, detail_path=detail_path,
         active_permanent_summary=perm_ctx,
         active_hot_leads_summary=hot_ctx,
+        active_repeat_topics_summary=repeat_ctx,
     )
     log.info("LLM returned: concise=%d chars, detailed=%d chars",
              len(out.concise_md), len(out.detailed_md))
@@ -136,8 +138,9 @@ def _run(date_str: str) -> int:
     from chat_daily_tg.hot_leads import HotLead, append_day_leads, regenerate_latest
     from chat_daily_tg.permanent_md import regenerate_permanent_md
     from chat_daily_tg.paths import (
-        PERMANENT_JSONL, PERMANENT_MD, HOT_LEADS_DIR, HOT_LEADS_LATEST,
+        PERMANENT_JSONL, PERMANENT_MD, REPEAT_TOPICS_JSONL, HOT_LEADS_DIR, HOT_LEADS_LATEST,
     )
+    from chat_daily_tg.repeat_topics import RepeatTopicDB, mentions_from_json
 
     from chat_daily_tg.db import compute_fingerprint
     pdb = PermanentDB(PERMANENT_JSONL)
@@ -180,6 +183,10 @@ def _run(date_str: str) -> int:
         hot_leads_new.append(lead)
     append_day_leads(HOT_LEADS_DIR, date_str, hot_leads_new)
     log.info("hot leads added: %d", len(hot_leads_new))
+
+    topic_mentions = mentions_from_json(out.opportunities.get("topic_mentions", []))
+    repeat_updated = RepeatTopicDB(REPEAT_TOPICS_JSONL).upsert_many(topic_mentions, seen_date=date_str)
+    log.info("repeat topics updated: %d", len(repeat_updated))
 
     from chat_daily_tg.death_signals import apply_death_signals as _apply_ds
     n_updated = _apply_ds(

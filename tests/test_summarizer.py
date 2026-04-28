@@ -132,3 +132,18 @@ def test_build_user_prompt_includes_group_only_concise_source_label():
     assert "完整来源标签：Telegram / CuiMao爱学习" in prompt
     assert "精简来源标签：CuiMao爱学习" in prompt
     assert "不要写平台名" in prompt
+
+
+def test_build_user_prompt_includes_repeat_context():
+    from chat_daily_tg.prompts import build_user_prompt
+
+    prompt = build_user_prompt(
+        date="2026-04-28",
+        groups_with_content=[("微信 / G1", "content")],
+        detail_path="/tmp/summary.md",
+        active_repeat_topics_summary="- `abc` [repeat] Codex 额度重置",
+    )
+
+    assert "近期已见话题" in prompt
+    assert "Codex 额度重置" in prompt
+    assert "重复/旧闻降权" in prompt

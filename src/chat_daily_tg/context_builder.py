@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from chat_daily_tg.db import PermanentDB
 from chat_daily_tg.hot_leads import load_all_leads
+from chat_daily_tg.repeat_topics import recent_repeat_summary
 
 
 def active_permanent_summary(db_path: Path, max_items: int = 50) -> str:
@@ -36,3 +37,13 @@ def active_hot_leads_summary(root: Path, retention_days: int = 14,
     if not lines:
         return "(空)"
     return "\n".join(lines)
+
+
+def active_repeat_topics_summary(path: Path, today: str, cooldown_days: int = 7,
+                                 max_items: int = 30) -> str:
+    return recent_repeat_summary(
+        path=path,
+        today=today,
+        cooldown_days=cooldown_days,
+        max_items=max_items,
+    )

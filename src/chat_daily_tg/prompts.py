@@ -94,6 +94,16 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
       "signal_source": "...",
       "confidence": "high|medium|low"
     }
+  ],
+  "topic_mentions": [
+    {
+      "title": "...",
+      "summary": "今天这个话题被提到的简短摘要",
+      "source_group": "...",
+      "source_sender": "...",
+      "has_new_information": true,
+      "new_information": "如果相对近期已见话题有新增事实，写新增点；没有则为 null"
+    }
   ]
 }
 ```
@@ -107,6 +117,14 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
 - 标题尽量用稳定的规范化写法，不要为同一个机会生成「xx开放」「xx支持xx」「xx活动」等措辞不同的变体。
 - 当今天聊天记录里有对已有条目的**负面/结束信号**（跑路、关停、额度收紧、风控出问题等），通过 `death_signals` 表达，而不是新建一条条目。
 - 只有在出现**真正新的机会**时才加入 `permanent_additions`。
+
+## 重复话题规则（重要）
+
+- 参考「近期已见话题」判断旧闻：近 7 天内已出现、今天没有新增事实的话题，不要进入 `💰 钱 / 活动` 或 `🧠 AI / 工具` 主重点。
+- 旧话题如果连续 2 天以上出现且无新增事实，只放进 `🔁 重复 / 旧闻`，最多 3 条；没有旧闻就省略这个分区。
+- 旧话题如果有新增事实、风控变化、官方确认/辟谣、新链接、新入口、新操作方法、跨群独立验证，可以进入主重点，但必须写清“新增变化”。
+- 超过 7 天后再次出现：如果有新增事实，按“复现/新增变化”进入主重点；如果没有新增事实，只放 `🔁 重复 / 旧闻`。
+- `topic_mentions` 要记录今天被提到的 5-12 个主要话题，供下次判断重复。不要记录纯闲聊、表情、无意义短回复。
 """
 
 
@@ -116,12 +134,14 @@ def build_user_prompt(
     detail_path: str,
     active_permanent_summary: str = "",
     active_hot_leads_summary: str = "",
+    active_repeat_topics_summary: str = "",
 ) -> str:
     """Build the user prompt.
 
     groups_with_content: list of (group_name, raw_markdown_export).
     detail_path: filesystem path to the detailed summary file (appended to concise version).
     active_permanent_summary / active_hot_leads_summary: existing DB context for death-signal detection.
+    active_repeat_topics_summary: recent topics used to downgrade repeated old news.
     """
     groups_block = "\n\n".join(
         f"### === 来源: {name} ===\n\n"
@@ -131,15 +151,18 @@ def build_user_prompt(
         for name, content in groups_with_content
     )
     context = ""
-    if active_permanent_summary or active_hot_leads_summary:
+    if active_permanent_summary or active_hot_leads_summary or active_repeat_topics_summary:
         context = f"""
-## 当前活跃的机会（用于死亡信号检测）
+## 当前活跃上下文
 
-### 永久库活跃条目
+### 永久库活跃条目（用于死亡信号检测）
 {active_permanent_summary or "(空)"}
 
-### 热点板 14 天内活跃条目
+### 热点板 14 天内活跃条目（用于死亡信号检测）
 {active_hot_leads_summary or "(空)"}
+
+### 近期已见话题（用于重复/旧闻降权）
+{active_repeat_topics_summary or "(空)"}
 """
 
     return f"""日期：{date}

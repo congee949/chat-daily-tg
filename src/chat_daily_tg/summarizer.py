@@ -52,6 +52,7 @@ def run_summary(
     detail_path: str,
     active_permanent_summary: str = "",
     active_hot_leads_summary: str = "",
+    active_repeat_topics_summary: str = "",
 ) -> SummaryOutput:
     """Call LLM with summarization prompts and parse result."""
     from chat_daily_tg.prompts import SUMMARIZER_SYSTEM, build_user_prompt
@@ -62,6 +63,7 @@ def run_summary(
         detail_path=detail_path,
         active_permanent_summary=active_permanent_summary,
         active_hot_leads_summary=active_hot_leads_summary,
+        active_repeat_topics_summary=active_repeat_topics_summary,
     )
     content, _usage = llm_client.chat(user_prompt, system=SUMMARIZER_SYSTEM)
     try:

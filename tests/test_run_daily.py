@@ -12,6 +12,7 @@ def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
     monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
     monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
 
@@ -42,7 +43,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         "```markdown concise\nConcise\n```\n\n"
         "```markdown detailed\nDetailed\n```\n\n"
         "```json opportunities\n"
-        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}\n'
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[{"title":"T","summary":"S","source_group":"G1","has_new_information":true,"new_information":"N"}]}\n'
         "```"
     )
 
@@ -91,6 +92,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     concise_path = tmp_path / "archive" / "2026" / "04" / "17" / "concise.md"
     assert concise_path.exists()
     assert "Concise" in concise_path.read_text(encoding="utf-8")
+    repeat_path = tmp_path / "repeat_topics.jsonl"
+    assert repeat_path.exists()
+    assert "T" in repeat_path.read_text(encoding="utf-8")
 
 
 def test_run_daily_main_catches_exceptions_and_notifies(tmp_path, monkeypatch):

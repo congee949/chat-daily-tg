@@ -88,18 +88,15 @@ export TG_CHAT_ID="..."
 sources:
   wechat:
     groups:
-      - "贝利知识星球VIP群❤️"
-      - "OpenCLI 交流群"
+      - "微信群 A"
+      - "微信群 B"
   telegram:
     enabled: true
     db_path: "~/Library/Application Support/tg-cli/messages.db"
     sync_before_export: true
     chats:
-      - id: "-1003707563960"
-        name: "CuiMao爱学习"
-        limit: 500
-      - id: "-1001162433032"
-        name: "电丸朱氏会社"
+      - id: "-100xxxxxxxxxx"
+        name: "Telegram 群 A"
         limit: 500
 
 llm:

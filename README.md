@@ -21,8 +21,8 @@
 
 这个仓库是“代码仓库”，真正每天产生的数据默认放在另一个目录：
 
-- 代码：`/Users/Apple/Projects/chat-daily-tg`
-- 数据：`/Users/Apple/chat-daily`
+- 代码：本仓库目录
+- 数据：`~/chat-daily`
 
 本地数据目录大致长这样：
 
@@ -120,7 +120,7 @@ telegram:
 ## 手动运行
 
 ```bash
-cd /Users/Apple/Projects/chat-daily-tg
+cd <repo>
 source .venv/bin/activate
 python run_daily.py
 python run_daily.py --date 2026-04-17
@@ -129,7 +129,7 @@ python run_daily.py --date 2026-04-17
 ## 测试
 
 ```bash
-cd /Users/Apple/Projects/chat-daily-tg
+cd <repo>
 source .venv/bin/activate
 pytest -v
 ```
@@ -140,9 +140,9 @@ pytest -v
 
 因为 Telegram 自己支持的格式跟普通 Markdown 不一样。如果直接把常见的标题、加粗符号塞进去，Telegram 往往不会按预期显示。这个仓库现在已经针对 Telegram 做了单独处理。
 
-**为什么 `/Users/Apple/chat-daily` 里没有 git？**
+**为什么 `~/chat-daily` 里没有 git？**
 
-因为那个目录存的是每天跑出来的数据，不是代码仓库。真正的代码在 `/Users/Apple/Projects/chat-daily-tg`。
+因为那个目录存的是每天跑出来的数据，不是代码仓库。真正的代码在本仓库目录。
 
 ## 备注
 

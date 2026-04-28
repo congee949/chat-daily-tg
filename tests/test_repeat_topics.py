@@ -16,13 +16,13 @@ def test_topic_id_normalizes_punctuation_and_spaces():
 def test_upsert_many_tracks_seen_dates_and_mentions(tmp_path: Path):
     db = RepeatTopicDB(tmp_path / "repeat_topics.jsonl")
     db.upsert_many([
-        TopicMention(title="Codex Pro 额度重置", summary="首次出现", source_group="OpenCLI")
+        TopicMention(title="Codex Pro 额度重置", summary="首次出现", source_group="示例群")
     ], seen_date="2026-04-27")
     [topic] = db.upsert_many([
         TopicMention(
             title="Codex-Pro 额度 重置",
             summary="继续出现",
-            source_group="OpenCLI",
+            source_group="示例群",
             has_new_information=False,
         )
     ], seen_date="2026-04-28")
@@ -51,7 +51,7 @@ def test_mentions_from_json_ignores_empty_titles():
         {
             "title": "X Money",
             "summary": "支付产品",
-            "source_group": "CuiMao爱学习",
+            "source_group": "示例TG群A",
             "has_new_information": True,
             "new_information": "新增利率传闻",
         },

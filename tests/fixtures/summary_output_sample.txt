@@ -1,9 +1,9 @@
 ```markdown concise
 ### 日期概览
-2026-04-17 共 1 个群，主要出现购物源头、价格和零散闲聊。
+2026-04-17 共 1 个群，主要出现工具价格、渠道线索和零散闲聊。
 
 ### 值得关注
-- **购物源头**：86GameStore / ferrigpt.asia 价格信息被提到（贝利知识星球VIP2群 / 贝利Baily / 18:13）
+- **工具价格**：示例商店 / example-pricing.test 价格信息被提到（示例微信群A / 样例用户A / 18:13）
 - **价格信号**：plus 6 元、5x 95 元、20x 160 元，可作为后续观察样本
 
 ### 死亡信号（若有）
@@ -13,8 +13,8 @@
 ```
 
 ```markdown detailed
-## 群 1: 贝利知识星球VIP2群
-全天主要是零散互动，18:13 出现一条带链接的购物信息，涉及 86GameStore、ferrigpt.asia 和不同档位价格。
+## 群 1: 示例微信群A
+全天主要是零散互动，18:13 出现一条带链接的工具价格信息，涉及示例商店、example-pricing.test 和不同档位价格。
 
 ## 跨群合并话题
 暂无跨群合并话题。
@@ -22,24 +22,24 @@
 ## 值得关注清单（完整表格）
 | 类型 | 内容 | 来源 |
 | --- | --- | --- |
-| 购物源头 | ferrigpt.asia plus 6 元、5x 95 元、20x 160 元 | 贝利Baily |
+| 工具价格 | example-pricing.test plus 6 元、5x 95 元、20x 160 元 | 样例用户A |
 
 ## 人物画像
-贝利Baily：贡献了当天唯一有明确跟踪价值的价格线索。
+样例用户A：贡献了当天唯一有明确跟踪价值的价格线索。
 ```
 
 ```json opportunities
 {
   "permanent_additions": [
     {
-      "title": "ferrigpt.asia 购物源头价格线索",
+      "title": "example-pricing.test 工具价格线索",
       "category": "activity",
       "type": "activity",
       "content": "plus 6 元、5x 95 元、20x 160 元",
-      "url": "https://ferrigpt.asia/",
+      "url": "https://example-pricing.test/",
       "expires_at": null,
-      "source_group": "贝利知识星球VIP2群",
-      "source_sender": "贝利Baily",
+      "source_group": "示例微信群A",
+      "source_sender": "样例用户A",
       "notes": "仅作为测试样例，不代表真实可用机会。"
     }
   ],

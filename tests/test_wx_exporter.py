@@ -13,14 +13,14 @@ def test_export_group_captures_stdout_and_writes_cleaned(tmp_path: Path):
     with patch("chat_daily_tg.wx_exporter.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0, stdout=stdout, stderr="")
         result = export_group(
-            group_name="贝利VIP",
+            group_name="示例微信群A",
             since="2026-04-17",
             until="2026-04-18",
             out_path=out_path,
         )
     called_args = run.call_args[0][0]
     assert called_args[0].endswith("wx")
-    assert "export" in called_args and "贝利VIP" in called_args
+    assert "export" in called_args and "示例微信群A" in called_args
     assert "--since" in called_args and "2026-04-17" in called_args
     assert "--format" in called_args and "markdown" in called_args
     assert "-o" not in called_args  # stdout capture, no file arg
@@ -43,19 +43,19 @@ def test_export_group_nonzero_exit_raises(tmp_path: Path):
 def test_clean_drops_patpat_block():
     raw = (
         "### 2026-04-17 03:02\n\n"
-        '[链接] "JASON👺" 拍了拍 "贝利Baily"\n\n'
+        '[链接] "样例用户B" 拍了拍 "样例用户A"\n\n'
         "### 2026-04-17 04:36\n\n"
-        "**嗯**: @JASON👺 加你了\n"
+        "**样例用户C**: @样例用户B 加你了\n"
     )
     out = clean_wx_markdown(raw)
     assert "拍了拍" not in out
-    assert "@JASON👺 加你了" in out
+    assert "@样例用户B 加你了" in out
 
 
 def test_clean_drops_system_block():
     raw = (
         "### 2026-04-17 06:13\n\n"
-        '[系统] "贝利小助手"邀请"柏林有雾"加入了群聊\n\n'
+        '[系统] "样例助手"邀请"新成员"加入了群聊\n\n'
         "### 2026-04-17 09:19\n\n"
         "**Alice**: hi\n"
     )
@@ -132,9 +132,9 @@ def test_clean_against_real_fixture():
         assert noise not in out, f"leaked {noise!r} after cleanup"
 
     for signal in ("**Lay-**: 你可以问问群主",
-                   "**嗯**: @JASON👺 加你了",
-                   "86GameStore",
-                   "https://ferrigpt.asia/",
+                   "**样例用户C**: @样例用户B 加你了",
+                   "示例商店",
+                   "https://example-pricing.test/",
                    "710了",
                    "这个大妈行",
                    "✈️乘务员是不是能看得见每个乘客的会员等级？"):

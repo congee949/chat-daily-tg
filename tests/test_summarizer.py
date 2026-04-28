@@ -122,16 +122,16 @@ def test_build_user_prompt_includes_group_only_concise_source_label():
     prompt = build_user_prompt(
         date="2026-04-27",
         groups_with_content=[
-            ("微信 / OpenCLI 交流群", "content a"),
-            ("Telegram / CuiMao爱学习", "content b"),
+            ("微信 / 示例微信群A", "content a"),
+            ("Telegram / 示例TG群A", "content b"),
         ],
         detail_path="/tmp/summary.md",
     )
 
-    assert "完整来源标签：微信 / OpenCLI 交流群" in prompt
-    assert "精简来源标签：OpenCLI 交流群" in prompt
-    assert "完整来源标签：Telegram / CuiMao爱学习" in prompt
-    assert "精简来源标签：CuiMao爱学习" in prompt
+    assert "完整来源标签：微信 / 示例微信群A" in prompt
+    assert "精简来源标签：示例微信群A" in prompt
+    assert "完整来源标签：Telegram / 示例TG群A" in prompt
+    assert "精简来源标签：示例TG群A" in prompt
     assert "不要写平台名" in prompt
 
 

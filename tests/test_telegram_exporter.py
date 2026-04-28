@@ -28,10 +28,10 @@ def _make_db(path: Path) -> None:
         """
     )
     rows = [
-        (3707563960, "CuiMao爱学习", 1, "Alice", "有效信息 https://x.com/a", "2026-04-28T02:00:00+00:00", None),
-        (3707563960, "CuiMao爱学习", 2, "Bob", "😂", "2026-04-28T03:00:00+00:00", None),
-        (3707563960, "CuiMao爱学习", 3, "Carol", "", "2026-04-28T04:00:00+00:00", None),
-        (3707563960, "CuiMao爱学习", 4, "Dan", "前一天消息", "2026-04-27T02:00:00+00:00", None),
+        (3707563960, "示例TG群A", 1, "Alice", "有效信息 https://x.com/a", "2026-04-28T02:00:00+00:00", None),
+        (3707563960, "示例TG群A", 2, "Bob", "😂", "2026-04-28T03:00:00+00:00", None),
+        (3707563960, "示例TG群A", 3, "Carol", "", "2026-04-28T04:00:00+00:00", None),
+        (3707563960, "示例TG群A", 4, "Dan", "前一天消息", "2026-04-27T02:00:00+00:00", None),
         (1162433032, "Other", 5, "Eve", "其他群", "2026-04-28T02:00:00+00:00", None),
     ]
     conn.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
@@ -55,12 +55,12 @@ def test_should_skip_empty_and_low_signal_content():
 
 def test_export_chat_reads_sqlite_window_and_renders_source_tags(tmp_path: Path):
     db_path = tmp_path / "messages.db"
-    out_path = tmp_path / "telegram-CuiMao.md"
+    out_path = tmp_path / "telegram-example.md"
     _make_db(db_path)
 
     result = export_chat(
         chat_id="-1003707563960",
-        chat_name="CuiMao爱学习",
+        chat_name="示例TG群A",
         since="2026-04-28",
         until="2026-04-29",
         out_path=out_path,
@@ -71,7 +71,7 @@ def test_export_chat_reads_sqlite_window_and_renders_source_tags(tmp_path: Path)
 
     assert result.message_count == 1
     assert result.skipped_count == 2
-    assert "[Telegram / CuiMao爱学习 / 10:00 / Alice] 有效信息 https://x.com/a" in result.content
+    assert "[Telegram / 示例TG群A / 10:00 / Alice] 有效信息 https://x.com/a" in result.content
     assert "前一天消息" not in result.content
     assert "其他群" not in result.content
     assert out_path.read_text(encoding="utf-8") == result.content
@@ -86,7 +86,7 @@ def test_export_chat_syncs_before_export_when_enabled(tmp_path: Path):
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         export_chat(
             chat_id="-1003707563960",
-            chat_name="CuiMao爱学习",
+            chat_name="示例TG群A",
             since="2026-04-28",
             until="2026-04-29",
             out_path=out_path,

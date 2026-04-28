@@ -70,7 +70,7 @@ sources:
     sync_before_export: false
     chats:
       - id: "-1003707563960"
-        name: "CuiMao爱学习"
+        name: "示例TG群A"
         limit: 50
 llm:
   endpoint: "http://127.0.0.1:8317/v1"

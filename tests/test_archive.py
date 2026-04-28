@@ -7,7 +7,7 @@ def test_safe_filename_replaces_slashes_and_colons():
 
 
 def test_safe_filename_keeps_chinese_and_emoji():
-    assert safe_filename("贝利VIP❤️") == "贝利VIP❤️"
+    assert safe_filename("示例群❤️") == "示例群❤️"
 
 
 def test_prepare_archive_day_creates_nested_dirs(tmp_path: Path, monkeypatch):

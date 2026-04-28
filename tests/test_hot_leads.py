@@ -7,14 +7,14 @@ from chat_daily_tg.hot_leads import (
 
 def test_append_only_creates_file_when_nonempty(tmp_path: Path):
     leads = [HotLead(
-        id="hl-1", captured_at="2026-04-17", title="OpenAI low plus",
-        summary="86GameStore source", category="arbitrage",
+        id="hl-1", captured_at="2026-04-17", title="Example tool price",
+        summary="example source", category="arbitrage",
         source_group="G1", source_sender="Alice", status="alive",
     )]
     p = append_day_leads(tmp_path, "2026-04-17", leads)
     assert p is not None
     assert p.exists()
-    assert "OpenAI low plus" in p.read_text(encoding="utf-8")
+    assert "Example tool price" in p.read_text(encoding="utf-8")
 
 
 def test_append_empty_does_not_create_file(tmp_path: Path):

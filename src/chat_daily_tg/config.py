@@ -86,6 +86,7 @@ class Config(BaseModel):
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
+    source_abbreviations: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("groups")
     @classmethod

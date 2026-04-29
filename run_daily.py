@@ -25,6 +25,7 @@ from chat_daily_tg.cross_group_cluster import (
     build_cluster_context,
     validate_clusters_in_output,
 )
+from chat_daily_tg.post_process import post_process_concise
 
 log = logging.getLogger("run_daily")
 
@@ -179,6 +180,14 @@ def _run(date_str: str) -> int:
     (archive_dir / "concise.md").write_text(out.concise_md, encoding="utf-8")
     (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
 
+    concise_processed = post_process_concise(out.concise_md, cfg.source_abbreviations)
+
+    # Guard against empty or near-empty output after repair
+    if len(concise_processed.strip()) < 100:
+        log.error("concise output too short (%d chars), skipping TG push", len(concise_processed.strip()))
+        notify_failure("chat-daily-tg 日报生成异常", f"精简版输出过短（{len(concise_processed.strip())} 字符），可能 LLM 格式解析失败。日志: {log_file_for(date_str)}")
+        return 1
+
     # 4.5. Persist opportunities
     from datetime import datetime as _dt
     from chat_daily_tg.db import PermanentDB, PermanentEntry
@@ -254,7 +263,7 @@ def _run(date_str: str) -> int:
         retry_max_attempts=cfg.retry.max_attempts,
         retry_backoff_seconds=cfg.retry.backoff_seconds,
     )
-    tg.send(out.concise_md, parse_mode="HTML")
+    tg.send(concise_processed, parse_mode="HTML")
     log.info("TG push complete")
 
     log.info("✓ run_daily complete for %s", date_str)

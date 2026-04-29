@@ -96,7 +96,7 @@ def _similarity(a: str, b: str) -> float:
 
 def cluster_cross_group_topics(
     groups_with_content: list[tuple[str, str]],
-    similarity_threshold: float = 0.78,
+    similarity_threshold: float = 0.85,
 ) -> list[CrossGroupCluster]:
     """Cluster similar topics across groups for pre-deduplication.
 

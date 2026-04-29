@@ -57,6 +57,29 @@ def write_media_candidates(path: Path, candidates: list[MediaCandidate]) -> None
             f.write(json.dumps(item.to_json(), ensure_ascii=False) + "\n")
 
 
+def _is_valid_image_file(path: str | None) -> tuple[bool, str]:
+    """Layer 1 prefilter: file size and resolution checks."""
+    if not path:
+        return True, "no local path"
+    p = Path(path).expanduser()
+    if not p.exists():
+        return False, "file not found"
+    size = p.stat().st_size
+    if size < 10 * 1024:
+        return False, f"too small ({size}B < 10KB)"
+    if size > 20 * 1024 * 1024:
+        return False, f"too large ({size // (1024*1024)}MB > 20MB)"
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(p) as img:
+            w, h = img.size
+            if w < 300 or h < 300:
+                return False, f"too small resolution ({w}x{h})"
+    except Exception:
+        pass
+    return True, "pass"
+
+
 def score_media_context(context: str, *, has_local_path: bool = False) -> tuple[float, str]:
     text = context.lower()
     hits = [kw for kw in VALUE_KEYWORDS if kw.lower() in text]
@@ -112,6 +135,11 @@ def extract_telegram_media_candidates(rows: list[Any], *, fallback_chat_name: st
         paths = media_paths_from_raw_json(raw_json)
         if not paths and not _looks_like_media_json(raw_json):
             continue
+        # Layer 1 prefilter
+        local_path = paths[0] if paths else None
+        ok, filter_reason = _is_valid_image_file(local_path)
+        if not ok:
+            continue
         context = _telegram_context(rows, idx)
         score, reason = score_media_context(context, has_local_path=bool(paths))
         candidates.append(MediaCandidate(
@@ -120,7 +148,7 @@ def extract_telegram_media_candidates(rows: list[Any], *, fallback_chat_name: st
             timestamp=str(row["timestamp"]),
             sender_name=row["sender_name"] or "unknown",
             media_type=_media_type_from_raw_json(raw_json),
-            local_path=paths[0] if paths else None,
+            local_path=local_path,
             context=context or content,
             reason=reason,
             score=score,

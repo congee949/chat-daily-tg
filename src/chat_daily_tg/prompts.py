@@ -17,7 +17,8 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
 - 使用 Emoji 做少量视觉分区，标题必须带 Emoji；列表项不要堆 Emoji
 - 每条重点必须在句末标短来源：`（群名 / HH:MM）`，不要写 `微信 /` 或 `Telegram /`
 - 如果同一条来自多个群，合并为：`（群A / HH:MM；群B / HH:MM）`
-- 来源群名只能使用每个来源块里的「精简来源标签」，不要根据内容猜测
+- 来源群名只能使用每个来源块里的「精简来源标签」，不要根据内容猜测；超过 4 个汉字的群名必须缩写成 2-4 字简称
+- 同一精简来源在相邻 2 条内连续出现时，第 2 条起可用「↑」代替完整尾注，或完全省略来源
 - 不要把来源尾注写得过长；需要 sender 时只在人物很关键时写：`（群名 / sender / HH:MM）`
 
 结构：
@@ -113,6 +114,12 @@ SUMMARIZER_SYSTEM = """你是一个多来源聊天日报分析助手，擅长从
 
 严格遵守上面的 fence 顺序和格式，不要在 fence 之间写多余解释。
 
+## 跨群合并规则（重要）
+
+- 参考「跨群话题聚类」中的预处理结果：已确认跨群的话题，在精简版中必须合并为单条 bullet，尾注合并为 `（群A / HH:MM；群B / HH:MM）`
+- 单群独有的话题正常独立输出，不要强行合并
+- 跨群合并后只保留一条核心结论，不要为每个群都重复写一遍
+
 ## 去重规则（重要）
 
 在产出 `permanent_additions` 时：
@@ -138,6 +145,7 @@ def build_user_prompt(
     active_permanent_summary: str = "",
     active_hot_leads_summary: str = "",
     active_repeat_topics_summary: str = "",
+    cross_group_cluster_text: str = "",
 ) -> str:
     """Build the user prompt.
 
@@ -145,6 +153,7 @@ def build_user_prompt(
     detail_path: filesystem path to the detailed summary file (appended to concise version).
     active_permanent_summary / active_hot_leads_summary: existing DB context for death-signal detection.
     active_repeat_topics_summary: recent topics used to downgrade repeated old news.
+    cross_group_cluster_text: pre-computed cross-group topic clusters for deduplication.
     """
     groups_block = "\n\n".join(
         f"### === 来源: {name} ===\n\n"
@@ -168,11 +177,13 @@ def build_user_prompt(
 {active_repeat_topics_summary or "(空)"}
 """
 
+    cluster_section = cross_group_cluster_text or ""
+
     return f"""日期：{date}
 详细版文件路径（精简版末尾要附这个路径）：{detail_path}
 
 {context}
-
+{cluster_section}
 ## 今日原始聊天记录
 
 说明：每个来源块的标题中已经标明完整来源，例如 `微信 / 群名` 或 `Telegram / 群名`。

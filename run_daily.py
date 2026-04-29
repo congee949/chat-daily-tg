@@ -20,6 +20,11 @@ from chat_daily_tg.vision import VisionClient, analyze_media_candidates, vision_
 from chat_daily_tg.wx_exporter import export_group
 from chat_daily_tg.telegram_exporter import export_chat
 from chat_daily_tg.sanitize import sanitize_for_llm
+from chat_daily_tg.cross_group_cluster import (
+    cluster_cross_group_topics,
+    build_cluster_context,
+    validate_clusters_in_output,
+)
 
 log = logging.getLogger("run_daily")
 
@@ -144,8 +149,15 @@ def _run(date_str: str) -> int:
         HOT_LEADS_DIR, retention_days=cfg.hot_leads.retention_days,
     )
     repeat_ctx = active_repeat_topics_summary(REPEAT_TOPICS_JSONL, today=date_str)
-    log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars",
-             len(perm_ctx), len(hot_ctx), len(repeat_ctx))
+
+    # Cross-group clustering (preprocessing)
+    clusters = cluster_cross_group_topics(groups_with_content)
+    cluster_text = build_cluster_context(clusters)
+    log.info("cross-group clusters: %d total (%d cross-group)",
+             len(clusters), sum(1 for c in clusters if c.is_cross_group))
+
+    log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars, clusters=%d chars",
+             len(perm_ctx), len(hot_ctx), len(repeat_ctx), len(cluster_text))
 
     log.info("calling LLM for summary…")
     out = run_summary(
@@ -154,7 +166,13 @@ def _run(date_str: str) -> int:
         active_permanent_summary=perm_ctx,
         active_hot_leads_summary=hot_ctx,
         active_repeat_topics_summary=repeat_ctx,
+        cross_group_cluster_text=cluster_text,
     )
+
+    # Post-hoc validation
+    warnings = validate_clusters_in_output(clusters, out.concise_md)
+    for w in warnings:
+        log.warning("cluster validation: %s", w)
     log.info("LLM returned: concise=%d chars, detailed=%d chars",
              len(out.concise_md), len(out.detailed_md))
 

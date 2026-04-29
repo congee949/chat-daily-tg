@@ -74,6 +74,18 @@ class VisionClient:
         )
 
 
+def _is_empty_vision(analysis: VisionAnalysis) -> bool:
+    """Filter out images that are memes, pure selfies, or have no extractable text/info."""
+    summary = (analysis.summary or "").lower()
+    if analysis.type in ("meme", "unknown") and analysis.value_score < 0.75:
+        return True
+    if not analysis.key_facts and analysis.value_score < 0.55:
+        return True
+    if "表情包" in summary or "无文字" in summary or "纯图片" in summary:
+        return True
+    return False
+
+
 def analyze_media_candidates(
     *,
     client: VisionClient,
@@ -85,7 +97,13 @@ def analyze_media_candidates(
     for candidate in candidates:
         if candidate.score < min_prefilter_score or not candidate.local_path:
             continue
-        analysis = client.analyze(candidate)
+        try:
+            analysis = client.analyze(candidate)
+        except Exception:
+            continue
+        # Layer 3: OCR / empty image filter
+        if _is_empty_vision(analysis):
+            continue
         if analysis.value_score >= min_include_score:
             analyses.append(analysis)
     return analyses

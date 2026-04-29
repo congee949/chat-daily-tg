@@ -52,9 +52,20 @@ def _extract_candidate_topics(markdown: str, group_name: str) -> list[TopicSigna
     lines = markdown.splitlines()
     for i, line in enumerate(lines):
         line = line.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
+        if not line or line.startswith("#") or line.startswith("-") or line.startswith(">"):
             continue
         if len(line) < 15 or len(line) > 120:
+            continue
+        # Skip lines that look like sender prefixes, XML fragments, or pure noise
+        if line.startswith("**") and line.endswith("**"):
+            continue
+        if "<?xml" in line or "<msg>" in line or "<img " in line or "<emoticon" in line:
+            continue
+        if re.search(r"^[\s*.<>]+$", line):
+            continue
+        # Strip sender prefix like "**name**: content" to get the actual content
+        content = re.sub(r"^\*\*[^*]+\*\*:\s*", "", line)
+        if len(content) < 10:
             continue
         # Try to find a timestamp nearby
         ts = ""
@@ -64,7 +75,7 @@ def _extract_candidate_topics(markdown: str, group_name: str) -> list[TopicSigna
                 ts = m.group(1)
                 break
         topics.append(TopicSignature(
-            text=line,
+            text=content,
             source_group=group_name,
             timestamp=ts,
             original_indices=(i,),

@@ -40,7 +40,14 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     monkeypatch.setenv("TC", "123")
 
     llm_content = (
-        "```markdown concise\nConcise\n```\n\n"
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发。\n"
+        "- 第二条测试 bullet 增加长度。\n"
+        "\n"
+        "### 💰 钱 / 活动\n"
+        "- **测试主题**：测试内容足够长，超过一百字符限制。\n"
+        "```\n\n"
         "```markdown detailed\nDetailed\n```\n\n"
         "```json opportunities\n"
         '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[{"title":"T","summary":"S","source_group":"G1","has_new_information":true,"new_information":"N"}]}\n'
@@ -91,7 +98,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert "Detailed" in summary_path.read_text(encoding="utf-8")
     concise_path = tmp_path / "archive" / "2026" / "04" / "17" / "concise.md"
     assert concise_path.exists()
-    assert "Concise" in concise_path.read_text(encoding="utf-8")
+    assert "🌅 今日总览" in concise_path.read_text(encoding="utf-8")
     repeat_path = tmp_path / "repeat_topics.jsonl"
     assert repeat_path.exists()
     assert "T" in repeat_path.read_text(encoding="utf-8")
@@ -198,7 +205,14 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         reason="有活动信息",
     )
     llm_content = (
-        "```markdown concise\nConcise\n```\n\n"
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发。\n"
+        "- 第二条测试 bullet 增加长度。\n"
+        "\n"
+        "### 💰 钱 / 活动\n"
+        "- **测试主题**：测试内容足够长，超过一百字符限制。\n"
+        "```\n\n"
         "```markdown detailed\nDetailed\n```\n\n"
         "```json opportunities\n"
         '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'

@@ -61,7 +61,7 @@ case "${1:-deploy}" in
       launchctl load "$PLIST_DST"
       echo "✅ launchd 已重载"
     else
-      echo "⚠️ 未找到 $PLIST_SRC，跳过 launchd 配置"
+      echo "⚠️ 未找到 ${PLIST_SRC}，跳过 launchd 配置"
     fi
 
     echo "✅ 部署完成"

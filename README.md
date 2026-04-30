@@ -4,7 +4,7 @@
 
 ## 架构
 
-![chat-daily-tg 架构](chat-daily-architecture.png)
+![chat-daily-tg 架构](chat-daily-architecture-redraw.png)
 
 ## 功能清单
 

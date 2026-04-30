@@ -15,32 +15,49 @@ class SummaryOutput:
     opportunities: dict
 
 
+# Matches closed fences: ```lang tag\n...```
 _FENCE_RE = re.compile(r"```(\w+)\s+(\w+)\r?\n(.*?)```", re.DOTALL)
+# Matches an unclosed (truncated) fence: ```lang tag\n...<EOF> or before next fence
+_FENCE_UNCLOSED_RE = re.compile(r"```(\w+)\s+(\w+)\r?\n(.*?)(?=\n```|$)", re.DOTALL)
+
+
+def _extract_fences(text: str) -> dict[tuple[str, str], str]:
+    fences: dict[tuple[str, str], str] = {}
+    for m in _FENCE_RE.finditer(text):
+        lang, tag, body = m.group(1), m.group(2), m.group(3).strip()
+        fences[(lang, tag)] = body
+    for m in _FENCE_UNCLOSED_RE.finditer(text):
+        key = (m.group(1), m.group(2))
+        if key not in fences:
+            fences[key] = m.group(3).strip()
+    return fences
 
 
 def parse_summary_output(text: str) -> SummaryOutput:
     """Parse the triple-fence LLM output into structured pieces.
 
     Expects fences in order: `markdown concise`, `markdown detailed`, `json opportunities`.
+    Tolerates truncated output (unclosed fences) — only concise is strictly required.
     Normalizes CRLF/CR line endings to LF before parsing.
-    Raises ValueError on missing fences or malformed opportunities JSON.
+    Raises ValueError if concise fence is missing.
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    fences = {}
-    for m in _FENCE_RE.finditer(text):
-        lang, tag, body = m.group(1), m.group(2), m.group(3).strip()
-        fences[(lang, tag)] = body
-    required = [("markdown", "concise"), ("markdown", "detailed"), ("json", "opportunities")]
-    for key in required:
-        if key not in fences:
-            raise ValueError(f"missing fence {key[0]} {key[1]}")
-    try:
-        opportunities = json.loads(fences[("json", "opportunities")])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"opportunities fence is not valid JSON: {exc}") from exc
+    fences = _extract_fences(text)
+    if ("markdown", "concise") not in fences:
+        raise ValueError("missing fence markdown concise")
+    concise = fences[("markdown", "concise")]
+    detailed = fences.get(("markdown", "detailed"), "")
+    raw_opps = fences.get(("json", "opportunities"))
+    if raw_opps is not None:
+        try:
+            opportunities = json.loads(raw_opps)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"opportunities fence is not valid JSON: {exc}") from exc
+    else:
+        opportunities = {"permanent_additions": [], "hot_leads_additions": [], "death_signals": []}
     return SummaryOutput(
-        concise_md=fences[("markdown", "concise")],
-        detailed_md=fences[("markdown", "detailed")],
+        concise_md=concise,
+        detailed_md=detailed,
         opportunities=opportunities,
     )
 

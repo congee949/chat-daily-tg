@@ -1,4 +1,16 @@
 from __future__ import annotations
+import re
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+
+def _md_links_to_html(text: str) -> str:
+    """Convert Markdown [text](url) links to Telegram-compatible HTML."""
+    def _replace(m: re.Match) -> str:
+        label = m.group(1).replace("&", "&amp;").replace('"', "&quot;")
+        url = m.group(2).replace("&", "&amp;")
+        return f'<a href="{url}">{label}</a>'
+    return _MD_LINK_RE.sub(_replace, text)
 
 
 def abbreviate_sources(text: str, mapping: dict[str, str]) -> str:
@@ -25,4 +37,5 @@ def abbreviate_sources(text: str, mapping: dict[str, str]) -> str:
 def post_process_concise(text: str, abbreviations: dict[str, str] | None = None) -> str:
     """Apply all post-processing steps to the concise markdown before sending."""
     text = abbreviate_sources(text, abbreviations or {})
+    text = _md_links_to_html(text)
     return text

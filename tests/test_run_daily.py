@@ -289,7 +289,7 @@ models:
   embedding:
     enabled: true
     endpoint: "http://gemini"
-    model: "gemini-embedding-001"
+    model: "gemini-embedding-2"
     api_key_env: "GOOGLE_API_KEY"
     top_k: 2
     min_similarity: 0.1

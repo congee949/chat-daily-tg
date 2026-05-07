@@ -1,5 +1,9 @@
+import pytest
+from pytest_httpx import HTTPXMock
+
 from chat_daily_tg.evidence_index import (
-    EvidenceIndex,
+    GeminiEmbeddingError,
+    GeminiEmbedder,
     build_evidence_context_for_summary,
     build_evidence_index,
     cosine_similarity,
@@ -10,11 +14,17 @@ from chat_daily_tg.evidence_index import (
 
 
 class FakeEmbedder:
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
         vectors = []
         for text in texts:
             lowered = text.lower()
-            if "4.3" in lowered or "claude" in lowered or "grok" in lowered or "实时语音" in lowered:
+            if "4.3" in lowered or "claude" in lowered or "grok" in lowered or "实时语音" in lowered or "读x" in lowered:
                 vectors.append([1.0, 0.0, 0.0])
             elif "vpn" in lowered or "红头文件" in lowered:
                 vectors.append([0.0, 1.0, 0.0])
@@ -69,6 +79,68 @@ def test_build_evidence_index_and_retrieve_context(tmp_path):
 
 def test_render_evidence_hits_empty():
     assert render_evidence_hits([]) == "(未检索到高相似证据)"
+
+
+def test_extract_chunks_keeps_adjacent_short_messages_separate():
+    chunks = extract_chunks([
+        ("Telegram / G1", "[Telegram / G1 / 14:15 / A] 4.3出了哦\n[Telegram / G1 / 14:16 / B] Claude 双倍额度活动"),
+    ])
+
+    assert len(chunks) == 2
+    assert all("4.3出了哦\n" not in chunk.text for chunk in chunks)
+
+
+def test_extract_chunks_source_ids_include_source_ordinal_for_duplicates():
+    chunks = extract_chunks([
+        ("Telegram / G1", "[Telegram / G1 / 14:15 / A] first"),
+        ("Telegram / G1", "[Telegram / G1 / 14:15 / A] second"),
+    ])
+
+    assert len({chunk.source_id for chunk in chunks}) == 2
+
+
+def test_gemini_embedder_sends_header_dimension_and_task_type(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+        method="POST",
+        json={"embedding": {"values": [0.1, 0.2]}},
+    )
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="secret-key",
+        output_dimensionality=768,
+    )
+
+    vectors = embedder.embed_queries(["Claude 4.3"])
+
+    assert vectors == [[0.1, 0.2]]
+    request = httpx_mock.get_request()
+    assert request.headers["x-goog-api-key"] == "secret-key"
+    assert "secret-key" not in str(request.url)
+    body = request.read().decode()
+    assert '"taskType":"RETRIEVAL_QUERY"' in body.replace(" ", "")
+    assert '"outputDimensionality":768' in body.replace(" ", "")
+
+
+def test_gemini_embedder_sanitizes_http_errors(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+        method="POST",
+        status_code=400,
+        json={"error": {"message": "bad"}},
+    )
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="secret-key",
+    )
+
+    with pytest.raises(GeminiEmbeddingError) as exc:
+        embedder.embed_documents(["text"])
+
+    assert "HTTP 400" in str(exc.value)
+    assert "secret-key" not in str(exc.value)
 
 
 def test_cosine_similarity():

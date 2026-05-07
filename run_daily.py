@@ -174,6 +174,7 @@ def _run(date_str: str) -> int:
                 model=embedding_model.model,
                 api_key=embedding_api_key,
                 timeout=embedding_model.timeout,
+                output_dimensionality=embedding_model.dimension,
             )
             evidence_index = build_evidence_index(
                 index_path=archive_dir / "evidence.sqlite",
@@ -185,7 +186,7 @@ def _run(date_str: str) -> int:
                 context = build_evidence_context_for_summary(
                     index=evidence_index,
                     embedder=embedder,
-                    summary_text=summary_output.concise_md,
+                    summary_text=f"{summary_output.concise_md}\n\n{summary_output.detailed_md}",
                     top_k=embedding_model.top_k,
                     min_similarity=embedding_model.min_similarity,
                 )

@@ -307,7 +307,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         "- **Claude 4.3 发布**：实时语音第一，待验证；这条测试内容故意写长，避免空内容保护触发，并用于验证 embedding evidence 会进入 verifier prompt（G1 / 14:15）\n"
         "- 第二条测试内容继续增加长度，确保完整 daily pipeline 能走到发送前的归档步骤。\n"
         "```\n\n"
-        "```markdown detailed\nDetailed\n```\n\n"
+        "```markdown detailed\n## 全局重点\n- 详细版里的 Grok 4.3 发布 claim 也需要 evidence retrieval。\n```\n\n"
         "```json opportunities\n"
         '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
         "```"
@@ -324,7 +324,8 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n\n### 2026-05-06 14:22\n\n**B**: 这个能直接读x\n",
             media_candidates=[],
         )
-        embedder_cls.return_value.embed.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        embedder_cls.return_value.embed_documents.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        embedder_cls.return_value.embed_queries.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         mock_chat.side_effect = [
             (llm_content, {"total_tokens": 10}),
             (verified_content, {"total_tokens": 8}),
@@ -343,5 +344,6 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     verifier_prompt = mock_chat.call_args_list[1].args[0]
     assert "## Embedding 检索证据" in verifier_prompt
     assert "4.3出了哦" in verifier_prompt
+    assert "Grok 4.3 发布" in verifier_prompt
     assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence.sqlite").exists()
     assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence-context.md").exists()

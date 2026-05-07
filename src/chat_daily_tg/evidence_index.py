@@ -33,7 +33,10 @@ class EvidenceHit:
 
 
 class Embedder(Protocol):
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        ...
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
         ...
 
 
@@ -44,13 +47,13 @@ _WX_MESSAGE_RE = re.compile(r"^\*\*(?P<sender>[^*]+)\*\*:\s*(?P<text>.*)$")
 
 def extract_chunks(groups_with_content: list[tuple[str, str]]) -> list[EvidenceChunk]:
     chunks: list[EvidenceChunk] = []
-    for source_name, content in groups_with_content:
-        chunks.extend(_extract_telegram_chunks(source_name, content))
-        chunks.extend(_extract_wx_chunks(source_name, content))
-    return _merge_short_chunks(chunks)
+    for source_index, (source_name, content) in enumerate(groups_with_content):
+        chunks.extend(_extract_telegram_chunks(source_name, content, source_index=source_index))
+        chunks.extend(_extract_wx_chunks(source_name, content, source_index=source_index))
+    return chunks
 
 
-def _extract_telegram_chunks(source_name: str, content: str) -> list[EvidenceChunk]:
+def _extract_telegram_chunks(source_name: str, content: str, *, source_index: int) -> list[EvidenceChunk]:
     chunks: list[EvidenceChunk] = []
     for idx, line in enumerate(content.splitlines()):
         match = _TELEGRAM_RE.match(line.strip())
@@ -63,7 +66,7 @@ def _extract_telegram_chunks(source_name: str, content: str) -> list[EvidenceChu
         time = match.group("time").strip()
         sender = match.group("sender").strip()
         chunks.append(EvidenceChunk(
-            source_id=f"{source_name}#{time}#{idx}",
+            source_id=f"{source_index}#{source_name}#{time}#{idx}",
             source_name=group or source_name,
             time=time,
             sender=sender,
@@ -72,7 +75,7 @@ def _extract_telegram_chunks(source_name: str, content: str) -> list[EvidenceChu
     return chunks
 
 
-def _extract_wx_chunks(source_name: str, content: str) -> list[EvidenceChunk]:
+def _extract_wx_chunks(source_name: str, content: str, *, source_index: int) -> list[EvidenceChunk]:
     chunks: list[EvidenceChunk] = []
     current_time = ""
     for idx, line in enumerate(content.splitlines()):
@@ -88,7 +91,7 @@ def _extract_wx_chunks(source_name: str, content: str) -> list[EvidenceChunk]:
         if not text:
             continue
         chunks.append(EvidenceChunk(
-            source_id=f"{source_name}#{current_time}#{idx}",
+            source_id=f"{source_index}#{source_name}#{current_time}#{idx}",
             source_name=source_name,
             time=current_time,
             sender=match.group("sender").strip(),
@@ -97,54 +100,61 @@ def _extract_wx_chunks(source_name: str, content: str) -> list[EvidenceChunk]:
     return chunks
 
 
-def _merge_short_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
-    merged: list[EvidenceChunk] = []
-    pending: EvidenceChunk | None = None
-    for chunk in chunks:
-        if pending is None:
-            pending = chunk
-            continue
-        same_source = pending.source_name == chunk.source_name
-        short_pair = len(pending.text) < 40 or len(chunk.text) < 40
-        if same_source and short_pair:
-            pending = EvidenceChunk(
-                source_id=f"{pending.source_id}+{chunk.source_id}",
-                source_name=pending.source_name,
-                time=pending.time or chunk.time,
-                sender=pending.sender,
-                text=f"{pending.text}\n{chunk.time} {chunk.sender}: {chunk.text}",
-            )
-        else:
-            merged.append(pending)
-            pending = chunk
-    if pending is not None:
-        merged.append(pending)
-    return merged
+class GeminiEmbeddingError(RuntimeError):
+    pass
 
 
 class GeminiEmbedder:
-    def __init__(self, *, endpoint: str, model: str, api_key: str, timeout: float = 120.0):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        model: str,
+        api_key: str,
+        timeout: float = 120.0,
+        output_dimensionality: int | None = None,
+    ):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.output_dimensionality = output_dimensionality
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, task_type="RETRIEVAL_DOCUMENT")
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, task_type="RETRIEVAL_QUERY")
+
+    def _embed(self, texts: list[str], *, task_type: str) -> list[list[float]]:
         if not texts:
             return []
         vectors: list[list[float]] = []
         with httpx.Client(timeout=self.timeout) as client:
             for text in texts:
-                response = client.post(
-                    f"{self.endpoint}/models/{self.model}:embedContent",
-                    params={"key": self.api_key},
-                    json={"content": {"parts": [{"text": text}]}},
-                )
-                response.raise_for_status()
+                body: dict[str, object] = {
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": task_type,
+                }
+                if self.output_dimensionality is not None:
+                    body["outputDimensionality"] = self.output_dimensionality
+                try:
+                    response = client.post(
+                        f"{self.endpoint}/models/{self.model}:embedContent",
+                        headers={"x-goog-api-key": self.api_key},
+                        json=body,
+                    )
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise GeminiEmbeddingError(
+                        f"Gemini embedding request failed with HTTP {exc.response.status_code}"
+                    ) from exc
+                except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                    raise GeminiEmbeddingError(f"Gemini embedding request failed: {type(exc).__name__}") from exc
                 data = response.json()
                 values = data.get("embedding", {}).get("values")
                 if not isinstance(values, list):
-                    raise ValueError("Gemini embedding response missing embedding.values")
+                    raise GeminiEmbeddingError("Gemini embedding response missing embedding.values")
                 vectors.append([float(v) for v in values])
         return vectors
 
@@ -220,9 +230,13 @@ def build_evidence_index(
     embedder: Embedder,
 ) -> EvidenceIndex:
     chunks = extract_chunks(groups_with_content)
-    vectors = embedder.embed([chunk.text for chunk in chunks])
+    vectors = embedder.embed_documents([chunk.text for chunk in chunks])
     index = EvidenceIndex(index_path)
-    index.replace(chunks, vectors)
+    try:
+        index.replace(chunks, vectors)
+    except Exception:
+        index.close()
+        raise
     return index
 
 
@@ -290,7 +304,7 @@ def retrieve_evidence_for_text(
     top_k: int,
     min_similarity: float,
 ) -> list[EvidenceHit]:
-    vectors = embedder.embed([text])
+    vectors = embedder.embed_queries([text])
     if not vectors:
         return []
     return index.search(vectors[0], top_k=top_k, min_similarity=min_similarity)

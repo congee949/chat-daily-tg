@@ -29,6 +29,12 @@ class OptionalModel(LLM):
     enabled: bool = False
 
 
+class EmbeddingModel(OptionalModel):
+    dimension: int = 768
+    top_k: int = 8
+    min_similarity: float = 0.35
+
+
 class ImageModel(OptionalModel):
     mode: Literal["off", "auto", "always"] = "off"
 
@@ -37,6 +43,7 @@ class Models(BaseModel):
     summary: LLM
     vision: OptionalModel | None = None
     image: ImageModel | None = None
+    embedding: EmbeddingModel | None = None
 
 
 class Telegram(BaseModel):

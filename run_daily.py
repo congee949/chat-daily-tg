@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 from datetime import date, timedelta
+import json
 import logging
 import os
 import sys
@@ -24,6 +25,11 @@ from chat_daily_tg.cross_group_cluster import (
     cluster_cross_group_topics,
     build_cluster_context,
     validate_clusters_in_output,
+)
+from chat_daily_tg.evidence_index import (
+    GeminiEmbedder,
+    build_evidence_context_for_summary,
+    build_evidence_index,
 )
 from chat_daily_tg.post_process import post_process_concise
 
@@ -157,18 +163,55 @@ def _run(date_str: str) -> int:
     log.info("cross-group clusters: %d total (%d cross-group)",
              len(clusters), sum(1 for c in clusters if c.is_cross_group))
 
-    log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars, clusters=%d chars",
-             len(perm_ctx), len(hot_ctx), len(repeat_ctx), len(cluster_text))
+    evidence_context_builder = None
+    evidence_index = None
+    embedding_model = cfg.models.embedding if cfg.models else None
+    if embedding_model and embedding_model.enabled:
+        try:
+            embedding_api_key = os.environ[embedding_model.api_key_env]
+            embedder = GeminiEmbedder(
+                endpoint=embedding_model.endpoint,
+                model=embedding_model.model,
+                api_key=embedding_api_key,
+                timeout=embedding_model.timeout,
+            )
+            evidence_index = build_evidence_index(
+                index_path=archive_dir / "evidence.sqlite",
+                groups_with_content=groups_with_content,
+                embedder=embedder,
+            )
+
+            def evidence_context_builder(summary_output):
+                context = build_evidence_context_for_summary(
+                    index=evidence_index,
+                    embedder=embedder,
+                    summary_text=summary_output.concise_md,
+                    top_k=embedding_model.top_k,
+                    min_similarity=embedding_model.min_similarity,
+                )
+                (archive_dir / "evidence-context.md").write_text(context, encoding="utf-8")
+                log.info("embedding evidence context built: %d chars", len(context))
+                return context
+        except Exception as e:
+            log.warning("embedding evidence index skipped: %s", e)
+
+    log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars, clusters=%d chars, embedding=%s",
+             len(perm_ctx), len(hot_ctx), len(repeat_ctx), len(cluster_text), bool(evidence_context_builder))
 
     log.info("calling LLM for summary…")
-    out = run_summary(
-        llm_client=llm, date=date_str,
-        groups_with_content=groups_with_content, detail_path=detail_path,
-        active_permanent_summary=perm_ctx,
-        active_hot_leads_summary=hot_ctx,
-        active_repeat_topics_summary=repeat_ctx,
-        cross_group_cluster_text=cluster_text,
-    )
+    try:
+        out = run_summary(
+            llm_client=llm, date=date_str,
+            groups_with_content=groups_with_content, detail_path=detail_path,
+            active_permanent_summary=perm_ctx,
+            active_hot_leads_summary=hot_ctx,
+            active_repeat_topics_summary=repeat_ctx,
+            cross_group_cluster_text=cluster_text,
+            evidence_context_builder=evidence_context_builder,
+        )
+    finally:
+        if evidence_index is not None:
+            evidence_index.close()
 
     # Post-hoc validation
     warnings = validate_clusters_in_output(clusters, out.concise_md)
@@ -179,6 +222,11 @@ def _run(date_str: str) -> int:
 
     (archive_dir / "concise.md").write_text(out.concise_md, encoding="utf-8")
     (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
+    if out.verification is not None:
+        (archive_dir / "verification.json").write_text(
+            json.dumps(out.verification, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     concise_processed = post_process_concise(out.concise_md, cfg.source_abbreviations)
 

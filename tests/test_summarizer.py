@@ -1,5 +1,11 @@
 import pytest
-from chat_daily_tg.summarizer import parse_summary_output, run_summary, SummaryOutput
+from chat_daily_tg.summarizer import (
+    VERIFIER_SYSTEM,
+    parse_summary_output,
+    parse_verified_summary_output,
+    run_summary,
+    SummaryOutput,
+)
 
 
 SAMPLE_OUTPUT = """```markdown concise
@@ -22,6 +28,22 @@ Test detailed
 }
 ```"""
 
+VERIFIED_OUTPUT = SAMPLE_OUTPUT + """
+
+```json verification
+{
+  "checked_claims": [
+    {
+      "claim": "Claude 4.3 发布",
+      "status": "downgraded",
+      "reason": "原文只有 4.3，没有明确实体名",
+      "evidence": ["G1 / 14:15: 4.3出了哦"],
+      "confidence": "high"
+    }
+  ]
+}
+```"""
+
 
 def test_parse_summary_output_extracts_three_sections():
     out = parse_summary_output(SAMPLE_OUTPUT)
@@ -31,9 +53,9 @@ def test_parse_summary_output_extracts_three_sections():
     assert out.opportunities["permanent_additions"] == []
 
 
-def test_parse_summary_output_missing_fence_raises():
-    bad = "```markdown concise\nOnly one fence\n```"
-    with pytest.raises(ValueError, match="detailed"):
+def test_parse_summary_output_missing_concise_fence_raises():
+    bad = "```markdown detailed\nOnly detailed\n```"
+    with pytest.raises(ValueError, match="concise"):
         parse_summary_output(bad)
 
 
@@ -61,8 +83,21 @@ d
         parse_summary_output(bad)
 
 
-def test_run_summary_repairs_malformed_first_output(tmp_path):
-    good = """```markdown concise
+def test_parse_verified_summary_output_extracts_verification():
+    out = parse_verified_summary_output(VERIFIED_OUTPUT)
+
+    assert out.verification is not None
+    assert out.verification["checked_claims"][0]["status"] == "downgraded"
+    assert out.verification["checked_claims"][0]["evidence"] == ["G1 / 14:15: 4.3出了哦"]
+
+
+def test_parse_verified_summary_output_requires_verification_fence():
+    with pytest.raises(ValueError, match="json verification"):
+        parse_verified_summary_output(SAMPLE_OUTPUT)
+
+
+def test_run_summary_repairs_malformed_first_output_then_verifies(tmp_path):
+    repaired = """```markdown concise
 ### 🌅 今日总览
 - ok
 ```
@@ -75,6 +110,11 @@ ok
 ```json opportunities
 {"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}
 ```"""
+    verified = repaired + """
+
+```json verification
+{"checked_claims":[]}
+```"""
 
     class FakeLLM:
         def __init__(self):
@@ -84,7 +124,9 @@ ok
             self.calls.append((prompt, system))
             if len(self.calls) == 1:
                 return "### 🌅 今日总览\n- missing fences", {}
-            return good, {}
+            if len(self.calls) == 2:
+                return repaired, {}
+            return verified, {}
 
     detail_path = tmp_path / "summary.md"
     llm = FakeLLM()
@@ -96,8 +138,91 @@ ok
     )
 
     assert out.concise_md.startswith("### 🌅")
-    assert len(llm.calls) == 2
+    assert out.verification == {"checked_claims": []}
+    assert len(llm.calls) == 3
+    assert llm.calls[-1][1] == VERIFIER_SYSTEM
+    assert "## 原始聊天记录" in llm.calls[-1][0]
+    assert "## 日报初稿" in llm.calls[-1][0]
     assert (tmp_path / "llm-output-unparsed.md").exists()
+
+
+def test_run_summary_passes_embedding_evidence_context_to_verifier(tmp_path):
+    draft = SAMPLE_OUTPUT
+    verified = VERIFIED_OUTPUT
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, system=None):
+            self.calls.append((prompt, system))
+            return (draft if len(self.calls) == 1 else verified), {}
+
+    llm = FakeLLM()
+    run_summary(
+        llm_client=llm,
+        date="2026-05-06",
+        groups_with_content=[("Telegram / G1", "content")],
+        detail_path=str(tmp_path / "summary.md"),
+        evidence_context_builder=lambda output: "### Claim 查询：Claude 4.3\n- [1.000] G1 / 14:15 / A: 4.3出了哦",
+    )
+
+    verifier_prompt = llm.calls[1][0]
+    assert "## Embedding 检索证据" in verifier_prompt
+    assert "4.3出了哦" in verifier_prompt
+
+
+
+def test_run_summary_verifier_can_downgrade_ambiguous_entity(tmp_path):
+    draft = """```markdown concise
+### 🧠 AI / 工具
+- **Claude 4.3 发布**：实时语音第一，TTS 不如 Gemini（G1 / 14:15）
+```
+
+```markdown detailed
+## 全局重点
+- Claude 4.3 发布。
+```
+
+```json opportunities
+{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}
+```"""
+    verified = """```markdown concise
+### ⚠️ 风险 / 待验证
+- **疑似某 4.3 模型发布**：原文只提到“4.3出了”和可读 X，未明确模型名，需外部验证（G1 / 14:15）
+```
+
+```markdown detailed
+## 全局重点
+- 原文提到“4.3出了”，但未明确是 Claude、Grok 或其他模型。
+```
+
+```json opportunities
+{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}
+```
+
+```json verification
+{"checked_claims":[{"claim":"Claude 4.3 发布","status":"downgraded","reason":"原文没有 Claude 实体名","evidence":["G1 / 14:15: 4.3出了哦"],"confidence":"high"}]}
+```"""
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, system=None):
+            self.calls.append((prompt, system))
+            return (draft if len(self.calls) == 1 else verified), {}
+
+    out = run_summary(
+        llm_client=FakeLLM(),
+        date="2026-05-06",
+        groups_with_content=[("Telegram / G1", "[Telegram / G1 / 14:15 / A] 4.3出了哦\n[Telegram / G1 / 14:22 / B] 这个能直接读x")],
+        detail_path=str(tmp_path / "summary.md"),
+    )
+
+    assert "Claude 4.3" not in out.concise_md
+    assert "疑似某 4.3 模型" in out.concise_md
+    assert out.verification["checked_claims"][0]["status"] == "downgraded"
 
 
 def test_prompt_requires_unified_source_tagged_concise_output():

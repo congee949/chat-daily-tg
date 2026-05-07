@@ -113,6 +113,14 @@ models:
     endpoint: "http://127.0.0.1:8317/v1"
     model: "gpt-image-2"
     api_key_env: "IMAGE_API_KEY"
+  embedding:
+    enabled: true
+    endpoint: "https://generativelanguage.googleapis.com/v1beta"
+    model: "gemini-embedding-001"
+    api_key_env: "GOOGLE_API_KEY"
+    dimension: 768
+    top_k: 6
+    min_similarity: 0.4
 telegram:
   bot_token_env: "TG_BOT_TOKEN"
   chat_id_env: "TG_CHAT_ID"
@@ -125,3 +133,7 @@ telegram:
     assert cfg.models.vision.enabled is True
     assert cfg.models.vision.model == "gemini"
     assert cfg.models.image.mode == "auto"
+    assert cfg.models.embedding.enabled is True
+    assert cfg.models.embedding.model == "gemini-embedding-001"
+    assert cfg.models.embedding.top_k == 6
+    assert cfg.models.embedding.min_similarity == 0.4

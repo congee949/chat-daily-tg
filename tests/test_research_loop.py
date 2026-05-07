@@ -70,7 +70,7 @@ def test_run_research_once_records_usage_from_llm():
     assert result.markdownv2_render_status == "ok"
 
 
-def test_run_research_once_marks_missing_fence_as_parse_error():
+def test_run_research_once_marks_missing_concise_fence_as_parse_error():
     spec = ResearchSpec(
         experiment_id="truncated",
         date="2026-04-17",
@@ -81,7 +81,7 @@ def test_run_research_once_marks_missing_fence_as_parse_error():
         parse_mode="HTML",
     )
 
-    result = run_research_once(spec, sample_output="```markdown concise\nunfinished")
+    result = run_research_once(spec, sample_output="```markdown detailed\nunfinished")
 
     assert result.status == "parse_error"
     assert result.truncated_suspected == "yes"

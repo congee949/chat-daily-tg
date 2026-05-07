@@ -53,6 +53,11 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[{"title":"T","summary":"S","source_group":"G1","has_new_information":true,"new_information":"N"}]}\n'
         "```"
     )
+    verified_content = llm_content + (
+        "\n\n```json verification\n"
+        '{"checked_claims":[{"claim":"测试主题","status":"supported","reason":"测试","evidence":["G1 / 10:00"],"confidence":"high"}]}\n'
+        "```"
+    )
 
     with patch("chat_daily_tg.wx_exporter.subprocess.run") as run, \
          patch("run_daily.export_chat") as mock_export_chat, \
@@ -68,8 +73,11 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# Telegram: TG1\n\n[Telegram / TG1 / 10:00 / A] hello\n",
         )
 
-        # llm.chat returns (content, usage)
-        mock_chat.return_value = (llm_content, {"total_tokens": 10})
+        # llm.chat returns initial draft, then verified output
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
 
         # tg sender
         tg_resp = MagicMock()
@@ -83,11 +91,14 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
         rc = run_daily.main(date_str="2026-04-17")
         assert rc == 0
-        prompt = mock_chat.call_args.args[0]
-        assert "### === 来源: 微信 / G1 ===" in prompt
-        assert "来源标签：微信 / G1" in prompt
-        assert "### === 来源: Telegram / TG1 ===" in prompt
-        assert "来源标签：Telegram / TG1" in prompt
+        first_prompt = mock_chat.call_args_list[0].args[0]
+        verifier_prompt = mock_chat.call_args_list[1].args[0]
+        assert "### === 来源: 微信 / G1 ===" in first_prompt
+        assert "完整来源标签：微信 / G1" in first_prompt
+        assert "### === 来源: Telegram / TG1 ===" in first_prompt
+        assert "完整来源标签：Telegram / TG1" in first_prompt
+        assert "## 原始聊天记录" in verifier_prompt
+        assert "## 日报初稿" in verifier_prompt
         assert len(tg_client_instance.post.call_args_list) == 1
         sent_data = tg_client_instance.post.call_args_list[0].kwargs.get("data", {})
         assert sent_data["parse_mode"] == "HTML"
@@ -99,6 +110,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     concise_path = tmp_path / "archive" / "2026" / "04" / "17" / "concise.md"
     assert concise_path.exists()
     assert "🌅 今日总览" in concise_path.read_text(encoding="utf-8")
+    verification_path = tmp_path / "archive" / "2026" / "04" / "17" / "verification.json"
+    assert verification_path.exists()
+    assert "测试主题" in verification_path.read_text(encoding="utf-8")
     repeat_path = tmp_path / "repeat_topics.jsonl"
     assert repeat_path.exists()
     assert "T" in repeat_path.read_text(encoding="utf-8")
@@ -218,6 +232,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
         "```"
     )
+    verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
 
     with patch("run_daily.export_group") as mock_export_group, \
          patch("run_daily.analyze_media_candidates", return_value=[analysis]), \
@@ -229,7 +244,10 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# group\nmessage",
             media_candidates=[candidate],
         )
-        mock_chat.return_value = (llm_content, {"total_tokens": 10})
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
         tg_resp = MagicMock()
         tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
         tg_resp.raise_for_status = MagicMock()
@@ -241,7 +259,89 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         rc = run_daily.main(date_str="2026-04-17")
 
     assert rc == 0
-    prompt = mock_chat.call_args.args[0]
-    assert "### === 来源: 图片理解 / 多来源 ===" in prompt
-    assert "图片里是活动入口" in prompt
+    first_prompt = mock_chat.call_args_list[0].args[0]
+    verifier_prompt = mock_chat.call_args_list[1].args[0]
+    assert "### === 来源: 图片理解 / 多来源 ===" in first_prompt
+    assert "图片里是活动入口" in first_prompt
+    assert "### === 来源: 图片理解 / 多来源 ===" in verifier_prompt
+    assert "图片里是活动入口" in verifier_prompt
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "vision.md").exists()
+
+
+def test_run_daily_adds_embedding_evidence_to_verifier_prompt(tmp_path, monkeypatch):
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+models:
+  summary: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+  embedding:
+    enabled: true
+    endpoint: "http://gemini"
+    model: "gemini-embedding-001"
+    api_key_env: "GOOGLE_API_KEY"
+    top_k: 2
+    min_similarity: 0.1
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-google")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+    llm_content = (
+        "```markdown concise\n"
+        "### ⚠️ 风险 / 待验证\n"
+        "- **Claude 4.3 发布**：实时语音第一，待验证；这条测试内容故意写长，避免空内容保护触发，并用于验证 embedding evidence 会进入 verifier prompt（G1 / 14:15）\n"
+        "- 第二条测试内容继续增加长度，确保完整 daily pipeline 能走到发送前的归档步骤。\n"
+        "```\n\n"
+        "```markdown detailed\nDetailed\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+    verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("run_daily.GeminiEmbedder") as embedder_cls, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1",
+            message_count=2,
+            content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n\n### 2026-05-06 14:22\n\n**B**: 这个能直接读x\n",
+            media_candidates=[],
+        )
+        embedder_cls.return_value.embed.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        rc = run_daily.main(date_str="2026-05-06")
+
+    assert rc == 0
+    verifier_prompt = mock_chat.call_args_list[1].args[0]
+    assert "## Embedding 检索证据" in verifier_prompt
+    assert "4.3出了哦" in verifier_prompt
+    assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence.sqlite").exists()
+    assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence-context.md").exists()

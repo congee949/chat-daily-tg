@@ -12,6 +12,7 @@
 |---|---|
 | 微信群导出 | 通过本地 XML/DB 读取指定微信群前一天聊天 |
 | Telegram 群导出 | 通过 [tg-cli](https://github.com/public-clis/tg-cli) 本地 SQLite 读取 |
+| Telegram 频道日报 | 每天单独汇总指定频道昨天内容，带来源编号，另发一条“昨日频道推送”到同一个 bot |
 | LLM 摘要 | 调用 DeepSeek 生成适合手机阅读的统一简报 |
 | 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合 |
 | Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，注入 verifier |
@@ -26,9 +27,11 @@
 ```
 .
 ├── run_daily.py                    # 主入口
+├── run_channel_daily.py            # Telegram 频道日报入口
 ├── src/chat_daily_tg/
 │   ├── wx_exporter.py              # 微信聊天导出
 │   ├── telegram_exporter.py        # Telegram 聊天导出
+│   ├── channel_daily.py            # 频道日报收集、prompt、溯源和归档
 │   ├── context_builder.py          # 上下文拼装
 │   ├── summarizer.py               # LLM 摘要和二次事实核验
 │   ├── evidence_index.py           # Embedding 证据索引和检索
@@ -57,7 +60,8 @@
 │   ├── research_loop.py            # 研究循环独立运行
 │   └── weekly_media_rules_review.py # 周媒体规则回顾
 ├── launchd/
-│   └── com.chat-daily-tg.agent.plist
+│   ├── com.chat-daily-tg.agent.plist
+│   └── com.chat-daily-tg-channel.agent.plist
 └── tests/
 ```
 
@@ -154,6 +158,9 @@ Embedding 证据检索也是可选功能。开启 `models.embedding.enabled` 后
 | `wechat-*.md` / `telegram-*.md` | 当天原始导出 |
 | `concise.md` | 最终 Telegram 精简版 |
 | `summary.md` | 最终本地详细版 |
+| `channel-daily-raw.md` | 昨日频道推送的频道原文合并归档，每条原文带 `Cxx-xxx` 来源编号 |
+| `channel-daily-summary.md` | 昨日频道推送的最终 Telegram 文本，摘要条目保留来源编号 |
+| `channel-daily-metadata.json` | 频道日报的频道计数、LLM usage、来源编号到频道/时间/msg_id/t.me 链接的映射 |
 | `verification.json` | verifier 检查过的 claim、状态、理由、证据和置信度 |
 | `evidence.sqlite` | 当天消息 chunk 的本地 embedding 索引（开启 embedding 时生成） |
 | `evidence-context.md` | 从初稿 claim 检索出的候选证据（开启 embedding 时生成） |
@@ -169,7 +176,11 @@ cd <repo>
 source .venv/bin/activate
 python run_daily.py
 python run_daily.py --date 2026-04-17
+python run_channel_daily.py
+python run_channel_daily.py --date 2026-05-08 --dry-run
 ```
+
+`run_channel_daily.py` 会读取昨天的 `投机之路`、`科技圈🎗在花频道📮`、`LydiaPod`、`Gary Playa` 四个 Telegram 频道，生成一条独立的“昨日频道推送”。它复用 `~/chat-daily/config.yaml` 里的模型和 Telegram bot 配置，不混入主聊天日报。摘要中的每条结论会保留 `Cxx-xxx` 来源编号，编号映射写入 `channel-daily-metadata.json`，可追溯到频道、时间、msg_id 和可用的 `t.me/c/...` 链接。
 
 ### 安装 launchd 定时任务（macOS）
 

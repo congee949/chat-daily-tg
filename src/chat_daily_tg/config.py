@@ -89,6 +89,7 @@ class Config(BaseModel):
     schedule: Schedule = Field(default_factory=Schedule)
     hot_leads: HotLeads = Field(default_factory=HotLeads)
     llm: LLM | None = None
+    gemini: LLM | None = None
     models: Models | None = None
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
@@ -120,6 +121,14 @@ class Config(BaseModel):
         if not has_wechat and not has_telegram:
             raise ValueError("configure at least one source: sources.wechat.groups or sources.telegram.chats")
         return self
+
+    def override_summary_model(self, model_name: str) -> None:
+        """Switch summary model by alias (e.g. 'gemini'). Raises KeyError if not found."""
+        alt = getattr(self, model_name, None)
+        if alt is None or not isinstance(alt, LLM):
+            raise KeyError(f"unknown model alias: {model_name}")
+        self.models.summary = alt
+        self.llm = alt
 
 
 def load_config(path: Path) -> Config:

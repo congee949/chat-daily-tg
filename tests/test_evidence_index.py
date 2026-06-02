@@ -14,7 +14,11 @@ from chat_daily_tg.evidence_index import (
 
 
 class FakeEmbedder:
+    def __init__(self):
+        self.document_texts: list[str] = []
+
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.document_texts.extend(texts)
         return self._embed(texts)
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
@@ -77,6 +81,41 @@ def test_build_evidence_index_and_retrieve_context(tmp_path):
     index.close()
 
 
+def test_build_evidence_index_filters_low_information_idle_chat(tmp_path):
+    groups = [
+        ("Telegram / G1", "\n".join([
+            "[Telegram / G1 / 10:00 / A] 哈哈哈",
+            "[Telegram / G1 / 10:01 / B] ok",
+            "[Telegram / G1 / 10:02 / C] 今天天气不错大家随便聊聊",
+            "[Telegram / G1 / 10:03 / D] Claude 4.3 发布了，实时语音第一",
+            "[Telegram / G1 / 10:04 / E] 这个能直接读x",
+        ])),
+    ]
+    embedder = FakeEmbedder()
+
+    index = build_evidence_index(index_path=tmp_path / "evidence.sqlite", groups_with_content=groups, embedder=embedder)
+
+    assert "Claude 4.3 发布了，实时语音第一" in embedder.document_texts
+    assert "这个能直接读x" in embedder.document_texts
+    assert "哈哈哈" not in embedder.document_texts
+    assert "ok" not in embedder.document_texts
+    assert "今天天气不错大家随便聊聊" not in embedder.document_texts
+    index.close()
+
+
+def test_build_evidence_index_keeps_short_high_risk_messages(tmp_path):
+    groups = [
+        ("Telegram / G1", "[Telegram / G1 / 14:15 / A] 4.3出了哦\n[Telegram / G1 / 14:16 / B] 哈哈"),
+    ]
+    embedder = FakeEmbedder()
+
+    index = build_evidence_index(index_path=tmp_path / "evidence.sqlite", groups_with_content=groups, embedder=embedder)
+
+    assert "4.3出了哦" in embedder.document_texts
+    assert "哈哈" not in embedder.document_texts
+    index.close()
+
+
 def test_render_evidence_hits_empty():
     assert render_evidence_hits([]) == "(未检索到高相似证据)"
 
@@ -101,9 +140,9 @@ def test_extract_chunks_source_ids_include_source_ordinal_for_duplicates():
 
 def test_gemini_embedder_sends_header_dimension_and_task_type(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
-        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents",
         method="POST",
-        json={"embedding": {"values": [0.1, 0.2]}},
+        json={"embeddings": [{"values": [0.1, 0.2]}]},
     )
     embedder = GeminiEmbedder(
         endpoint="https://generativelanguage.googleapis.com/v1beta",
@@ -121,11 +160,12 @@ def test_gemini_embedder_sends_header_dimension_and_task_type(httpx_mock: HTTPXM
     body = request.read().decode()
     assert '"taskType":"RETRIEVAL_QUERY"' in body.replace(" ", "")
     assert '"outputDimensionality":768' in body.replace(" ", "")
+    assert '"model":"models/gemini-embedding-2"' in body.replace(" ", "")
 
 
 def test_gemini_embedder_sanitizes_http_errors(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
-        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent",
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents",
         method="POST",
         status_code=400,
         json={"error": {"message": "bad"}},
@@ -146,3 +186,34 @@ def test_gemini_embedder_sanitizes_http_errors(httpx_mock: HTTPXMock):
 def test_cosine_similarity():
     assert cosine_similarity([1, 0], [1, 0]) == 1.0
     assert cosine_similarity([1, 0], [0, 1]) == 0.0
+
+
+def test_gemini_embedder_retries_on_429_then_succeeds(httpx_mock: HTTPXMock):
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents"
+    httpx_mock.add_response(url=url, method="POST", status_code=429, json={"error": {"message": "rate limit"}})
+    httpx_mock.add_response(url=url, method="POST", status_code=429, json={"error": {"message": "rate limit"}})
+    httpx_mock.add_response(url=url, method="POST", json={"embeddings": [{"values": [0.5, 0.6]}]})
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="key",
+    )
+    embedder._BASE_DELAY = 0.01  # speed up test
+    vectors = embedder.embed_queries(["test"])
+    assert vectors == [[0.5, 0.6]]
+    assert len(httpx_mock.get_requests()) == 3
+
+
+def test_gemini_embedder_raises_after_max_retries_on_429(httpx_mock: HTTPXMock):
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents"
+    for _ in range(10):
+        httpx_mock.add_response(url=url, method="POST", status_code=429, json={"error": {"message": "rate limit"}})
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="key",
+    )
+    embedder._BASE_DELAY = 0.01
+    embedder._MAX_DELAY = 0.02
+    with pytest.raises(GeminiEmbeddingError, match="failed after"):
+        embedder.embed_documents(["text"])

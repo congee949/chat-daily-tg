@@ -345,5 +345,153 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert "## Embedding 检索证据" in verifier_prompt
     assert "4.3出了哦" in verifier_prompt
     assert "Grok 4.3 发布" in verifier_prompt
-    assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence.sqlite").exists()
-    assert (tmp_path / "archive" / "2026" / "05" / "06" / "evidence-context.md").exists()
+    archive_dir = tmp_path / "archive" / "2026" / "05" / "06"
+    assert (archive_dir / "evidence.sqlite").exists()
+    assert (archive_dir / "evidence-context.md").exists()
+    summary_text = (archive_dir / "summary.md").read_text(encoding="utf-8")
+    assert "## Embedding 检索证据" in summary_text
+    assert "4.3出了哦" in summary_text
+
+
+def test_run_daily_writes_fact_risk_report(tmp_path, monkeypatch):
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+models:
+  summary: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+    llm_content = (
+        "```markdown concise\n"
+        "### ⚠️ 风险 / 待验证\n"
+        "- **Claude 4.3 发布**：这条测试内容故意写长，避免空内容保护触发，并用于验证风险报告会落盘（G1 / 14:15）\n"
+        "- 第二条测试内容继续增加长度，确保完整 daily pipeline 能走到发送前的归档步骤。\n"
+        "```\n\n"
+        "```markdown detailed\n## 全局重点\n- Claude 4.3 发布。\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+    verified_content = llm_content + (
+        "\n\n```json verification\n"
+        '{"checked_claims":[{"claim":"Claude 4.3 发布","status":"downgraded","reason":"原文只有 4.3，没有 Claude 实体名","evidence":["G1 / 14:15: 4.3出了哦"],"confidence":"high"},{"claim":"普通事实","status":"supported","reason":"ok","evidence":[],"confidence":"high"}]}\n'
+        "```"
+    )
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1",
+            message_count=1,
+            content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n",
+            media_candidates=[],
+        )
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        rc = run_daily.main(date_str="2026-05-06")
+
+    assert rc == 0
+    report_path = tmp_path / "archive" / "2026" / "05" / "06" / "fact-risk-report.md"
+    assert report_path.exists()
+    report = report_path.read_text(encoding="utf-8")
+    assert "Claude 4.3 发布" in report
+    assert "downgraded" in report
+    assert "普通事实" not in report
+
+
+def test_run_daily_no_push_skips_telegram_send(tmp_path, monkeypatch):
+    """--no-push should complete the pipeline but skip Telegram send."""
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+
+    llm_content = (
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发。\n"
+        "- 第二条测试 bullet 增加长度。\n"
+        "\n"
+        "### 💰 钱 / 活动\n"
+        "- **测试主题**：测试内容足够长，超过一百字符限制。\n"
+        "```\n\n"
+        "```markdown detailed\nDetailed\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+    verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1",
+            message_count=1,
+            content="# group\n\n### 2026-04-17 10:00\n\n**A**: hi\n",
+            media_candidates=[],
+        )
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        rc = run_daily.main(date_str="2026-04-17", no_push=True)
+
+    assert rc == 0
+    # Telegram client should never have been instantiated
+    tg_client_cls.assert_not_called()
+    # Archive files should still exist
+    assert (tmp_path / "archive" / "2026" / "04" / "17" / "concise.md").exists()
+    assert (tmp_path / "archive" / "2026" / "04" / "17" / "summary.md").exists()

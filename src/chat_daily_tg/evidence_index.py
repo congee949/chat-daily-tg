@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import math
 from pathlib import Path
 import re
 import sqlite3
+import time
 from typing import Protocol
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 _CLAIM_BULLET_RE = re.compile(r"^-\s+(?:\*\*(?P<title>[^*]+)\*\*[：:])?(?P<body>.+)$")
 
@@ -126,37 +130,79 @@ class GeminiEmbedder:
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts, task_type="RETRIEVAL_QUERY")
 
+    _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    _MAX_RETRIES = 10
+    _BASE_DELAY = 2.0
+    _MAX_DELAY = 60.0  # cap at RPM window; wait for quota reset
+
+    _BATCH_SIZE = 10
+    _INTER_BATCH_DELAY = 16.0  # Gemini embedding RPM ~40-50; batch=10, ~37 RPM
+
     def _embed(self, texts: list[str], *, task_type: str) -> list[list[float]]:
         if not texts:
             return []
         vectors: list[list[float]] = []
         with httpx.Client(timeout=self.timeout) as client:
-            for text in texts:
-                body: dict[str, object] = {
-                    "content": {"parts": [{"text": text}]},
-                    "taskType": task_type,
-                }
-                if self.output_dimensionality is not None:
-                    body["outputDimensionality"] = self.output_dimensionality
-                try:
-                    response = client.post(
-                        f"{self.endpoint}/models/{self.model}:embedContent",
-                        headers={"x-goog-api-key": self.api_key},
-                        json=body,
-                    )
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    raise GeminiEmbeddingError(
-                        f"Gemini embedding request failed with HTTP {exc.response.status_code}"
-                    ) from exc
-                except (httpx.TimeoutException, httpx.ConnectError) as exc:
-                    raise GeminiEmbeddingError(f"Gemini embedding request failed: {type(exc).__name__}") from exc
-                data = response.json()
-                values = data.get("embedding", {}).get("values")
-                if not isinstance(values, list):
-                    raise GeminiEmbeddingError("Gemini embedding response missing embedding.values")
-                vectors.append([float(v) for v in values])
+            for i in range(0, len(texts), self._BATCH_SIZE):
+                if i > 0:
+                    time.sleep(self._INTER_BATCH_DELAY)
+                batch = texts[i : i + self._BATCH_SIZE]
+                vectors.extend(self._embed_batch(client, batch, task_type=task_type))
         return vectors
+
+    def _embed_batch(self, client: httpx.Client, texts: list[str], *, task_type: str) -> list[list[float]]:
+        import random
+
+        model_path = f"models/{self.model}"
+        requests = []
+        for text in texts:
+            req: dict[str, object] = {
+                "model": model_path,
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type,
+            }
+            if self.output_dimensionality is not None:
+                req["outputDimensionality"] = self.output_dimensionality
+            requests.append(req)
+        body = {"requests": requests}
+
+        last_exc: Exception | None = None
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                response = client.post(
+                    f"{self.endpoint}/models/{self.model}:batchEmbedContents",
+                    headers={"x-goog-api-key": self.api_key},
+                    json=body,
+                )
+                response.raise_for_status()
+                data = response.json()
+                embeddings = data.get("embeddings")
+                if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+                    raise GeminiEmbeddingError(
+                        f"batchEmbedContents returned {len(embeddings) if isinstance(embeddings, list) else 0} embeddings, expected {len(texts)}"
+                    )
+                return [[float(v) for v in e["values"]] for e in embeddings]
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status = exc.response.status_code
+                if status not in self._RETRYABLE_STATUS:
+                    raise GeminiEmbeddingError(
+                        f"Gemini batch embedding request failed with HTTP {status}"
+                    ) from exc
+                delay = min(self._BASE_DELAY * (2 ** attempt), self._MAX_DELAY) + random.uniform(0, 1)
+                log.warning("embedding batch 429/5xx (attempt %d/%d, batch_size=%d), retrying in %.1fs",
+                            attempt + 1, self._MAX_RETRIES, len(texts), delay)
+                time.sleep(delay)
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_exc = exc
+                delay = min(self._BASE_DELAY * (2 ** attempt), self._MAX_DELAY) + random.uniform(0, 1)
+                log.warning("embedding batch %s (attempt %d/%d, batch_size=%d), retrying in %.1fs",
+                            type(exc).__name__, attempt + 1, self._MAX_RETRIES, len(texts), delay)
+                time.sleep(delay)
+        assert last_exc is not None
+        raise GeminiEmbeddingError(
+            f"Gemini batch embedding failed after {self._MAX_RETRIES} retries: {last_exc}"
+        ) from last_exc
 
 
 class EvidenceIndex:
@@ -229,7 +275,7 @@ def build_evidence_index(
     groups_with_content: list[tuple[str, str]],
     embedder: Embedder,
 ) -> EvidenceIndex:
-    chunks = extract_chunks(groups_with_content)
+    chunks = filter_evidence_chunks(extract_chunks(groups_with_content))
     vectors = embedder.embed_documents([chunk.text for chunk in chunks])
     index = EvidenceIndex(index_path)
     try:
@@ -238,6 +284,44 @@ def build_evidence_index(
         index.close()
         raise
     return index
+
+
+def filter_evidence_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
+    keep: list[EvidenceChunk] = []
+    high_risk_positions = {idx for idx, chunk in enumerate(chunks) if _is_high_risk_claim(chunk.text)}
+    for idx, chunk in enumerate(chunks):
+        if idx in high_risk_positions:
+            keep.append(chunk)
+            continue
+        if not _is_contextual_evidence(chunk.text):
+            continue
+        if idx - 1 in high_risk_positions or idx + 1 in high_risk_positions:
+            keep.append(chunk)
+    log.info("evidence chunks filtered: kept=%d total=%d", len(keep), len(chunks))
+    return keep
+
+
+def _is_contextual_evidence(text: str) -> bool:
+    normalized = text.strip()
+    if _is_low_information_message(normalized):
+        return False
+    contextual_terms = [
+        "这个", "那个", "它", "能", "可以", "不能", "读", "看", "入口", "链接",
+        "截图", "价格", "额度", "版本", "模型", "活动", "API", "api", "x", "X",
+    ]
+    return any(term in normalized for term in contextual_terms)
+
+
+def _is_low_information_message(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text.strip())
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    if lowered in {"ok", "okay", "yes", "no", "嗯", "啊", "哦", "好", "是", "不是"}:
+        return True
+    if re.fullmatch(r"[哈啊嘿呵hH]+", normalized):
+        return True
+    return False
 
 
 def extract_claim_queries(summary_text: str, *, limit: int = 12) -> list[str]:

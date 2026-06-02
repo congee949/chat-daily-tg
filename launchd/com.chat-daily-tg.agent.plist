@@ -27,7 +27,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/Apple/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>DEEPSEEK_API_KEY</key>
         <string>REPLACE_WITH_REAL_KEY</string>
         <key>TG_BOT_TOKEN</key>

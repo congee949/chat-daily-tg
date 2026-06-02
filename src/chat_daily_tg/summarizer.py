@@ -17,22 +17,61 @@ class SummaryOutput:
     verification: dict | None = None
 
 
-# Matches closed fences: ```lang tag\n...```
-_FENCE_RE = re.compile(r"```(\w+)\s+(\w+)\r?\n(.*?)```", re.DOTALL)
-# Matches an unclosed (truncated) fence: ```lang tag\n...<EOF> or before next fence
-_FENCE_UNCLOSED_RE = re.compile(r"```(\w+)\s+(\w+)\r?\n(.*?)(?=\n```|$)", re.DOTALL)
+# Matches closed fences: ```lang [tag]\n...```
+_FENCE_RE = re.compile(r"```(\w+)(?:\s+(\w+))?\r?\n(.*?)```", re.DOTALL)
+# Matches an unclosed (truncated) fence: ```lang [tag]\n...<EOF> or before next fence
+_FENCE_UNCLOSED_RE = re.compile(r"```(\w+)(?:\s+(\w+))?\r?\n(.*?)(?=\n```|$)", re.DOTALL)
 
 
 def _extract_fences(text: str) -> dict[tuple[str, str], str]:
     fences: dict[tuple[str, str], str] = {}
     for m in _FENCE_RE.finditer(text):
-        lang, tag, body = m.group(1), m.group(2), m.group(3).strip()
+        lang, tag, body = m.group(1), m.group(2) or "", m.group(3).strip()
         fences[(lang, tag)] = body
     for m in _FENCE_UNCLOSED_RE.finditer(text):
-        key = (m.group(1), m.group(2))
+        key = (m.group(1), m.group(2) or "")
         if key not in fences:
             fences[key] = m.group(3).strip()
     return fences
+
+
+def _sanitize_json(raw: str) -> str:
+    """Fix common LLM JSON output issues before parsing."""
+    # Fix invalid \uXXXX escapes: \u not followed by 4 hex digits
+    raw = re.sub(r"\\u(?![0-9a-fA-F]{4})", r"\\\\u", raw)
+    # Remove trailing commas before } or ]
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    # Try parsing as-is first
+    try:
+        json.loads(raw)
+        return raw
+    except json.JSONDecodeError:
+        pass
+    # Attempt to close unclosed braces/brackets
+    opens = raw.count("{") - raw.count("}")
+    brackets = raw.count("[") - raw.count("]")
+    if opens > 0 or brackets > 0:
+        candidate = raw.rstrip().rstrip(",")
+        candidate += "]" * brackets + "}" * opens
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+    return raw
+
+
+def _safe_json_loads(raw: str, label: str) -> dict:
+    """Parse JSON with sanitization fallback."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    sanitized = _sanitize_json(raw)
+    try:
+        return json.loads(sanitized)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is not valid JSON: {exc}") from exc
 
 
 def parse_summary_output(text: str) -> SummaryOutput:
@@ -51,10 +90,7 @@ def parse_summary_output(text: str) -> SummaryOutput:
     detailed = fences.get(("markdown", "detailed"), "")
     raw_opps = fences.get(("json", "opportunities"))
     if raw_opps is not None:
-        try:
-            opportunities = json.loads(raw_opps)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"opportunities fence is not valid JSON: {exc}") from exc
+        opportunities = _safe_json_loads(raw_opps, "opportunities fence")
     else:
         opportunities = {"permanent_additions": [], "hot_leads_additions": [], "death_signals": []}
     return SummaryOutput(
@@ -136,6 +172,7 @@ VERIFIER_SYSTEM = """你是聊天日报事实核验器，只根据用户提供�
 - 原文支持事实但来源弱、传闻、单人猜测时，保留但标为“待验证”或“群友反馈”。
 - 如果初稿把相邻话题的品牌错贴到当前 claim，必须删除或降级。
 - 不要引入原始聊天之外的新事实，不要联网，不要凭常识补全。
+- 金额必须保留原文的货币单位和语境；原文没有货币符号时，禁止自行添加 $、€ 等符号或改变币种。
 
 输出要求：四个 fence，顺序固定：
 ```markdown concise
@@ -234,17 +271,29 @@ def parse_verified_summary_output(text: str) -> SummaryOutput:
     output = parse_summary_output(text)
     raw_verification = fences.get(("json", "verification"))
     if raw_verification is None:
+        raw_verification = _find_untagged_verification_fence(fences)
+    if raw_verification is None:
         raise ValueError("missing fence json verification")
-    try:
-        verification = json.loads(raw_verification)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"verification fence is not valid JSON: {exc}") from exc
+    verification = _safe_json_loads(raw_verification, "verification fence")
     return SummaryOutput(
         concise_md=output.concise_md,
         detailed_md=output.detailed_md,
         opportunities=output.opportunities,
         verification=verification,
     )
+
+
+def _find_untagged_verification_fence(fences: dict[tuple[str, str], str]) -> str | None:
+    for (lang, tag), raw in fences.items():
+        if lang != "json" or tag != "":
+            continue
+        try:
+            parsed = _safe_json_loads(raw, "untagged json fence")
+        except ValueError:
+            continue
+        if "checked_claims" in parsed:
+            return raw
+    return None
 
 
 def _build_verified_repair_prompt(raw_output: str, error: str) -> str:

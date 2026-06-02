@@ -30,8 +30,15 @@ class CrossGroupCluster:
         return f"- 「{self.title}」跨群确认：{'；'.join(parts)}"
 
 
+def _strip_source_prefix(text: str) -> str:
+    text = re.sub(r"^\[Telegram / [^\]]+\]\s*", "", text)
+    text = re.sub(r"^\*\*[^*]+\*\*:\s*", "", text)
+    return text.strip()
+
+
 def _normalize(text: str) -> str:
     """Normalize text for signature comparison."""
+    text = _strip_source_prefix(text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\[.*?\]", "", text)
     text = re.sub(r"[^一-鿿\w]", "", text)
@@ -63,9 +70,8 @@ def _extract_candidate_topics(markdown: str, group_name: str) -> list[TopicSigna
             continue
         if re.search(r"^[\s*.<>]+$", line):
             continue
-        # Strip sender prefix like "**name**: content" to get the actual content
-        content = re.sub(r"^\*\*[^*]+\*\*:\s*", "", line)
-        if len(content) < 10:
+        content = _strip_source_prefix(line)
+        if len(content) < 10 or len(_normalize(content)) < 8:
             continue
         # Try to find a timestamp nearby
         ts = ""

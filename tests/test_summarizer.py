@@ -1,6 +1,7 @@
 import pytest
 from chat_daily_tg.summarizer import (
     VERIFIER_SYSTEM,
+    _sanitize_json,
     parse_summary_output,
     parse_verified_summary_output,
     run_summary,
@@ -89,6 +90,18 @@ def test_parse_verified_summary_output_extracts_verification():
     assert out.verification is not None
     assert out.verification["checked_claims"][0]["status"] == "downgraded"
     assert out.verification["checked_claims"][0]["evidence"] == ["G1 / 14:15: 4.3出了哦"]
+
+
+def test_parse_verified_summary_output_accepts_untagged_json_verification_fence():
+    output = SAMPLE_OUTPUT + """
+
+```json
+{"checked_claims":[]}
+```"""
+
+    out = parse_verified_summary_output(output)
+
+    assert out.verification == {"checked_claims": []}
 
 
 def test_parse_verified_summary_output_requires_verification_fence():
@@ -273,3 +286,49 @@ def test_build_user_prompt_includes_repeat_context():
     assert "近期已见话题" in prompt
     assert "Codex 额度重置" in prompt
     assert "重复/旧闻降权" in prompt
+
+
+def test_sanitize_json_fixes_invalid_unicode_escape():
+    bad = r'{"key": "hello \uzzzz world"}'
+    result = _sanitize_json(bad)
+    import json
+    parsed = json.loads(result)
+    assert "hello" in parsed["key"]
+
+
+def test_sanitize_json_closes_truncated_braces():
+    bad = '{"permanent_additions": [], "hot_leads_additions": ['
+    result = _sanitize_json(bad)
+    import json
+    parsed = json.loads(result)
+    assert isinstance(parsed, dict)
+
+
+def test_sanitize_json_removes_trailing_comma():
+    bad = '{"a": 1, "b": [2, 3,],}'
+    result = _sanitize_json(bad)
+    import json
+    parsed = json.loads(result)
+    assert parsed["a"] == 1
+
+
+def test_parse_verified_summary_output_handles_invalid_u_escape_in_verification():
+    raw = """```markdown concise
+### 🌅 今日总览
+- test
+```
+
+```markdown detailed
+test
+```
+
+```json opportunities
+{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}
+```
+
+```json verification
+{"checked_claims":[{"claim":"test \\uzzzz claim","status":"supported","reason":"ok","evidence":[],"confidence":"high"}]}
+```"""
+    out = parse_verified_summary_output(raw)
+    assert out.verification is not None
+    assert len(out.verification["checked_claims"]) == 1

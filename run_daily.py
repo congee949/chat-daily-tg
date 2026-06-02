@@ -40,22 +40,55 @@ def yesterday_iso() -> str:
     return (date.today() - timedelta(days=1)).isoformat()
 
 
-def main(date_str: str | None = None) -> int:
+def main(date_str: str | None = None, model_alias: str | None = None, no_push: bool = False) -> int:
     if date_str is None:
         date_str = yesterday_iso()
     configure_logging(log_file_for(date_str))
     try:
-        return _run(date_str)
+        return _run(date_str, model_alias=model_alias, no_push=no_push)
     except Exception as e:
         log.exception("pipeline failed: %s", e)
         notify_failure("chat-daily-tg 失败", f"{type(e).__name__}: {e}\n日志: {log_file_for(date_str)}")
         return 1
 
 
-def _run(date_str: str) -> int:
+def _append_evidence_context(detailed_md: str, evidence_context: str) -> str:
+    if not evidence_context.strip():
+        return detailed_md
+    return f"{detailed_md.rstrip()}\n\n## Embedding 检索证据\n\n{evidence_context.strip()}\n"
+
+
+def _fact_risk_report(verification: dict) -> str:
+    risky_statuses = {"downgraded", "removed", "needs_verification"}
+    risky_claims = [
+        claim for claim in verification.get("checked_claims", [])
+        if isinstance(claim, dict) and claim.get("status") in risky_statuses
+    ]
+    if not risky_claims:
+        return ""
+    lines = ["# 事实风险报告", "", "Verifier 标记了以下需要人工关注的 claim。", ""]
+    for claim in risky_claims:
+        lines.append(f"## {claim.get('claim', '(未命名 claim)')}")
+        lines.append("")
+        lines.append(f"- status: {claim.get('status', '')}")
+        lines.append(f"- confidence: {claim.get('confidence', '')}")
+        lines.append(f"- reason: {claim.get('reason', '')}")
+        evidence = claim.get("evidence") or []
+        if evidence:
+            lines.append("- evidence:")
+            for item in evidence:
+                lines.append(f"  - {item}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False) -> int:
     next_day = (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
     load_env_file(DATA_DIR / ".env")
     cfg = load_config(CONFIG_PATH)
+    if model_alias:
+        cfg.override_summary_model(model_alias)
+        log.info("model overridden to: %s (%s)", model_alias, cfg.models.summary.model)
     log.info(
         "config loaded: wechat=%d telegram=%d model=%s",
         len(cfg.sources.wechat.groups),
@@ -164,6 +197,7 @@ def _run(date_str: str) -> int:
              len(clusters), sum(1 for c in clusters if c.is_cross_group))
 
     evidence_context_builder = None
+    evidence_context_for_archive = ""
     evidence_index = None
     embedding_model = cfg.models.embedding if cfg.models else None
     if embedding_model and embedding_model.enabled:
@@ -183,6 +217,7 @@ def _run(date_str: str) -> int:
             )
 
             def evidence_context_builder(summary_output):
+                nonlocal evidence_context_for_archive
                 context = build_evidence_context_for_summary(
                     index=evidence_index,
                     embedder=embedder,
@@ -190,6 +225,7 @@ def _run(date_str: str) -> int:
                     top_k=embedding_model.top_k,
                     min_similarity=embedding_model.min_similarity,
                 )
+                evidence_context_for_archive = context
                 (archive_dir / "evidence-context.md").write_text(context, encoding="utf-8")
                 log.info("embedding evidence context built: %d chars", len(context))
                 return context
@@ -222,12 +258,17 @@ def _run(date_str: str) -> int:
              len(out.concise_md), len(out.detailed_md))
 
     (archive_dir / "concise.md").write_text(out.concise_md, encoding="utf-8")
-    (archive_dir / "summary.md").write_text(out.detailed_md, encoding="utf-8")
+    detailed_archive = _append_evidence_context(out.detailed_md, evidence_context_for_archive)
+    (archive_dir / "summary.md").write_text(detailed_archive, encoding="utf-8")
     if out.verification is not None:
         (archive_dir / "verification.json").write_text(
             json.dumps(out.verification, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        risk_report = _fact_risk_report(out.verification)
+        if risk_report:
+            (archive_dir / "fact-risk-report.md").write_text(risk_report, encoding="utf-8")
+            log.warning("fact risk report generated: %s", archive_dir / "fact-risk-report.md")
 
     concise_processed = post_process_concise(out.concise_md, cfg.source_abbreviations)
 
@@ -305,15 +346,18 @@ def _run(date_str: str) -> int:
     regenerate_permanent_md(PERMANENT_JSONL, PERMANENT_MD)
     regenerate_latest(HOT_LEADS_DIR, HOT_LEADS_LATEST, retention_days=cfg.hot_leads.retention_days)
 
-    bot_token = os.environ[cfg.telegram.bot_token_env]
-    chat_id = os.environ[cfg.telegram.chat_id_env]
-    tg = TelegramSender(
-        bot_token=bot_token, chat_id=chat_id,
-        retry_max_attempts=cfg.retry.max_attempts,
-        retry_backoff_seconds=cfg.retry.backoff_seconds,
-    )
-    tg.send(concise_processed, parse_mode="HTML")
-    log.info("TG push complete")
+    if not no_push:
+        bot_token = os.environ[cfg.telegram.bot_token_env]
+        chat_id = os.environ[cfg.telegram.chat_id_env]
+        tg = TelegramSender(
+            bot_token=bot_token, chat_id=chat_id,
+            retry_max_attempts=cfg.retry.max_attempts,
+            retry_backoff_seconds=cfg.retry.backoff_seconds,
+        )
+        tg.send(concise_processed, parse_mode="HTML")
+        log.info("TG push complete")
+    else:
+        log.info("TG push skipped (--no-push)")
 
     log.info("✓ run_daily complete for %s", date_str)
     return 0
@@ -322,5 +366,7 @@ def _run(date_str: str) -> int:
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--date", help="YYYY-MM-DD (default: yesterday)", default=None)
+    p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)
+    p.add_argument("--no-push", action="store_true", help="Skip Telegram push")
     args = p.parse_args()
-    sys.exit(main(date_str=args.date))
+    sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push))

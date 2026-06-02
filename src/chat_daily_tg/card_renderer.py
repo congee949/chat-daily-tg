@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -77,12 +78,20 @@ class CardData:
         return out
 
 
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+
 def _clean_item(line: str) -> str:
-    """Strip a leading bullet and **bold** markers; keep the rest (incl. source tails)."""
+    """Strip a leading bullet, **bold** markers, and reduce [label](url) to label.
+
+    The card is a glanceable teaser; clickable URLs still live in the full text
+    message sent right after, so showing just the label keeps the card uncluttered.
+    """
     line = line.strip()
     if line.startswith("- "):
         line = line[2:].strip()
     line = line.replace("**", "")
+    line = _MD_LINK_RE.sub(r"\1", line)
     return line
 
 
@@ -189,13 +198,19 @@ def _find_chrome() -> str | None:
 
 
 def _estimate_height(card: CardData) -> int:
-    # header + per-section(title + items) + footer; clamp so we neither crop nor
-    # leave a huge dark gap. Extra space blends into the dark background.
-    h = 140
+    # Estimate rendered height so the Chrome window captures all content. Items wrap,
+    # so approximate wrapped-line count from text length (~32 CJK chars per 680px line).
+    # Err generous: any surplus is dark background that blends in; cropping would lose
+    # the bottom sections (risks/resources/footer). Clamp to a sane ceiling.
+    import math
+    h = 150  # header + top padding
     for _fieldname, items in card.sections():
-        h += 52 + len(items) * 36
-    h += 80
-    return max(420, min(h, 4000))
+        h += 56  # section title + margin
+        for it in items:
+            lines = max(1, math.ceil(len(it) / 32))
+            h += lines * 32 + 12
+    h += 90  # footer
+    return max(420, min(h, 8000))
 
 
 def render_card_png(card: CardData, out_path: Path) -> Path | None:

@@ -49,6 +49,13 @@ def test_parse_strips_bullets_and_bold():
     assert card.money[0] == "恒生开户：返现 50 元，值得做（理财群 / 09:12）"
 
 
+def test_parse_reduces_markdown_links_to_label():
+    md = "### 🔗 资源\n- [看板](https://example.com/a?x=1&y=2)：实时监控"
+    card = parse_concise_to_card(md, "2026-04-17")
+    assert card.resources == ["看板：实时监控"]
+    assert "http" not in card.resources[0]
+
+
 def test_parse_drops_detail_section():
     card = parse_concise_to_card(SAMPLE, "2026-04-17")
     # 🧾 详情 (local path) must not leak into any card field

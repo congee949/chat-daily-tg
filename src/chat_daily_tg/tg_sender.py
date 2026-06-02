@@ -27,6 +27,9 @@ def escape_markdown_v2(text: str) -> str:
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+)$")
 _BULLET_RE = re.compile(r"^\s*-\s+(.+)$")
+# Matches an already-built <a href="…">…</a> link (group 1) OR a **bold** span (group 2).
+# Order matters: links are produced upstream by post_process and must survive verbatim.
+_LINK_OR_BOLD_RE = re.compile(r'(<a href="[^"]*">.*?</a>)|\*\*(.+?)\*\*')
 
 
 def escape_html(text: str) -> str:
@@ -68,10 +71,15 @@ def format_html_for_telegram(text: str) -> str:
 def _format_inline_html(text: str) -> str:
     parts: list[str] = []
     last_end = 0
-    for match in _BOLD_RE.finditer(text):
+    for match in _LINK_OR_BOLD_RE.finditer(text):
         if match.start() > last_end:
             parts.append(escape_html(text[last_end:match.start()]))
-        parts.append(f"<b>{escape_html(match.group(1))}</b>")
+        if match.group(1) is not None:
+            # Already-built <a href> link from post_process: emit verbatim so it is
+            # not re-escaped into broken literal markup (the LNK-1 double-escape bug).
+            parts.append(match.group(1))
+        else:
+            parts.append(f"<b>{escape_html(match.group(2))}</b>")
         last_end = match.end()
     if last_end < len(text):
         parts.append(escape_html(text[last_end:]))
@@ -146,18 +154,14 @@ class TelegramSender:
     retry_max_attempts: int = 3
     retry_backoff_seconds: list = field(default_factory=lambda: [5, 15, 60])
 
-    def _send_one(self, text: str, parse_mode: str | None = None) -> int:
+    def _send_one(self, payload: str, parse_mode: str | None = None) -> int:
+        """Send a single, already-formatted payload chunk. No further formatting here."""
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         last_exc: Exception | None = None
         attempts = 0
         while attempts < self.retry_max_attempts:
             try:
                 with httpx.Client(timeout=self.timeout) as c:
-                    payload = text
-                    if parse_mode == "MarkdownV2":
-                        payload = format_markdownish_for_telegram(text)
-                    elif parse_mode == "HTML":
-                        payload = format_html_for_telegram(text)
                     data = {"chat_id": self.chat_id, "text": payload}
                     if parse_mode is not None:
                         data["parse_mode"] = parse_mode
@@ -180,5 +184,51 @@ class TelegramSender:
         raise last_exc
 
     def send(self, text: str, parse_mode: str | None = None) -> list[int]:
-        chunks = split_message(text)
+        # Format FIRST, then split, so the chunk length reflects the actual payload
+        # sent to Telegram. Splitting raw text let HTML expansion (&->&amp;, <b> tags)
+        # push a chunk over the 4096 hard limit and 400 the whole push (CHUNK-1).
+        if parse_mode == "MarkdownV2":
+            payload = format_markdownish_for_telegram(text)
+        elif parse_mode == "HTML":
+            payload = format_html_for_telegram(text)
+        else:
+            payload = text
+        # format_*_for_telegram keeps every tag pair within a single line, so splitting
+        # on newline boundaries never cuts a tag. 3900 leaves margin under 4096.
+        chunks = split_message(payload, limit=3900)
         return [self._send_one(c, parse_mode) for c in chunks]
+
+    def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None) -> int:
+        """Send a photo via sendPhoto. Caption is hard-capped at Telegram's 1024 limit.
+
+        Mirrors _send_one's retry/backoff. Used by the optional daily-card image output;
+        callers wrap this in try/except and fall back to the text send() on any failure.
+        """
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+        last_exc: Exception | None = None
+        attempts = 0
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    with open(photo_path, "rb") as fh:
+                        files = {"photo": fh}
+                        data = {"chat_id": self.chat_id, "caption": caption[:1024]}
+                        if parse_mode is not None:
+                            data["parse_mode"] = parse_mode
+                        r = c.post(url, data=data, files=files)
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return body["result"]["message_id"]
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg sendPhoto failed (attempt %d/%d): %s",
+                            attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc

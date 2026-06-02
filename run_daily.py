@@ -354,6 +354,20 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
         )
+        if cfg.telegram.send_image:
+            # Add-on: render a glanceable PNG card and send it BEFORE the text. Any
+            # failure (render/Chrome/sendPhoto) only logs and falls through to text.
+            try:
+                from chat_daily_tg.card_renderer import (
+                    card_caption, parse_concise_to_card, render_card_png,
+                )
+                card = parse_concise_to_card(out.concise_md, date_str)
+                png = render_card_png(card, archive_dir / "card.png")
+                if png:
+                    tg.send_photo(png, caption=card_caption(card))
+                    log.info("TG card image sent")
+            except Exception as e:
+                log.warning("card image push failed, falling back to text only: %s", e)
         tg.send(concise_processed, parse_mode="HTML")
         log.info("TG push complete")
     else:

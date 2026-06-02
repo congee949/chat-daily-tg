@@ -49,6 +49,7 @@ class Models(BaseModel):
 class Telegram(BaseModel):
     bot_token_env: str
     chat_id_env: str
+    send_image: bool = False  # render the daily summary as a PNG card and sendPhoto before the text
 
 
 class WechatSource(BaseModel):

@@ -191,3 +191,80 @@ def test_send_raises_on_ok_false(httpx_mock: HTTPXMock):
     s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_backoff_seconds=[0, 0, 0])
     with pytest.raises(RuntimeError, match="Telegram API error"):
         s.send("hello")
+
+
+# --- LNK-1: anchor links from post_process must survive format_html (no re-escape) ---
+
+def test_format_html_preserves_anchor_links():
+    inp = '查看<a href="https://e.com/a?x=1&amp;y=2">活动</a>了解'
+    out = format_html_for_telegram(inp)
+    assert '<a href="https://e.com/a?x=1&amp;y=2">活动</a>' in out
+    assert "&lt;a" not in out          # tag not escaped to literal text
+    assert "&amp;amp;" not in out      # existing &amp; not double-escaped
+
+
+def test_link_round_trip_post_process_then_html():
+    from chat_daily_tg.post_process import post_process_concise
+    md = "查看[活动链接](https://example.com/a?x=1&y=2)了解详情"
+    out = format_html_for_telegram(post_process_concise(md, {}))
+    assert '<a href="https://example.com/a?x=1&amp;y=2">活动链接</a>' in out
+    assert "&lt;a" not in out
+
+
+def test_format_html_link_and_bold_together():
+    inp = '**重点**：见<a href="https://x.com">链接</a>'
+    out = format_html_for_telegram(inp)
+    assert "<b>重点</b>" in out
+    assert '<a href="https://x.com">链接</a>' in out
+
+
+# --- CHUNK-1: chunking happens AFTER formatting, so HTML expansion can't overflow 4096 ---
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+def test_send_html_splits_after_formatting_expansion(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    # raw ~3030 chars (1 chunk if split on raw), but '<'->'&lt;' expands ~4x to ~12000
+    text = "\n".join(["<" * 100 for _ in range(30)])
+    assert len(text) < 3900   # would be a single chunk under the old raw-length split
+    s.send(text, parse_mode="HTML")
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) >= 2     # now split post-format, so multiple sends
+
+
+# --- image output: send_photo posts multipart to sendPhoto and caps caption ---
+
+def test_send_photo_posts_multipart(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 7}},
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfakecontent")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    mid = s.send_photo(png, caption="hi there")
+    assert mid == 7
+    req = httpx_mock.get_request()
+    assert req.url.path.endswith("/sendPhoto")
+    body = req.read()
+    assert b"12345" in body and b"hi there" in body
+
+
+def test_send_photo_truncates_caption(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_photo(png, caption="A" * 2000)
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "A" * 1024 in body
+    assert "A" * 1025 not in body

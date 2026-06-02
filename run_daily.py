@@ -365,7 +365,8 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 card = parse_concise_to_card(out.concise_md, date_str)
                 png = render_card_png(card, archive_dir / "card.png")
                 if png:
-                    tg.send_photo(png, caption=card_caption(card))
+                    caption = card_caption(card) if cfg.telegram.image_caption else ""
+                    tg.send_photo(png, caption=caption)
                     image_sent = True
                     log.info("TG card image sent")
             except Exception as e:

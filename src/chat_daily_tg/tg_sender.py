@@ -212,9 +212,11 @@ class TelegramSender:
                 with httpx.Client(timeout=self.timeout) as c:
                     with open(photo_path, "rb") as fh:
                         files = {"photo": fh}
-                        data = {"chat_id": self.chat_id, "caption": caption[:1024]}
-                        if parse_mode is not None:
-                            data["parse_mode"] = parse_mode
+                        data = {"chat_id": self.chat_id}
+                        if caption:
+                            data["caption"] = caption[:1024]
+                            if parse_mode is not None:
+                                data["parse_mode"] = parse_mode
                         r = c.post(url, data=data, files=files)
                     r.raise_for_status()
                     body = r.json()

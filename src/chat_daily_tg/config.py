@@ -52,6 +52,7 @@ class Telegram(BaseModel):
     send_image: bool = False  # render the daily summary as a PNG card and sendPhoto before the text
     image_only: bool = False  # if send_image and the photo sends OK, skip the text message
                               # (text is still sent as fallback when rendering/sendPhoto fails)
+    image_caption: bool = True  # attach a short text caption to the photo; False = pure image
 
 
 class WechatSource(BaseModel):

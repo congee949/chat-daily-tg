@@ -255,6 +255,21 @@ def test_send_photo_posts_multipart(httpx_mock: HTTPXMock, tmp_path):
     assert b"12345" in body and b"hi there" in body
 
 
+def test_send_photo_omits_empty_caption(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 9}},
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_photo(png, caption="")
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "12345" in body
+    assert "caption" not in body   # pure image, no caption field
+
+
 def test_send_photo_truncates_caption(httpx_mock: HTTPXMock, tmp_path):
     httpx_mock.add_response(
         url="https://api.telegram.org/bot-TOKEN-/sendPhoto",

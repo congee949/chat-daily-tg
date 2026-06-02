@@ -50,6 +50,8 @@ class Telegram(BaseModel):
     bot_token_env: str
     chat_id_env: str
     send_image: bool = False  # render the daily summary as a PNG card and sendPhoto before the text
+    image_only: bool = False  # if send_image and the photo sends OK, skip the text message
+                              # (text is still sent as fallback when rendering/sendPhoto fails)
 
 
 class WechatSource(BaseModel):

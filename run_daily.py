@@ -354,9 +354,10 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
         )
+        image_sent = False
         if cfg.telegram.send_image:
-            # Add-on: render a glanceable PNG card and send it BEFORE the text. Any
-            # failure (render/Chrome/sendPhoto) only logs and falls through to text.
+            # Render a glanceable PNG card and send it BEFORE the text. Any failure
+            # (render/Chrome/sendPhoto) only logs and falls through to the text push.
             try:
                 from chat_daily_tg.card_renderer import (
                     card_caption, parse_concise_to_card, render_card_png,
@@ -365,11 +366,17 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 png = render_card_png(card, archive_dir / "card.png")
                 if png:
                     tg.send_photo(png, caption=card_caption(card))
+                    image_sent = True
                     log.info("TG card image sent")
             except Exception as e:
-                log.warning("card image push failed, falling back to text only: %s", e)
-        tg.send(concise_processed, parse_mode="HTML")
-        log.info("TG push complete")
+                log.warning("card image push failed, falling back to text: %s", e)
+        if image_sent and cfg.telegram.image_only:
+            # Image-only mode: the card was delivered, so skip the full text message.
+            # (Text still sends below if the image failed — image_sent would be False.)
+            log.info("image_only mode: skipping text push")
+        else:
+            tg.send(concise_processed, parse_mode="HTML")
+            log.info("TG push complete")
     else:
         log.info("TG push skipped (--no-push)")
 

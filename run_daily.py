@@ -171,6 +171,16 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         len(cfg.sources.telegram.chats) if cfg.sources.telegram.enabled else 0,
         cfg.models.summary.model,
     )
+    if not cfg.sources.wechat.groups and not (
+        cfg.sources.telegram.enabled and cfg.sources.telegram.chats
+    ):
+        # Config validation accepts a raw_channels-only config (valid for the
+        # --channels-only forwarder), but the daily summary doesn't consume raw
+        # channels — fail fast with a precise message instead of exporting nothing
+        # and dying later with "no content exported".
+        log.error("no daily-summary sources configured — raw_channels only feed the "
+                  "--channels-only forwarder; add sources.wechat.groups or sources.telegram.chats")
+        return 1
 
     archive_dir = prepare_archive_day(date_str)
     # Channel cards are handled by the separate 2-hourly forwarder (run_channels), not

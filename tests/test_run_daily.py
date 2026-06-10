@@ -127,6 +127,37 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert "T" in repeat_path.read_text(encoding="utf-8")
 
 
+def test_run_daily_raw_channels_only_config_fails_fast(tmp_path, monkeypatch):
+    """A raw_channels-only config is valid for the --channels-only forwarder, but the
+    daily summary doesn't consume raw channels — the daily run must fail fast with a
+    precise error instead of exporting nothing and dying later with 'no content'."""
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  telegram:
+    enabled: true
+    db_path: "/tmp/tg.db"
+    raw_channels:
+      - id: "-100chan"
+        name: "Chan"
+llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    import run_daily
+    monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+    rc = run_daily.main(date_str="2026-04-17")
+    assert rc == 1
+    # Fails before any export/LLM work: no archive day dir was prepared
+    assert not (tmp_path / "archive" / "2026" / "04" / "17").exists()
+
+
 def test_run_daily_main_catches_exceptions_and_notifies(tmp_path, monkeypatch):
     """If the pipeline raises, main() should log, notify, and return 1."""
     import chat_daily_tg.paths as paths

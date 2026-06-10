@@ -123,6 +123,26 @@ def test_send_media_mixed_album_tolerates_one_item_failure(httpx_mock: HTTPXMock
     _send_media([(str(f1), "photo"), (str(f2), "document")], s, caption="cap")
 
 
+def test_send_media_mixed_album_caption_moves_to_first_success(httpx_mock: HTTPXMock, tmp_path, mocker):
+    """If the caption-bearing first item fails but a later item succeeds, the caption
+    must ride on that later item — otherwise the post is marked seen and the verbatim
+    text is permanently dropped."""
+    from chat_daily_tg.private_media import _send_media
+    mocker.patch("chat_daily_tg.tg_sender.time.sleep")
+    f1 = tmp_path / "a.pdf"; f1.write_bytes(b"x")
+    f2 = tmp_path / "b.jpg"; f2.write_bytes(b"y")
+    # document (first, would carry the caption) 400s; photo (second) succeeds
+    httpx_mock.add_response(url="https://api.telegram.org/bot-TOKEN-/sendDocument",
+                            method="POST", status_code=400, json={"ok": False, "description": "bad"})
+    httpx_mock.add_response(url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+                            method="POST", json={"ok": True, "result": {"message_id": 2}})
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_max_attempts=1)
+    _send_media([(str(f1), "document"), (str(f2), "photo")], s, caption="正文 cap")
+    photo_req = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/sendPhoto")][0]
+    body = photo_req.read().decode("utf-8", "replace")
+    assert 'name="caption"' in body and "正文 cap" in body  # caption rode on the successful item
+
+
 def test_send_media_group_album(httpx_mock: HTTPXMock, tmp_path):
     files = []
     for i in range(3):

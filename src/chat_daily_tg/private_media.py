@@ -86,8 +86,10 @@ def group_posts(manifest: list[dict]) -> list[Post]:
 
 def _send_media(post_media: list[tuple[str, str]], sender: TelegramSender, caption: str) -> None:
     """Send a post's media: single → send_media; all-visual album → media group;
-    mixed types → fall back to individual sends (caption on the first). In the mixed
-    case a per-item failure is tolerated (logged) so one bad item doesn't unwind the
+    mixed types → fall back to individual sends (caption on the first SUCCESSFUL
+    item — pinning it to item 0 would silently drop the verbatim text whenever
+    item 0 fails but a later item succeeds, because the post is then marked seen).
+    A per-item failure is tolerated (logged) so one bad item doesn't unwind the
     whole post; it only raises if EVERY item failed."""
     if len(post_media) == 1:
         path, kind = post_media[0]
@@ -98,11 +100,13 @@ def _send_media(post_media: list[tuple[str, str]], sender: TelegramSender, capti
         sender.send_media_group(post_media, caption=caption)
         return
     ok = 0
+    caption_pending = bool(caption)
     last_exc: Exception | None = None
-    for i, (path, kind) in enumerate(post_media):
+    for path, kind in post_media:
         try:
-            sender.send_media(path, kind, caption=caption if i == 0 else "")
+            sender.send_media(path, kind, caption=caption if caption_pending else "")
             ok += 1
+            caption_pending = False
         except Exception as e:
             last_exc = e
             log.warning("mixed-album item failed (%s): %s", path, e)

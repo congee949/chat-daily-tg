@@ -41,6 +41,9 @@ class Post:
     text: str          # plain text (for empty/skip checks)
     html: str = ""     # Telegram HTML (preserves source links + bold) for rendering
     media: list[tuple[str, str]] = field(default_factory=list)  # (path, kind)
+    # ALL message ids folded into this post (album items share one Post). Every id
+    # must land in the seen store, or the high-water mark stalls at the album head.
+    msg_ids: list[int] = field(default_factory=list)
 
 
 def dump_channel(chat_id: str, since: str, until: str, out_dir: Path, limit: int,
@@ -68,11 +71,13 @@ def group_posts(manifest: list[dict]) -> list[Post]:
         if gid is not None and gid in by_group:
             p = by_group[gid]
             p.media.extend(media)
+            p.msg_ids.append(e["msg_id"])
             if text and not p.text:
                 p.text = text
                 p.html = html
             continue
-        p = Post(first_msg_id=e["msg_id"], time=e["date"][11:16], text=text, html=html, media=media)
+        p = Post(first_msg_id=e["msg_id"], time=e["date"][11:16], text=text, html=html, media=media,
+                 msg_ids=[e["msg_id"]])
         posts.append(p)
         if gid is not None:
             by_group[gid] = p
@@ -164,7 +169,11 @@ def push_private_channel(
                 log.warning("private post push failed (%s msg %s): %s", channel.name, p.first_msg_id, e)
                 continue
             if key is not None:
-                seen.add(key)  # write-after-send
+                # Write-after-send, and record EVERY album item id — recording only
+                # the first would stall max_msg_id at the album head, making the next
+                # incremental run re-fetch and re-send the tail as a partial album.
+                for mid in (p.msg_ids or [p.first_msg_id]):
+                    seen.add(SeenStore.key(channel.id, mid))
             pushed += 1
             if delay_seconds > 0:
                 _t.sleep(delay_seconds)

@@ -16,6 +16,7 @@ def test_group_posts_standalone():
     assert len(posts) == 2
     assert posts[0].time == "09:21"
     assert posts[0].media == [("/x/1.jpg", "photo")]
+    assert posts[0].msg_ids == [1]
     assert posts[1].text == "b" and posts[1].media == []
 
 
@@ -34,6 +35,48 @@ def test_group_posts_album_merges():
     assert p.first_msg_id == 10
     assert p.text == "album cap"
     assert len(p.media) == 3
+    assert p.msg_ids == [10, 11, 12]
+
+
+def test_push_private_channel_album_advances_high_water_mark(tmp_path, monkeypatch):
+    """Every album item id must land in the seen store: recording only the first
+    would stall max_msg_id at the album head and the next incremental run would
+    re-fetch and re-send 11/12 as a partial album."""
+    from chat_daily_tg import private_media
+    from chat_daily_tg.config import RawChannel
+    from chat_daily_tg.raw_seen import SeenStore
+
+    manifest = [
+        {"msg_id": 10, "date": "2026-06-05T10:00:00+08:00", "text": "album cap", "grouped_id": 9,
+         "media": [{"path": "/x/10.jpg", "kind": "photo"}]},
+        {"msg_id": 11, "date": "2026-06-05T10:00:00+08:00", "text": "", "grouped_id": 9,
+         "media": [{"path": "/x/11.jpg", "kind": "photo"}]},
+        {"msg_id": 12, "date": "2026-06-05T10:00:00+08:00", "text": "", "grouped_id": 9,
+         "media": [{"path": "/x/12.jpg", "kind": "photo"}]},
+    ]
+    monkeypatch.setattr(private_media, "dump_channel", lambda *a, **k: manifest)
+
+    class FakeSender:
+        def __init__(self):
+            self.albums = []
+
+        def send_media_group(self, items, *, caption=""):
+            self.albums.append(items)
+            return [1, 2, 3]
+
+    sender = FakeSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+    pushed = private_media.push_private_channel(
+        channel=RawChannel(id="-100x", name="C"),
+        since="2026-06-05", until="2026-06-06",
+        out_dir=tmp_path / "dump", sender=sender, limit=500,
+        seen=seen, delay_seconds=0,
+    )
+    assert pushed == 1
+    assert len(sender.albums) == 1
+    assert seen.max_msg_id("-100x") == 12  # not 10
+    for mid in (10, 11, 12):
+        assert SeenStore.key("-100x", mid) in seen
 
 
 def test_send_media_single_photo_with_caption(httpx_mock: HTTPXMock, tmp_path):

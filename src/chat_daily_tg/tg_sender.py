@@ -58,6 +58,21 @@ def _html_to_plain(text: str) -> str:
     return stripped.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
 
+_CAPTION_LIMIT = 1024
+
+
+def _safe_caption(caption: str) -> tuple[str, str | None]:
+    """Telegram counts the 1024-char caption limit on VISIBLE text (after entity
+    parsing), so a well-formed HTML caption within the visible limit must pass
+    through uncut — slicing raw HTML can cut inside a tag and 400 on every retry.
+    An over-limit caption degrades to truncated plain text with no parse_mode
+    (unescaped '<' would 400 the HTML parser). Returns (caption, parse_mode)."""
+    visible = _html_to_plain(caption)
+    if len(visible) <= _CAPTION_LIMIT:
+        return caption, "HTML"
+    return visible[:_CAPTION_LIMIT], None
+
+
 def _retry_after(r: "httpx.Response") -> float:
     """Seconds to wait on a 429, clamped to [1, 30]."""
     try:
@@ -336,8 +351,9 @@ class TelegramSender:
     def send_media(self, file_path: str, kind: str, *, caption: str = "") -> int:
         """Upload a single media file (sendPhoto/sendVideo/sendAudio/sendDocument).
 
-        `caption` is Telegram HTML, hard-capped at the 1024 caption limit. Mirrors the
-        send_photo retry/backoff. Used for verbatim private-channel media."""
+        `caption` is Telegram HTML; the 1024 limit is enforced on VISIBLE length
+        (see _safe_caption). Mirrors the send_photo retry/backoff. Used for
+        verbatim private-channel media."""
         method, field_name = _MEDIA_METHOD.get(kind, _MEDIA_METHOD["document"])
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
         last_exc: Exception | None = None
@@ -350,8 +366,10 @@ class TelegramSender:
                         files = {field_name: fh}
                         data = {"chat_id": self.chat_id}
                         if caption:
-                            data["caption"] = caption[:1024]
-                            data["parse_mode"] = "HTML"
+                            cap, cap_mode = _safe_caption(caption)
+                            data["caption"] = cap
+                            if cap_mode is not None:
+                                data["parse_mode"] = cap_mode
                         r = c.post(url, data=data, files=files)
                     if r.status_code == 429:
                         rl_hits += 1
@@ -404,8 +422,10 @@ class TelegramSender:
                             m = {"type": _GROUP_TYPE.get(kind, "document"),
                                  "media": f"attach://{key}"}
                             if i == 0 and caption:
-                                m["caption"] = caption[:1024]
-                                m["parse_mode"] = "HTML"
+                                cap, cap_mode = _safe_caption(caption)
+                                m["caption"] = cap
+                                if cap_mode is not None:
+                                    m["parse_mode"] = cap_mode
                             media.append(m)
                         data = {"chat_id": self.chat_id, "media": json.dumps(media)}
                         r = c.post(url, data=data, files=files)

@@ -283,3 +283,42 @@ def test_send_photo_truncates_caption(httpx_mock: HTTPXMock, tmp_path):
     body = httpx_mock.get_request().read().decode("utf-8", "replace")
     assert "A" * 1024 in body
     assert "A" * 1025 not in body
+
+
+def test_send_media_keeps_html_caption_when_visible_text_fits(httpx_mock: HTTPXMock, tmp_path):
+    """Telegram's 1024 caption limit counts VISIBLE chars: a caption whose markup
+    pushes the raw HTML past 1024 must NOT be sliced (cutting inside the <a> tag
+    would 400 on every retry)."""
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    f = tmp_path / "a.jpg"
+    f.write_bytes(b"fakejpg")
+    caption = f'<a href="https://example.com/{"x" * 1200}">来源</a> ' + "正" * 900
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_media(str(f), "photo", caption=caption)
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "</a>" in body            # tag survived intact
+    assert "x" * 1200 in body        # href not sliced
+    assert "HTML" in body            # parse_mode kept
+
+
+def test_send_media_overlong_visible_caption_degrades_to_plain(httpx_mock: HTTPXMock, tmp_path):
+    """When even the VISIBLE text exceeds 1024, degrade to truncated plain text
+    without parse_mode — truncated HTML would be malformed and 400."""
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    f = tmp_path / "a.jpg"
+    f.write_bytes(b"fakejpg")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_media(str(f), "photo", caption="<b>" + "Z" * 1500 + "</b>")
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "Z" * 1024 in body
+    assert "Z" * 1025 not in body
+    assert "<b>" not in body         # tags stripped, not sliced mid-tag
+    assert "parse_mode" not in body  # plain text: stray '<' must not hit the HTML parser

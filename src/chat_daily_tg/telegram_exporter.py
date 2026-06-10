@@ -113,9 +113,14 @@ def read_messages(
     # `min_msg_id > 0` makes this incremental: only messages newer than the high-water
     # mark (the forwarder's last-pushed id) are returned.
     min_clause = "AND msg_id > ?" if min_msg_id else ""
-    # When a window holds more than `limit` messages, keep the NEWEST `limit` (inner
-    # DESC + LIMIT) rather than the earliest, then re-sort ASC for rendering. ASC+LIMIT
-    # would silently drop the latest messages of a high-volume day.
+    # Two paging modes when the window holds more than `limit` rows:
+    # - Daily summary (min_msg_id=0): keep the NEWEST `limit` (inner DESC) — ASC
+    #   would silently drop the latest messages of a high-volume day.
+    # - Incremental forwarder (min_msg_id>0): keep the OLDEST rows above the mark
+    #   (inner msg_id ASC, the same key the seen store's max_msg_id uses) — keeping
+    #   the newest page would advance the high-water mark past unfetched rows and
+    #   skip them forever; the remainder arrives on the next 2-hourly run.
+    inner_order = "msg_id ASC" if min_msg_id else "timestamp DESC"
     query = f"""
         SELECT * FROM (
             SELECT chat_id, chat_name, msg_id, sender_name, content, timestamp, raw_json
@@ -124,7 +129,7 @@ def read_messages(
               AND timestamp >= ?
               AND timestamp < ?
               {min_clause}
-            ORDER BY timestamp DESC
+            ORDER BY {inner_order}
             LIMIT ?
         ) ORDER BY timestamp ASC
     """
@@ -139,8 +144,12 @@ def read_messages(
     finally:
         conn.close()
     if len(rows) >= limit:
-        log.warning("read_messages hit limit=%d for chat %s [%s,%s) — older messages dropped",
-                    limit, chat_id, since, until)
+        if min_msg_id:
+            log.warning("read_messages hit limit=%d for chat %s [%s,%s) — remainder deferred to next incremental run",
+                        limit, chat_id, since, until)
+        else:
+            log.warning("read_messages hit limit=%d for chat %s [%s,%s) — older messages dropped",
+                        limit, chat_id, since, until)
     return rows
 
 

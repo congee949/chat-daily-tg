@@ -70,6 +70,12 @@ def test_read_messages_keeps_newest_when_over_limit(tmp_path: Path):
     inc = read_messages(db_path=db_path, chat_id="3707563960",
                         since="2026-04-28", until="2026-04-29", limit=10, min_msg_id=3)
     assert [r["msg_id"] for r in inc] == [4, 5]
+    # incremental over limit: keep the OLDEST page above the mark, not the newest —
+    # otherwise the seen store's high-water mark would jump past unfetched rows
+    # (3 and 4 here) and skip them forever. The remainder comes next run.
+    inc_paged = read_messages(db_path=db_path, chat_id="3707563960",
+                              since="2026-04-28", until="2026-04-29", limit=2, min_msg_id=2)
+    assert [r["msg_id"] for r in inc_paged] == [3, 4]
 
 
 def test_should_skip_empty_and_low_signal_content():

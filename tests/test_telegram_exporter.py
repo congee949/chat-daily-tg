@@ -46,6 +46,32 @@ def test_canonical_chat_ids_accepts_negative_supergroup_id():
     assert 1003707563960 in ids
 
 
+def test_read_messages_keeps_newest_when_over_limit(tmp_path: Path):
+    from chat_daily_tg.telegram_exporter import read_messages
+    db_path = tmp_path / "m.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE messages (chat_id INTEGER, chat_name TEXT, msg_id INTEGER, "
+        "sender_name TEXT, content TEXT, timestamp TEXT, raw_json TEXT)"
+    )
+    # 5 in-window messages: window [2026-04-28 00:00 +08:00) == [2026-04-27T16:00Z, ...)
+    # so 17:00–21:00 UTC all fall inside 2026-04-28 local; msg_id ascending with time.
+    rows = [
+        (3707563960, "C", i, "s", f"m{i}", f"2026-04-27T{16 + i:02d}:00:00+00:00", None)
+        for i in range(1, 6)
+    ]
+    conn.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit(); conn.close()
+    got = read_messages(db_path=db_path, chat_id="3707563960",
+                        since="2026-04-28", until="2026-04-29", limit=2)
+    ids = [r["msg_id"] for r in got]
+    assert ids == [4, 5]  # newest 2 kept, returned ASC for rendering
+    # incremental: only msg_id > high-water-mark
+    inc = read_messages(db_path=db_path, chat_id="3707563960",
+                        since="2026-04-28", until="2026-04-29", limit=10, min_msg_id=3)
+    assert [r["msg_id"] for r in inc] == [4, 5]
+
+
 def test_should_skip_empty_and_low_signal_content():
     assert should_skip_content("")
     assert should_skip_content("😂")

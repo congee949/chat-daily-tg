@@ -58,6 +58,67 @@ def _append_evidence_context(detailed_md: str, evidence_context: str) -> str:
     return f"{detailed_md.rstrip()}\n\n## Embedding 检索证据\n\n{evidence_context.strip()}\n"
 
 
+def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, incremental: bool) -> None:
+    """Verbatim channel-card stage. Builds its own bot sender and is fully isolated —
+    any failure only logs/notifies. Runs as a standalone 2-hourly forwarder
+    (incremental=True): each channel fetches only messages newer than its high-water
+    mark, so high-volume private channels aren't re-downloaded."""
+    channels = cfg.sources.telegram.raw_channels if cfg.sources.telegram.enabled else []
+    if not channels:
+        return
+    try:
+        from chat_daily_tg.raw_channels import push_raw_channel_cards
+        from chat_daily_tg.tg_sender import TelegramSender
+        from chat_daily_tg.paths import DATA_DIR
+        sender = None
+        if not no_push:
+            sender = TelegramSender(
+                bot_token=os.environ[cfg.telegram.bot_token_env],
+                chat_id=os.environ[cfg.telegram.chat_id_env],
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+            )
+        n = push_raw_channel_cards(
+            channels=channels,
+            since=since,
+            until=until,
+            db_path=cfg.sources.telegram.db_path,
+            sender=sender,
+            archive_dir=archive_dir,
+            seen_path=DATA_DIR / "raw_channel_seen.txt",
+            sync_before_export=cfg.sources.telegram.sync_before_export,
+            delay_seconds=cfg.sources.telegram.raw_card_delay_seconds,
+            no_push=no_push,
+            incremental=incremental,
+        )
+        log.info("raw channel cards pushed: %d (incremental=%s, no_push=%s)", n, incremental, no_push)
+    except Exception as e:
+        log.exception("raw channel stage failed: %s", e)
+        notify_failure("chat-daily-tg 频道原文卡片失败", f"{type(e).__name__}: {e}")
+
+
+def run_channels(no_push: bool = False) -> int:
+    """Entry point for the 2-hourly channel forwarder (--channels-only). Pushes only
+    verbatim channel cards, incrementally; does NOT run the daily LLM summary. The
+    window spans [yesterday, tomorrow) as a safety bound — the per-channel high-water
+    mark does the real filtering so nothing is re-pushed or re-downloaded."""
+    today = date.today()
+    tag = today.isoformat()
+    configure_logging(log_file_for(f"channels-{tag}"))
+    try:
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        archive_dir = prepare_archive_day(tag)
+        since = (today - timedelta(days=1)).isoformat()
+        until = (today + timedelta(days=1)).isoformat()
+        _push_raw_channels(cfg, since, until, archive_dir, no_push=no_push, incremental=True)
+        return 0
+    except Exception as e:
+        log.exception("channels forwarder failed: %s", e)
+        notify_failure("chat-daily-tg 频道转发失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
 def _fact_risk_report(verification: dict) -> str:
     risky_statuses = {"downgraded", "removed", "needs_verification"}
     risky_claims = [
@@ -97,6 +158,8 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     )
 
     archive_dir = prepare_archive_day(date_str)
+    # Channel cards are handled by the separate 2-hourly forwarder (run_channels), not
+    # by this daily summary run.
     groups_with_content: list[tuple[str, str]] = []
     media_candidates = []
     for group in cfg.sources.wechat.groups:
@@ -390,5 +453,9 @@ if __name__ == "__main__":
     p.add_argument("--date", help="YYYY-MM-DD (default: yesterday)", default=None)
     p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)
     p.add_argument("--no-push", action="store_true", help="Skip Telegram push")
+    p.add_argument("--channels-only", action="store_true",
+                   help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     args = p.parse_args()
+    if args.channels_only:
+        sys.exit(run_channels(no_push=args.no_push))
     sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push))

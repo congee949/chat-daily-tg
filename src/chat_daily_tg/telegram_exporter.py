@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
+import logging
 import re
 import sqlite3
 import subprocess
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo
 from chat_daily_tg.media import MediaCandidate, extract_telegram_media_candidates
 
 
+log = logging.getLogger(__name__)
 TG_BINARY = "tg"
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 UTC = ZoneInfo("UTC")
@@ -102,27 +104,44 @@ def read_messages(
     since: str,
     until: str,
     limit: int,
+    min_msg_id: int = 0,
 ) -> list[sqlite3.Row]:
     start = datetime.combine(date.fromisoformat(since), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
     end = datetime.combine(date.fromisoformat(until), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
     ids = sorted(canonical_chat_ids(chat_id))
     placeholders = ",".join("?" for _ in ids)
+    # `min_msg_id > 0` makes this incremental: only messages newer than the high-water
+    # mark (the forwarder's last-pushed id) are returned.
+    min_clause = "AND msg_id > ?" if min_msg_id else ""
+    # When a window holds more than `limit` messages, keep the NEWEST `limit` (inner
+    # DESC + LIMIT) rather than the earliest, then re-sort ASC for rendering. ASC+LIMIT
+    # would silently drop the latest messages of a high-volume day.
     query = f"""
-        SELECT chat_id, chat_name, msg_id, sender_name, content, timestamp, raw_json
-        FROM messages
-        WHERE chat_id IN ({placeholders})
-          AND timestamp >= ?
-          AND timestamp < ?
-        ORDER BY timestamp ASC
-        LIMIT ?
+        SELECT * FROM (
+            SELECT chat_id, chat_name, msg_id, sender_name, content, timestamp, raw_json
+            FROM messages
+            WHERE chat_id IN ({placeholders})
+              AND timestamp >= ?
+              AND timestamp < ?
+              {min_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ) ORDER BY timestamp ASC
     """
-    params = [*ids, start.isoformat(), end.isoformat(), limit]
+    params = [*ids, start.isoformat(), end.isoformat()]
+    if min_msg_id:
+        params.append(min_msg_id)
+    params.append(limit)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        return list(conn.execute(query, params))
+        rows = list(conn.execute(query, params))
     finally:
         conn.close()
+    if len(rows) >= limit:
+        log.warning("read_messages hit limit=%d for chat %s [%s,%s) — older messages dropped",
+                    limit, chat_id, since, until)
+    return rows
 
 
 def render_message(row: sqlite3.Row, *, fallback_chat_name: str) -> str | None:

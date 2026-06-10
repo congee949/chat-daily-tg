@@ -65,10 +65,25 @@ class TelegramChat(BaseModel):
     limit: int = 500
 
 
+class RawChannel(BaseModel):
+    """A channel whose messages are pushed verbatim as per-message TG cards,
+    bypassing the LLM summary entirely. `username` (without @) enables the public
+    t.me link preview; omit it for private channels (media is downloaded + re-sent).
+    `strip_patterns` are regexes; any message LINE matching one is removed before
+    pushing (e.g. a channel's promo header/footer)."""
+    id: str
+    name: str
+    username: str | None = None
+    limit: int = 500
+    strip_patterns: list[str] = Field(default_factory=list)
+
+
 class TelegramSource(BaseModel):
     enabled: bool = False
     db_path: str = "~/Library/Application Support/tg-cli/messages.db"
     chats: list[TelegramChat] = Field(default_factory=list)
+    raw_channels: list[RawChannel] = Field(default_factory=list)
+    raw_card_delay_seconds: float = 1.0  # pause between card pushes to respect TG rate limits
     sync_before_export: bool = True
 
 
@@ -121,9 +136,11 @@ class Config(BaseModel):
         self.groups = self.sources.wechat.groups
 
         has_wechat = bool(self.sources.wechat.groups)
-        has_telegram = self.sources.telegram.enabled and bool(self.sources.telegram.chats)
+        has_telegram = self.sources.telegram.enabled and bool(
+            self.sources.telegram.chats or self.sources.telegram.raw_channels
+        )
         if not has_wechat and not has_telegram:
-            raise ValueError("configure at least one source: sources.wechat.groups or sources.telegram.chats")
+            raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, or sources.telegram.raw_channels")
         return self
 
     def override_summary_model(self, model_name: str) -> None:

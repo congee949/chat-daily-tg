@@ -1,10 +1,22 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+import json
 import re
 import httpx
 import logging
 import time
 log = logging.getLogger(__name__)
+
+
+# Telegram sendXxx method + multipart field name per media kind.
+_MEDIA_METHOD = {
+    "photo": ("sendPhoto", "photo"),
+    "video": ("sendVideo", "video"),
+    "audio": ("sendAudio", "audio"),
+    "document": ("sendDocument", "document"),
+}
+# media_group item type per kind (photos/videos can share one group).
+_GROUP_TYPE = {"photo": "photo", "video": "video", "audio": "audio", "document": "document"}
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -35,6 +47,23 @@ _LINK_OR_BOLD_RE = re.compile(r'(<a href="[^"]*">.*?</a>)|\*\*(.+?)\*\*')
 def escape_html(text: str) -> str:
     """Escape the three characters Telegram HTML parse mode treats as special."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_to_plain(text: str) -> str:
+    """Strip HTML tags and unescape entities — used to degrade a 400'd card to plain text."""
+    stripped = _TAG_RE.sub("", text)
+    return stripped.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+
+
+def _retry_after(r: "httpx.Response") -> float:
+    """Seconds to wait on a 429, clamped to [1, 30]."""
+    try:
+        return min(max(int(r.json()["parameters"]["retry_after"]), 1), 30)
+    except Exception:
+        return 3
 
 
 def format_html_for_telegram(text: str) -> str:
@@ -198,6 +227,75 @@ class TelegramSender:
         chunks = split_message(payload, limit=3900)
         return [self._send_one(c, parse_mode) for c in chunks]
 
+    def send_card(self, text_html: str, *, link: str | None = None) -> list[int]:
+        """Send a verbatim channel message as an X-Monitor-style card.
+
+        `text_html` is already-built Telegram HTML (callers escape their own content).
+        For a public channel `link` (a t.me/<username>/<id> URL) enables Telegram's
+        rich link-preview card; pass link=None for a private channel to send plain text
+        with no preview.
+
+        Long messages are split on newline boundaries; only the LAST chunk carries the
+        preview so the card renders once at the end. On a 400 (usually an HTML parse
+        error) the chunk degrades to plain text once and resends, so a single bad
+        message never drops the whole push.
+        """
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        chunks = split_message(text_html, limit=3900)
+        msg_ids: list[int] = []
+        for i, chunk in enumerate(chunks):
+            is_last = i == len(chunks) - 1
+            payload: dict = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
+            if link and is_last:
+                payload["link_preview_options"] = {
+                    "url": link, "is_disabled": False, "prefer_large_media": True,
+                }
+            else:
+                payload["link_preview_options"] = {"is_disabled": True}
+            msg_ids.append(self._post_json(url, payload))
+        return msg_ids
+
+    def _post_json(self, url: str, payload: dict) -> int:
+        """POST a JSON sendMessage payload with retry/backoff. Honors 429 retry_after
+        and degrades to plain text once on a 400 parse error."""
+        last_exc: Exception | None = None
+        attempts = 0
+        rl_hits = 0
+        degraded = False
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    r = c.post(url, json=payload)
+                    if r.status_code == 429:
+                        rl_hits += 1
+                        if rl_hits >= self.retry_max_attempts:
+                            last_exc = RuntimeError(f"Telegram 429 rate limit: gave up after {rl_hits} waits")
+                            break
+                        time.sleep(_retry_after(r))
+                        continue
+                    if r.status_code == 400 and payload.get("parse_mode") and not degraded:
+                        degraded = True
+                        payload = dict(payload)
+                        payload["text"] = _html_to_plain(payload["text"])
+                        payload.pop("parse_mode", None)
+                        continue
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return body["result"]["message_id"]
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg send_card failed (attempt %d/%d): %s",
+                            attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc
+
     def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None) -> int:
         """Send a photo via sendPhoto. Caption is hard-capped at Telegram's 1024 limit.
 
@@ -227,6 +325,109 @@ class TelegramSender:
                 last_exc = e
                 attempts += 1
                 log.warning("tg sendPhoto failed (attempt %d/%d): %s",
+                            attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc
+
+    def send_media(self, file_path: str, kind: str, *, caption: str = "") -> int:
+        """Upload a single media file (sendPhoto/sendVideo/sendAudio/sendDocument).
+
+        `caption` is Telegram HTML, hard-capped at the 1024 caption limit. Mirrors the
+        send_photo retry/backoff. Used for verbatim private-channel media."""
+        method, field_name = _MEDIA_METHOD.get(kind, _MEDIA_METHOD["document"])
+        url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
+        last_exc: Exception | None = None
+        attempts = 0
+        rl_hits = 0
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    with open(file_path, "rb") as fh:
+                        files = {field_name: fh}
+                        data = {"chat_id": self.chat_id}
+                        if caption:
+                            data["caption"] = caption[:1024]
+                            data["parse_mode"] = "HTML"
+                        r = c.post(url, data=data, files=files)
+                    if r.status_code == 429:
+                        rl_hits += 1
+                        if rl_hits >= self.retry_max_attempts:
+                            last_exc = RuntimeError(f"Telegram 429 rate limit: gave up after {rl_hits} waits")
+                            break
+                        time.sleep(_retry_after(r))
+                        continue
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return body["result"]["message_id"]
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg %s failed (attempt %d/%d): %s",
+                            method, attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc
+
+    def send_media_group(self, items: list[tuple[str, str]], *, caption: str = "") -> list[int]:
+        """Send up to 10 media files as one album (sendMediaGroup).
+
+        `items` is [(file_path, kind), …]; caption (HTML) goes on the first item.
+        Media groups do not support inline buttons, so callers that need an 打开原文
+        link embed it in the caption text. Mixed photo/document groups are the caller's
+        responsibility to avoid (Telegram 400s on them)."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
+        items = items[:10]
+        last_exc: Exception | None = None
+        attempts = 0
+        rl_hits = 0
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    handles = []
+                    try:
+                        media = []
+                        files = {}
+                        for i, (path, kind) in enumerate(items):
+                            key = f"file{i}"
+                            fh = open(path, "rb")
+                            handles.append(fh)
+                            files[key] = fh
+                            m = {"type": _GROUP_TYPE.get(kind, "document"),
+                                 "media": f"attach://{key}"}
+                            if i == 0 and caption:
+                                m["caption"] = caption[:1024]
+                                m["parse_mode"] = "HTML"
+                            media.append(m)
+                        data = {"chat_id": self.chat_id, "media": json.dumps(media)}
+                        r = c.post(url, data=data, files=files)
+                    finally:
+                        for fh in handles:
+                            fh.close()
+                    if r.status_code == 429:
+                        rl_hits += 1
+                        if rl_hits >= self.retry_max_attempts:
+                            last_exc = RuntimeError(f"Telegram 429 rate limit: gave up after {rl_hits} waits")
+                            break
+                        time.sleep(_retry_after(r))
+                        continue
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return [m["message_id"] for m in body["result"]]
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg sendMediaGroup failed (attempt %d/%d): %s",
                             attempts, self.retry_max_attempts, e)
                 if attempts >= self.retry_max_attempts:
                     break

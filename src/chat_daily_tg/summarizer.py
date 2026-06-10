@@ -128,6 +128,17 @@ def run_summary(
     initial = _parse_or_repair_summary(llm_client, content, detail_path)
     if evidence_context_builder is not None:
         evidence_context = evidence_context_builder(initial)
+        if not evidence_context.strip():
+            # Empty context means extract_claim_queries found zero high-risk
+            # claims in the draft — the verifier's mandate is exactly that
+            # claim list, so the second LLM call has nothing to check.
+            log.info("no high-risk claims in draft, skipping verifier LLM call")
+            return SummaryOutput(
+                concise_md=initial.concise_md,
+                detailed_md=initial.detailed_md,
+                opportunities=initial.opportunities,
+                verification={"checked_claims": []},
+            )
     verified_content, _usage = llm_client.chat(
         _build_verifier_prompt(
             date=date,

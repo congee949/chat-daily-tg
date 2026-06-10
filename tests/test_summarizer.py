@@ -185,6 +185,32 @@ def test_run_summary_passes_embedding_evidence_context_to_verifier(tmp_path):
     assert "4.3出了哦" in verifier_prompt
 
 
+def test_run_summary_skips_verifier_when_no_high_risk_claims(tmp_path):
+    """Builder returning "" means zero high-risk claims were extracted from the
+    draft — the verifier call is skipped and the draft is returned as-is with an
+    empty verification record."""
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, system=None):
+            self.calls.append((prompt, system))
+            return SAMPLE_OUTPUT, {}
+
+    llm = FakeLLM()
+    out = run_summary(
+        llm_client=llm,
+        date="2026-05-06",
+        groups_with_content=[("Telegram / G1", "content")],
+        detail_path=str(tmp_path / "summary.md"),
+        evidence_context_builder=lambda output: "",
+    )
+
+    assert len(llm.calls) == 1  # draft only, no verifier call
+    assert out.verification == {"checked_claims": []}
+    assert out.concise_md  # draft preserved
+
 
 def test_run_summary_verifier_can_downgrade_ambiguous_entity(tmp_path):
     draft = """```markdown concise

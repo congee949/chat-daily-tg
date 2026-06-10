@@ -11,8 +11,14 @@
 	<string>com.chat-daily-tg.agent</string>
 	<key>ProgramArguments</key>
 	<array>
+		<!-- caffeinate -is: hold off idle/system sleep while the run is in flight
+		     (cannot prevent lid-closed sleep on battery — the catch-up intervals
+		     below cover that case via --skip-if-done idempotent retries). -->
+		<string>/usr/bin/caffeinate</string>
+		<string>-is</string>
 		<string>REPLACE_WITH_PROJECT_DIR/.venv/bin/python</string>
 		<string>REPLACE_WITH_PROJECT_DIR/run_daily.py</string>
+		<string>--skip-if-done</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>
@@ -21,12 +27,14 @@
 	<key>StandardOutPath</key>
 	<string>REPLACE_WITH_DATA_DIR/logs/stdout.log</string>
 	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Hour</key>
-		<integer>8</integer>
-		<key>Minute</key>
-		<integer>0</integer>
-	</dict>
+	<array>
+		<!-- 6:30 main run; 9:00/13:00 are same-day catch-ups — no-ops once the
+		     .run-complete marker exists (launchd also coalesces slept-through
+		     fire times into one start on wake). -->
+		<dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+	</array>
 	<key>WorkingDirectory</key>
 	<string>REPLACE_WITH_PROJECT_DIR</string>
 </dict>

@@ -135,8 +135,8 @@ class GeminiEmbedder:
     _BASE_DELAY = 2.0
     _MAX_DELAY = 60.0  # cap at RPM window; wait for quota reset
 
-    _BATCH_SIZE = 10
-    _INTER_BATCH_DELAY = 16.0  # Gemini embedding RPM ~40-50; batch=10, ~37 RPM
+    _BATCH_SIZE = 100  # batchEmbedContents accepts at most 100 requests per call
+    _INTER_BATCH_DELAY = 16.0  # only between consecutive batches (>100 texts); keeps multi-batch traffic low-frequency
 
     def _embed(self, texts: list[str], *, task_type: str) -> list[list[float]]:
         if not texts:
@@ -357,15 +357,11 @@ def build_evidence_context_for_summary(
     queries = extract_claim_queries(summary_text)
     if not queries:
         return ""
+    # Embed all claim queries in one batched request instead of one request per query.
+    query_vectors = embedder.embed_queries(queries)
     sections = []
-    for query in queries:
-        hits = retrieve_evidence_for_text(
-            index=index,
-            embedder=embedder,
-            text=query,
-            top_k=top_k,
-            min_similarity=min_similarity,
-        )
+    for query, vector in zip(queries, query_vectors):
+        hits = index.search(vector, top_k=top_k, min_similarity=min_similarity)
         sections.append(f"### Claim 查询：{query}\n{render_evidence_hits(hits)}")
     return "\n\n".join(sections)
 

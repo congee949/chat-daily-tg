@@ -103,6 +103,15 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         sent_data = tg_client_instance.post.call_args_list[0].kwargs.get("data", {})
         assert sent_data["parse_mode"] == "HTML"
 
+        # Pushed run writes the completion marker → a same-day catch-up
+        # invocation with --skip-if-done becomes a no-op.
+        marker = tmp_path / "archive" / "2026" / "04" / "17" / ".run-complete"
+        assert marker.exists()
+        rc2 = run_daily.main(date_str="2026-04-17", skip_if_done=True)
+        assert rc2 == 0
+        assert len(mock_chat.call_args_list) == 2  # no new LLM calls
+        assert len(tg_client_instance.post.call_args_list) == 1  # no second push
+
     # Verify archive file was written
     summary_path = tmp_path / "archive" / "2026" / "04" / "17" / "summary.md"
     assert summary_path.exists()
@@ -495,3 +504,5 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     # Archive files should still exist
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "concise.md").exists()
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "summary.md").exists()
+    # But a --no-push run is not "delivered": no marker, so catch-up still retries
+    assert not (tmp_path / "archive" / "2026" / "04" / "17" / ".run-complete").exists()

@@ -16,12 +16,14 @@ from chat_daily_tg.evidence_index import (
 class FakeEmbedder:
     def __init__(self):
         self.document_texts: list[str] = []
+        self.query_batches: list[list[str]] = []
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         self.document_texts.extend(texts)
         return self._embed(texts)
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        self.query_batches.append(list(texts))
         return self._embed(texts)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
@@ -186,6 +188,87 @@ def test_gemini_embedder_sanitizes_http_errors(httpx_mock: HTTPXMock):
 def test_cosine_similarity():
     assert cosine_similarity([1, 0], [1, 0]) == 1.0
     assert cosine_similarity([1, 0], [0, 1]) == 0.0
+
+
+def test_gemini_embedder_embeds_up_to_100_texts_in_single_request_without_sleep(
+    httpx_mock: HTTPXMock, monkeypatch
+):
+    sleeps: list[float] = []
+    monkeypatch.setattr("chat_daily_tg.evidence_index.time.sleep", sleeps.append)
+    httpx_mock.add_response(
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents",
+        method="POST",
+        json={"embeddings": [{"values": [0.1, 0.2]} for _ in range(56)]},
+    )
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="key",
+    )
+
+    vectors = embedder.embed_documents([f"text {i}" for i in range(56)])
+
+    assert len(vectors) == 56
+    assert len(httpx_mock.get_requests()) == 1
+    assert sleeps == []
+
+
+def test_gemini_embedder_splits_over_100_texts_and_sleeps_only_between_batches(
+    httpx_mock: HTTPXMock, monkeypatch
+):
+    import json as _json
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("chat_daily_tg.evidence_index.time.sleep", sleeps.append)
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents"
+    httpx_mock.add_response(
+        url=url, method="POST",
+        json={"embeddings": [{"values": [0.1]} for _ in range(100)]},
+    )
+    httpx_mock.add_response(
+        url=url, method="POST",
+        json={"embeddings": [{"values": [0.2]} for _ in range(30)]},
+    )
+    embedder = GeminiEmbedder(
+        endpoint="https://generativelanguage.googleapis.com/v1beta",
+        model="gemini-embedding-2",
+        api_key="key",
+    )
+
+    vectors = embedder.embed_documents([f"text {i}" for i in range(130)])
+
+    assert len(vectors) == 130
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert len(_json.loads(requests[0].read())["requests"]) == 100
+    assert len(_json.loads(requests[1].read())["requests"]) == 30
+    assert sleeps == [GeminiEmbedder._INTER_BATCH_DELAY]
+
+
+def test_build_evidence_context_embeds_all_claim_queries_in_one_call(tmp_path):
+    groups = [
+        ("Telegram / G1", "[Telegram / G1 / 14:15 / A] 4.3出了哦\n[Telegram / G1 / 14:22 / B] 这个能直接读x"),
+        ("Telegram / G1", "[Telegram / G1 / 17:44 / C] 大陆封禁 vpn 是不是真的"),
+    ]
+    embedder = FakeEmbedder()
+    index = build_evidence_index(index_path=tmp_path / "evidence.sqlite", groups_with_content=groups, embedder=embedder)
+
+    context = build_evidence_context_for_summary(
+        index=index,
+        embedder=embedder,
+        summary_text=(
+            "- **Claude 4.3 发布**：实时语音第一（G1 / 14:15）\n"
+            "- **VPN 封堵传闻**：红头文件再起（G1 / 17:44）\n"
+        ),
+        top_k=2,
+        min_similarity=0.1,
+    )
+
+    assert len(embedder.query_batches) == 1
+    assert len(embedder.query_batches[0]) == 2
+    assert "4.3出了哦" in context
+    assert "大陆封禁 vpn 是不是真的" in context
+    index.close()
 
 
 def test_gemini_embedder_retries_on_429_then_succeeds(httpx_mock: HTTPXMock):

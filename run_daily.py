@@ -40,10 +40,25 @@ def yesterday_iso() -> str:
     return (date.today() - timedelta(days=1)).isoformat()
 
 
-def main(date_str: str | None = None, model_alias: str | None = None, no_push: bool = False) -> int:
+# Written to the archive dir after a fully successful pushed run. The launchd
+# catch-up intervals re-invoke run_daily with --skip-if-done, so a morning run
+# that failed (or slept through) is retried later the same day, while a
+# completed run makes the catch-ups no-ops.
+COMPLETE_MARKER = ".run-complete"
+
+
+def completion_marker(date_str: str):
+    return prepare_archive_day(date_str) / COMPLETE_MARKER
+
+
+def main(date_str: str | None = None, model_alias: str | None = None, no_push: bool = False,
+         skip_if_done: bool = False) -> int:
     if date_str is None:
         date_str = yesterday_iso()
     configure_logging(log_file_for(date_str))
+    if skip_if_done and completion_marker(date_str).exists():
+        log.info("run for %s already complete, skipping (--skip-if-done)", date_str)
+        return 0
     try:
         return _run(date_str, model_alias=model_alias, no_push=no_push)
     except Exception as e:
@@ -444,6 +459,10 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     else:
         log.info("TG push skipped (--no-push)")
 
+    if not no_push:
+        # Only a pushed run counts as delivered — a --no-push debug run must not
+        # suppress the same-day catch-up retries.
+        (archive_dir / COMPLETE_MARKER).write_text(_dt.now().isoformat(), encoding="utf-8")
     log.info("✓ run_daily complete for %s", date_str)
     return 0
 
@@ -453,9 +472,12 @@ if __name__ == "__main__":
     p.add_argument("--date", help="YYYY-MM-DD (default: yesterday)", default=None)
     p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)
     p.add_argument("--no-push", action="store_true", help="Skip Telegram push")
+    p.add_argument("--skip-if-done", action="store_true",
+                   help="Exit 0 immediately if this date's run already completed (catch-up schedule)")
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     args = p.parse_args()
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))
-    sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push))
+    sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push,
+                  skip_if_done=args.skip_if_done))

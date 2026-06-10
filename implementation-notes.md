@@ -137,3 +137,28 @@
 - `send_card` 多分块中途失败会留半条（LOW，narrow）：隔离尽力阶段，暂仅日志可见。
 - seen 文件 append-only 长期增长（每行~20B，可接受）；未来可按日期前缀裁剪。
 - run_daily docstring/config.yaml 写 08:00 但 launchd 实际 06:30（pre-existing 文档不一致，未在本次范围内改）。
+
+## 2026-06-10 — 晨跑失败根因修复 + embedding/verifier 提速 + 睡眠免疫调度
+
+06-10 06:30 run 失败（日报未发）。根因：MacBook 合盖电池睡眠——请求发出 2s 后入睡，43.5min 墙钟里进程仅实际运行 ~80s（600s timeout 没机会走完），DarkWake 醒来发现代理 TCP 已被对端断开 → `RemoteProtocolError`，而旧重试网 `(HTTPStatusError, TimeoutException, ConnectError)` 不含 `ProtocolError` 分支，一次击穿。
+
+### Design Decisions
+- **重试网扩为 `(HTTPStatusError, TransportError)`**（llm_client）：TransportError 统一涵盖 Timeout/Connect/Read/Proxy/Protocol；config 的 600s timeout 本身正确，不改。
+- **embedding batch 10→100**：`batchEmbedContents` 实际上限 100/请求（官方文档不写明，langchain-google-genai 写死 100）；常态 ~50 chunks 从 6 请求+80s 睡眠变 1 请求 0 睡眠。请求数下降对 RPM 更友好，16s inter-batch delay 保留（仅 >100 chunks 生效）。claim query embedding 同样合并为单请求（原 ≤12 次串行）。
+- **verifier 跳过条件 = builder 返回空串**：空串 ⟺ `extract_claim_queries` 零命中（有 query 必有 "### Claim 查询" 头），即 verifier 的核验清单为空 → 跳过第二次 LLM 调用，`verification={"checked_claims":[]}`（写 verification.json，与"没跑"可区分）。embedding 禁用（builder=None）时保持 verifier 必跑——无信号不敢跳。
+- **调度睡眠免疫 = caffeinate + 当日补跑**：`caffeinate -is` 防 run 中途 idle/AC 睡眠，但**防不了电池合盖**；兜底靠 9:00/13:00 两个 catch-up interval + `--skip-if-done`。成功标记 `.run-complete` 写在 archive 日目录，**仅 push 成功才写**（--no-push 调试跑不算交付，不得抑制补跑）。launchd 同 label 不并发、睡过的触发点唤醒时合并，无需锁。
+- **电丸 limit 500→1500（config.yaml）**：limit 同时控制 `tg sync -n` 抓取深度和 SQL 读取上限，sync 抓不到的消息 SQL 分页也救不回，调一个旋钮覆盖两层。
+
+### Tradeoffs
+- catch-up 选 9:00/13:00 两次：覆盖"早晨没醒/上游故障"两类，再多收益递减（launchd 唤醒合并已兜长睡）。
+- 跨天 embedding 缓存不做：batch=100 后整步只剩 ~3s 单请求，ROI≈0。
+
+### 验证
+- 169 passed（含 RemoteProtocolError 重试回归、大 batch 切分、verifier 跳过、marker 写入/跳过）；tests/conftest.py 全局清代理变量后，带 ALL_PROXY 的 shell 直跑不再假红。
+- 实跑补发 06-09 日报成功：23 chunks embedding 16min→2.1s，全程 ~105s（原 ~3.5min）。
+- launchctl 重载后 `launchctl print` 确认 3 个 calendar interval + caffeinate 参数生效；`--skip-if-done` 冒烟实测秒退 exit=0。
+
+### Open Questions / 已知保留
+- summary 失败后 export/embedding 成果不复用（补跑全重做）：catch-up 机制下可接受，未加断点续跑。
+- deploy.sh 与现状脱节且危险（label 写错 `com.chat-daily.tg`、`git reset --hard` 会清掉未提交工作、pip 而非 uv）：本次未动，提醒勿直接运行。
+- `retrieve_evidence_for_text` 已无仓库内调用方，待在途修改合并后可删。

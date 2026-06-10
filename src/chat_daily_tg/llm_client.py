@@ -51,7 +51,10 @@ class LLMClient:
                 content = data["choices"][0]["message"]["content"]
                 usage = data.get("usage", {})
                 return content, usage
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
+            # TransportError covers TimeoutException, ConnectError, ReadError,
+            # ProxyError and ProtocolError (e.g. RemoteProtocolError when the
+            # proxy/server drops the connection mid-request, seen 2026-06-10).
+            except (httpx.HTTPStatusError, httpx.TransportError) as e:
                 last_exc = e
                 attempts += 1
                 log.warning("llm call failed (attempt %d/%d): %s",

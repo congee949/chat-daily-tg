@@ -29,7 +29,7 @@ SAMPLE = "\n".join([
     "- 一份开户教程",
     "",
     "### 🧾 详情",
-    "- /Users/Apple/chat-daily/archive/2026-04-17/summary.md",
+    "- /Users/example/chat-daily/archive/2026-04-17/summary.md",
 ])
 
 

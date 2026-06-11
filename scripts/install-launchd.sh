@@ -23,6 +23,7 @@ for placeholder, envvar in [
     ("REPLACE_WITH_REAL_KEY", "DEEPSEEK_API_KEY"),
     ("REPLACE_WITH_REAL_TOKEN", "TG_BOT_TOKEN"),
     ("REPLACE_WITH_REAL_CHAT_ID", "TG_CHAT_ID"),
+    ("REPLACE_WITH_HOME", "HOME"),
 ]:
     text = text.replace(placeholder, os.environ[envvar])
 text = text.replace("REPLACE_WITH_PROJECT_DIR", os.environ["PROJECT"])

@@ -69,7 +69,7 @@ sources:
     db_path: "~/Library/Application Support/tg-cli/messages.db"
     sync_before_export: false
     chats:
-      - id: "-1003707563960"
+      - id: "-1001234567890"
         name: "示例TG群A"
         limit: 50
 llm:
@@ -85,7 +85,7 @@ telegram:
     cfg = load_config(cfg_file)
     assert cfg.groups == ["微信 A"]
     assert cfg.sources.telegram.enabled is True
-    assert cfg.sources.telegram.chats[0].id == "-1003707563960"
+    assert cfg.sources.telegram.chats[0].id == "-1001234567890"
     assert cfg.sources.telegram.chats[0].limit == 50
     assert cfg.sources.telegram.sync_before_export is False
 

@@ -50,7 +50,7 @@ def visible_text(html: str) -> str:
 
 def strip_promo_lines(text: str, patterns: list[str]) -> str:
     """Drop whole lines matching any of `patterns` (regex search), e.g. a channel's
-    promo header/footer like '🌸 在花频道 · 备用频道 · 投稿通道'. Collapses the blank
+    promo header/footer like '🌸 示例频道 · 备用频道 · 投稿通道'. Collapses the blank
     lines left behind and trims. Returns text unchanged when no patterns are set."""
     if not patterns or not text:
         return text

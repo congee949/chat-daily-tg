@@ -23,5 +23,5 @@ def test_configure_logging_redacts_bot_token(tmp_path):
     logging.shutdown()
     content = log_file.read_text(encoding="utf-8")
     assert token not in content
-    assert "8307375018:AA" not in content   # not even a fragment, incl. traceback
+    assert "1234567890:AA" not in content   # not even a fragment, incl. traceback
     assert "<REDACTED_TG_TOKEN>" in content

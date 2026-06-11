@@ -8,7 +8,7 @@ from chat_daily_tg.cross_group_cluster import (
 def test_clusters_equivalent_wechat_and_telegram_messages_as_cross_group_topic():
     groups = [
         (
-            "微信 / OpenCLI 交流群",
+            "微信 / 示例微信群A",
             """
 # 微信群导出
 
@@ -17,11 +17,11 @@ def test_clusters_equivalent_wechat_and_telegram_messages_as_cross_group_topic()
 """,
         ),
         (
-            "Telegram / CuiMao爱学习",
+            "Telegram / 示例TG群A",
             """
-# Telegram: CuiMao爱学习
+# Telegram: 示例TG群A
 
-[Telegram / CuiMao爱学习 / 10:47 / Bob] Mimo V2.5 Pro 评测接近 Sonnet，稳定性优于 K2.6，TTS 模型效果惊艳
+[Telegram / 示例TG群A / 10:47 / Bob] Mimo V2.5 Pro 评测接近 Sonnet，稳定性优于 K2.6，TTS 模型效果惊艳
 """,
         ),
     ]
@@ -31,8 +31,8 @@ def test_clusters_equivalent_wechat_and_telegram_messages_as_cross_group_topic()
 
     assert len(cross_clusters) == 1
     assert [s["group"] for s in cross_clusters[0].sources] == [
-        "微信 / OpenCLI 交流群",
-        "Telegram / CuiMao爱学习",
+        "微信 / 示例微信群A",
+        "Telegram / 示例TG群A",
     ]
     assert [s["time"] for s in cross_clusters[0].sources] == ["10:43", "10:47"]
 
@@ -40,37 +40,37 @@ def test_clusters_equivalent_wechat_and_telegram_messages_as_cross_group_topic()
 def test_cluster_context_tells_llm_to_merge_cross_source_topic():
     clusters = cluster_cross_group_topics([
         (
-            "微信 / OpenCLI 交流群",
+            "微信 / 示例微信群A",
             "2026-04-30 10:43\n**Alice**: Claude 4.7 变啰嗦，GPT 5.5 更强但更耗 token",
         ),
         (
-            "Telegram / CuiMao爱学习",
-            "[Telegram / CuiMao爱学习 / 10:47 / Bob] Claude 4.7 变啰嗦，GPT 5.5 更强但更耗 token",
+            "Telegram / 示例TG群A",
+            "[Telegram / 示例TG群A / 10:47 / Bob] Claude 4.7 变啰嗦，GPT 5.5 更强但更耗 token",
         ),
     ])
 
     context = build_cluster_context(clusters)
 
     assert "跨群确认" in context
-    assert "微信 / OpenCLI 交流群 / 10:43" in context
-    assert "Telegram / CuiMao爱学习 / 10:47" in context
+    assert "微信 / 示例微信群A / 10:43" in context
+    assert "Telegram / 示例TG群A / 10:47" in context
 
 
 def test_validate_clusters_warns_when_merged_output_omits_one_source():
     clusters = cluster_cross_group_topics([
         (
-            "微信 / OpenCLI 交流群",
+            "微信 / 示例微信群A",
             "2026-04-30 10:43\n**Alice**: Mac mini 养龙虾热度退潮，很多人买完发现用处不大",
         ),
         (
-            "Telegram / 电丸朱氏会社",
-            "[Telegram / 电丸朱氏会社 / 10:47 / Bob] Mac mini 养龙虾热度退潮，很多人买完发现用处不大",
+            "Telegram / 示例TG群B",
+            "[Telegram / 示例TG群B / 10:47 / Bob] Mac mini 养龙虾热度退潮，很多人买完发现用处不大",
         ),
     ])
 
     warnings = validate_clusters_in_output(
         clusters,
-        "- Mac mini 养龙虾开始退潮，跟风买家发现用处不大（OpenCLI 交流群 / 10:43）",
+        "- Mac mini 养龙虾开始退潮，跟风买家发现用处不大（示例微信群A / 10:43）",
     )
 
     assert warnings
@@ -80,12 +80,12 @@ def test_validate_clusters_warns_when_merged_output_omits_one_source():
 def test_telegram_prefix_is_not_clustered_as_message_content():
     clusters = cluster_cross_group_topics([
         (
-            "微信 / 贝利知识星球VIP群❤️",
-            "2026-04-30 17:03\n**Alice**: 【重要通知】GOPAY將開放予全部老用戶使用",
+            "微信 / 示例微信群B",
+            "2026-04-30 17:03\n**Alice**: 【重要通知】某支付工具将开放给全部老用户使用",
         ),
         (
-            "Telegram / 电丸朱氏会社",
-            "[Telegram / 电丸朱氏会社 / 08:57 / JoKeR 哎呦喂呀] 通知：",
+            "Telegram / 示例TG群B",
+            "[Telegram / 示例TG群B / 08:57 / 样例用户F] 通知：",
         ),
     ])
 
@@ -95,12 +95,12 @@ def test_telegram_prefix_is_not_clustered_as_message_content():
 def test_short_telegram_reply_does_not_match_unrelated_long_wechat_sentence():
     clusters = cluster_cross_group_topics([
         (
-            "微信 / 贝利知识星球VIP群❤️",
-            "2026-04-30 04:13\n**Alice**: 但是我国内直接链学校的vpn用cc是不是感觉会不容易封一点",
+            "微信 / 示例微信群B",
+            "2026-04-30 04:13\n**Alice**: 但是我在国内直接连学校的网络用某工具是不是感觉会不容易封一点",
         ),
         (
-            "Telegram / 电丸朱氏会社",
-            "[Telegram / 电丸朱氏会社 / 06:31 / Hao Liyou] 不容易",
+            "Telegram / 示例TG群B",
+            "[Telegram / 示例TG群B / 06:31 / 样例用户G] 不容易",
         ),
     ])
 

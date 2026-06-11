@@ -13,19 +13,19 @@ from chat_daily_tg.tg_sender import TelegramSender
 
 
 def test_strip_promo_lines_html_keeps_source_link_drops_promo_footer():
-    # Real 在花频道 shape: bold title, body, source <a>, promo footer <a> line.
+    # Real 示例频道 shape: bold title, body, source <a>, promo footer <a> line.
     html = (
         "<strong>部分中国银行可提高企业美元存款利率</strong>\n\n"
         "正文一段。\n\n"
         '<a href="https://www.bloomberg.com/x">Bloomberg</a>\n\n'
-        '🌸 <a href="http://t.me/ZaiHuaPd">在花频道</a> · '
-        '<a href="https://t.me/zaihuatg">备用频道</a> · '
-        '<a href="http://t.me/ZaiHuabot">投稿通道</a>'
+        '🌸 <a href="http://t.me/ExamplePd">示例频道</a> · '
+        '<a href="https://t.me/exampletg">备用频道</a> · '
+        '<a href="http://t.me/ExampleBot">投稿通道</a>'
     )
-    out = strip_promo_lines_html(html, ["在花频道", "备用频道", "投稿通道", "投稿频道"])
+    out = strip_promo_lines_html(html, ["示例频道", "备用频道", "投稿通道", "投稿频道"])
     assert 'href="https://www.bloomberg.com/x">Bloomberg</a>' in out  # source link kept
-    assert "ZaiHuaPd" not in out and "zaihuatg" not in out  # promo links gone
-    assert "在花频道" not in out and "投稿" not in out
+    assert "ExamplePd" not in out and "exampletg" not in out  # promo links gone
+    assert "示例频道" not in out and "投稿" not in out
     assert "<strong>部分中国银行" in out  # bold title kept
 
 
@@ -34,20 +34,20 @@ def test_visible_text_strips_tags_and_unescapes():
 
 
 def test_strip_promo_lines_removes_footer_keeps_body():
-    text = "纽约州议会通过法案\n\n正文内容一段\n\nCBS\n\n🌸 在花频道 · 备用频道 · 投稿通道"
-    out = strip_promo_lines(text, ["在花频道", "备用频道", "投稿通道", "投稿频道"])
-    assert "在花频道" not in out and "投稿" not in out
+    text = "纽约州议会通过法案\n\n正文内容一段\n\nCBS\n\n🌸 示例频道 · 备用频道 · 投稿通道"
+    out = strip_promo_lines(text, ["示例频道", "备用频道", "投稿通道", "投稿频道"])
+    assert "示例频道" not in out and "投稿" not in out
     assert "纽约州议会通过法案" in out and "正文内容一段" in out and "CBS" in out
     assert not out.endswith("\n")  # trailing blank collapsed
 
 
 def test_strip_promo_lines_noop_without_patterns():
-    text = "a\n在花频道 · 投稿通道"
+    text = "a\n示例频道 · 投稿通道"
     assert strip_promo_lines(text, []) == text
 
 
 def test_strip_promo_lines_promo_only_becomes_empty():
-    assert strip_promo_lines("🌸 在花频道 · 备用频道 · 投稿通道", ["在花频道"]) == ""
+    assert strip_promo_lines("🌸 示例频道 · 备用频道 · 投稿通道", ["示例频道"]) == ""
 
 
 def _row(content="", msg_id=42, raw_json=""):
@@ -60,27 +60,27 @@ def _row(content="", msg_id=42, raw_json=""):
 
 
 def test_build_card_public_has_link_and_escapes():
-    ch = RawChannel(id="-100123", name="投机之路", username="journey_of_someone")
+    ch = RawChannel(id="-100123", name="示例频道A", username="sample_channel_a")
     card = build_card(_row(content="买 <BTC> & 卖"), ch)
     assert card is not None
-    assert card.link == "https://t.me/journey_of_someone/42"
-    assert "📢 <b>投机之路</b> · 09:30" in card.text_html
+    assert card.link == "https://t.me/sample_channel_a/42"
+    assert "📢 <b>示例频道A</b> · 09:30" in card.text_html
     assert "买 &lt;BTC&gt; &amp; 卖" in card.text_html  # content HTML-escaped
 
 
 def test_build_card_private_no_link():
-    ch = RawChannel(id="-100123", name="哀酱的探险小分队")  # no username
-    card = build_card(_row(content="探险记录"), ch)
+    ch = RawChannel(id="-100123", name="示例私有频道A")  # no username
+    card = build_card(_row(content="频道正文一段"), ch)
     assert card is not None
     assert card.link is None
-    assert "探险记录" in card.text_html
+    assert "频道正文一段" in card.text_html
 
 
 def test_build_card_public_media_only_uses_placeholder():
-    ch = RawChannel(id="-100123", name="美女鉴赏社", username="LamIsRealGoat")
+    ch = RawChannel(id="-100123", name="示例频道C", username="sample_channel_c")
     card = build_card(_row(content=""), ch)
     assert card is not None  # public media-only still pushed (preview shows media)
-    assert card.link == "https://t.me/LamIsRealGoat/42"
+    assert card.link == "https://t.me/sample_channel_c/42"
     assert "媒体" in card.text_html
 
 

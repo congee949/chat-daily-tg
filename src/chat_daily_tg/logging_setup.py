@@ -3,7 +3,7 @@ import logging
 import re
 from pathlib import Path
 
-# Telegram bot tokens look like 8307375018:AA... — they leak into logs when an
+# Telegram bot tokens look like 1234567890:AA... — they leak into logs when an
 # httpx error stringifies the full sendMessage URL. Redact at the formatter level so
 # both the message AND the exception traceback are scrubbed (SEC-1).
 # No \b anchors: the token is usually embedded as ".../bot8307…:.../" where "bot"

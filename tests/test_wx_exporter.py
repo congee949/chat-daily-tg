@@ -131,7 +131,7 @@ def test_clean_against_real_fixture():
                   "[图片]", "local_id"):
         assert noise not in out, f"leaked {noise!r} after cleanup"
 
-    for signal in ("**Lay-**: 你可以问问群主",
+    for signal in ("**样例用户F**: 你可以问问群主",
                    "**样例用户C**: @样例用户B 加你了",
                    "示例商店",
                    "https://example-pricing.test/",

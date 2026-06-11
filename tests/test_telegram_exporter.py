@@ -28,11 +28,11 @@ def _make_db(path: Path) -> None:
         """
     )
     rows = [
-        (3707563960, "示例TG群A", 1, "Alice", "有效信息 https://x.com/a", "2026-04-28T02:00:00+00:00", None),
-        (3707563960, "示例TG群A", 2, "Bob", "😂", "2026-04-28T03:00:00+00:00", None),
-        (3707563960, "示例TG群A", 3, "Carol", "", "2026-04-28T04:00:00+00:00", None),
-        (3707563960, "示例TG群A", 4, "Dan", "前一天消息", "2026-04-27T02:00:00+00:00", None),
-        (1162433032, "Other", 5, "Eve", "其他群", "2026-04-28T02:00:00+00:00", None),
+        (1234567890, "示例TG群A", 1, "Alice", "有效信息 https://x.com/a", "2026-04-28T02:00:00+00:00", None),
+        (1234567890, "示例TG群A", 2, "Bob", "😂", "2026-04-28T03:00:00+00:00", None),
+        (1234567890, "示例TG群A", 3, "Carol", "", "2026-04-28T04:00:00+00:00", None),
+        (1234567890, "示例TG群A", 4, "Dan", "前一天消息", "2026-04-27T02:00:00+00:00", None),
+        (9876543210, "Other", 5, "Eve", "其他群", "2026-04-28T02:00:00+00:00", None),
     ]
     conn.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     conn.commit()
@@ -40,10 +40,10 @@ def _make_db(path: Path) -> None:
 
 
 def test_canonical_chat_ids_accepts_negative_supergroup_id():
-    ids = canonical_chat_ids("-1003707563960")
-    assert -1003707563960 in ids
-    assert 3707563960 in ids
-    assert 1003707563960 in ids
+    ids = canonical_chat_ids("-1001234567890")
+    assert -1001234567890 in ids
+    assert 1234567890 in ids
+    assert 1001234567890 in ids
 
 
 def test_read_messages_keeps_newest_when_over_limit(tmp_path: Path):
@@ -57,23 +57,23 @@ def test_read_messages_keeps_newest_when_over_limit(tmp_path: Path):
     # 5 in-window messages: window [2026-04-28 00:00 +08:00) == [2026-04-27T16:00Z, ...)
     # so 17:00–21:00 UTC all fall inside 2026-04-28 local; msg_id ascending with time.
     rows = [
-        (3707563960, "C", i, "s", f"m{i}", f"2026-04-27T{16 + i:02d}:00:00+00:00", None)
+        (1234567890, "C", i, "s", f"m{i}", f"2026-04-27T{16 + i:02d}:00:00+00:00", None)
         for i in range(1, 6)
     ]
     conn.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)", rows)
     conn.commit(); conn.close()
-    got = read_messages(db_path=db_path, chat_id="3707563960",
+    got = read_messages(db_path=db_path, chat_id="1234567890",
                         since="2026-04-28", until="2026-04-29", limit=2)
     ids = [r["msg_id"] for r in got]
     assert ids == [4, 5]  # newest 2 kept, returned ASC for rendering
     # incremental: only msg_id > high-water-mark
-    inc = read_messages(db_path=db_path, chat_id="3707563960",
+    inc = read_messages(db_path=db_path, chat_id="1234567890",
                         since="2026-04-28", until="2026-04-29", limit=10, min_msg_id=3)
     assert [r["msg_id"] for r in inc] == [4, 5]
     # incremental over limit: keep the OLDEST page above the mark, not the newest —
     # otherwise the seen store's high-water mark would jump past unfetched rows
     # (3 and 4 here) and skip them forever. The remainder comes next run.
-    inc_paged = read_messages(db_path=db_path, chat_id="3707563960",
+    inc_paged = read_messages(db_path=db_path, chat_id="1234567890",
                               since="2026-04-28", until="2026-04-29", limit=2, min_msg_id=2)
     assert [r["msg_id"] for r in inc_paged] == [3, 4]
 
@@ -91,7 +91,7 @@ def test_export_chat_reads_sqlite_window_and_renders_source_tags(tmp_path: Path)
     _make_db(db_path)
 
     result = export_chat(
-        chat_id="-1003707563960",
+        chat_id="-1001234567890",
         chat_name="示例TG群A",
         since="2026-04-28",
         until="2026-04-29",
@@ -117,7 +117,7 @@ def test_export_chat_syncs_before_export_when_enabled(tmp_path: Path):
     with patch("chat_daily_tg.telegram_exporter.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         export_chat(
-            chat_id="-1003707563960",
+            chat_id="-1001234567890",
             chat_name="示例TG群A",
             since="2026-04-28",
             until="2026-04-29",
@@ -127,4 +127,4 @@ def test_export_chat_syncs_before_export_when_enabled(tmp_path: Path):
             sync_before_export=True,
         )
 
-    assert run.call_args[0][0] == ["tg", "sync", "-n", "50", "--", "-1003707563960"]
+    assert run.call_args[0][0] == ["tg", "sync", "-n", "50", "--", "-1001234567890"]

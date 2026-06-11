@@ -4,13 +4,15 @@
 
 ## 架构
 
-![chat-daily-tg 架构](chat-daily-architecture-redraw.png)
+![chat-daily-tg 架构](chat-daily-architecture.png)
+
+<sub>源文件 `diagram/chat-daily-architecture.svg`，改完用 headless Chrome 截图重渲：`chrome --headless=new --force-device-scale-factor=2 --window-size=940,660 --screenshot=chat-daily-architecture.png file://$PWD/diagram/chat-daily-architecture.svg`</sub>
 
 ## 功能清单
 
 | 功能 | 说明 |
 |---|---|
-| 微信群导出 | 通过本地 XML/DB 读取指定微信群前一天聊天 |
+| 微信群导出 | 通过 [wx-cli](https://github.com/jackwener/wx-cli) 解密读取本地微信消息库，导出指定群前一天聊天 |
 | Telegram 群导出 | 通过 [tg-cli](https://github.com/public-clis/tg-cli) 本地 SQLite 读取 |
 | LLM 摘要 | 调用 DeepSeek 生成适合手机阅读的统一简报 |
 | 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合 |
@@ -76,6 +78,22 @@
 ```
 
 ## 配置
+
+### 微信导出前置（wx-cli）
+
+微信侧依赖 [wx-cli](https://github.com/jackwener/wx-cli) 读取本机微信客户端的本地消息库：
+
+```bash
+npm install -g @jackwener/wx-cli
+wx init                # 检测微信数据目录并扫描解密密钥
+wx export "<群名>" --since 2026-06-10 --until 2026-06-11 --limit 10   # 验证能导出
+```
+
+说明：
+
+- `wx_exporter` 优先调用 PATH 上的 `wx`，找不到时回退 `/opt/homebrew/bin/wx`
+- 只能读取本机已登录微信桌面客户端同步下来的消息，换机或重装后需重新 `wx init`
+- 只用 Telegram 侧时可以不装：`sources.wechat.groups` 留空即可
 
 ### 环境变量
 
@@ -187,6 +205,7 @@ pytest -v
 
 | 工具 | 用途 |
 |---|---|
+| [wx-cli](https://github.com/jackwener/wx-cli) | 微信本地消息库解密导出（`npm i -g @jackwener/wx-cli`） |
 | [tg-cli](https://github.com/public-clis/tg-cli) | Telegram 本地 SQLite 导出 |
 | [DeepSeek API](https://api-docs.deepseek.com/) | 默认 LLM 摘要 |
 | [BotFather](https://t.me/BotFather) | 创建 Telegram bot |

@@ -163,3 +163,27 @@
 - summary 失败后 export/embedding 成果不复用（补跑全重做）：catch-up 机制下可接受，未加断点续跑。
 - deploy.sh 与现状脱节且危险（label 写错 `com.chat-daily.tg`、`git reset --hard` 会清掉未提交工作、pip 而非 uv）：本次未动，提醒勿直接运行。
 - `retrieve_evidence_for_text` 已无仓库内调用方，待在途修改合并后可删。
+
+---
+
+## 2026-06-11 — Telegram 图片接入 vision（绕过 tg-cli 无媒体）
+
+### Design Decisions
+- **补充式旁路，不改 telegram_exporter**：核查确认 tg-cli(kabi-tg-cli 0.6.0) 架构上只存文本——源码 0 处 media/photo 处理、messages.db 的 raw_json 全 NULL、CLI 无 `--media` 选项、content 连 `[图片]` 标记都没有，图在 sync 即丢。故新增 `telegram_media.export_chat_media` 作图片旁路，复用 channel forwarder 已有的 `private_media.dump_channel`(telethon 直连下载，借 kabi-tg-cli 解释器+登录 session)，把照片转 MediaCandidate 喂现成 vision pipeline；经验证的 tg-cli 文本链路不动。
+- **gate 在 vision.enabled**：下图唯一目的是喂 vision，关则不下、省 telethon 拉取。接入点在 run_daily TG 导出循环内，每 chat 文本导出后补下图，失败返回 [] 不挡文本日报。
+- **只保留 photo**：tg_media_dump 也下 video/audio/document，但 vision prompt 针对静态图，其余跳过。
+- **vision 后端 = 本地 qwenproxy**：config.models.vision 指 `http://localhost:3000/v1` + qwen3.7-plus（OpenAI 兼容，Playwright 驱动 chat.qwen.ai，本地免费、零代码）。实测单图 ~50s、返回 schema 完美匹配 VisionAnalysis。
+
+### Tradeoffs
+- **下载图 score 保底 0.5**：media.py prefilter(>=0.45) 按微信聊天关键词打分，频道/群图 caption 几乎不命中 → 多数图被滤、vision 看不到。既已付下载成本，保底让其过 prefilter，由 vision 的 value_score postfilter(>=0.65) 做真正筛选。实测电丸 4 张：银行截图 0.0 / Codex 额度 0.2 / NotebookLM logo 0.1 / PDF 分享 2.5——筛选方向正确，隐私/闲聊图被滤。
+- **每群 max_photos=20 安全阀**：vision ~50s/图串行，高 limit 群(电丸 1500)的图多日可拖垮无人值守 run；溢出取最近 N 张。常态每天 3-5 张几乎不触发，仅防极端。
+
+### Open Questions / 已知保留
+- **value_score 范围不稳**：qwen 偶返 >1（PDF 分享判 2.5）；现有 analyze_media_candidates 用固定阈值 0.65 且忽略 `should_include_in_daily` 字段，是 master 既有筛选逻辑的脆弱点，本次未动（超出"接 telethon"范围）。
+- **首测 6:30**（非 8:00）：日报源仅 TG(微信暂停)，电丸有图(~2-3/天)、CuiMao 少；图片理解段可能 0-2 条，是 vision 正常筛选结果而非故障。
+- telethon 下图每群一次 subprocess(timeout 600s)串行 + vision 串行，图多日 vision 段可达 10+ 分钟，靠 caffeinate 兜睡眠。
+
+### 验证
+- 178 passed（新增 test_telegram_media 4：photo 过滤/score 保底/max_photos 截断/失败降级）。
+- 端到端实跑：电丸群 telethon 下 8 张真图(59s) → vision pipeline → 低价值图正确滤掉、链路通；单图理解准确（持仓截图读对全部数字、判不入日报）。
+- launchd 确认跑工作树 repo+venv(import 指向已改 src)；config 开 vision 指 qwenproxy、.env 加 VISION_API_KEY。

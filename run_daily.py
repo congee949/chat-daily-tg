@@ -229,6 +229,16 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
                 groups_with_content.append((f"Telegram / {chat.name}", content))
             media_candidates.extend(getattr(result, "media_candidates", None) or [])
+            if cfg.models.vision and cfg.models.vision.enabled:
+                # tg-cli's messages.db carries no media — pull this chat's photos via
+                # telethon (image-only side path) so the vision pipeline below can see
+                # them. Failure-isolated: returns [] on any error, text export stands.
+                from chat_daily_tg.telegram_media import export_chat_media
+                media_candidates.extend(export_chat_media(
+                    chat_id=chat.id, chat_name=chat.name,
+                    since=date_str, until=next_day,
+                    out_dir=archive_dir, limit=chat.limit,
+                ))
 
     if not groups_with_content:
         log.error("no content exported, aborting")

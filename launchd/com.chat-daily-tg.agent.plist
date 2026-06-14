@@ -11,7 +11,7 @@
 	<string>com.chat-daily-tg.agent</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
 		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_daily_guarded.sh</string>
 	</array>
 	<key>RunAtLoad</key>

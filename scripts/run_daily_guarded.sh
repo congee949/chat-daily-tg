@@ -45,6 +45,15 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
+# Random jitter (0–15 min) so the daily run isn't at a perfectly fixed minute.
+# NOTE: cosmetic for this setup — the run reads the LOCAL WeChat DB and delivers to
+# Telegram, so WeChat's servers never observe it; jitter would only matter if we ever
+# posted back INTO WeChat. Kept < 15 min so it never collides with the 9:00/13:00 catch-up.
+# Skip the wait for manual/test runs: CHAT_DAILY_NO_JITTER=1.
+if [ "${CHAT_DAILY_NO_JITTER:-0}" != "1" ]; then
+  sleep $(( RANDOM % 900 ))
+fi
+
 # Normal run — caffeinate holds off sleep, same as the original plist.
 /usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done
 rc=$?

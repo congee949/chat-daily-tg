@@ -21,3 +21,6 @@ venv/
 # Never commit real data
 /data/
 /output/
+
+# Project-private bash copy (adhoc-signed launcher; rebuilt by scripts/install-launchd.sh)
+/bin/

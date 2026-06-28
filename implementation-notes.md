@@ -187,3 +187,23 @@
 - 178 passed（新增 test_telegram_media 4：photo 过滤/score 保底/max_photos 截断/失败降级）。
 - 端到端实跑：电丸群 telethon 下 8 张真图(59s) → vision pipeline → 低价值图正确滤掉、链路通；单图理解准确（持仓截图读对全部数字、判不入日报）。
 - launchd 确认跑工作树 repo+venv(import 指向已改 src)；config 开 vision 指 qwenproxy、.env 加 VISION_API_KEY。
+
+---
+
+## 2026-06-23 — 公开频道相册折叠（修「一帖推很多次」）
+
+现象：yihong0618 频道 18:47「一条帖子」在 bot 里推成 5 张卡片（1 张正文 + 4 张 `🖼 媒体内容` 占位）。
+
+### Design Decisions
+- **根因不是去重坏了**：那条 18:47 是一个 Telegram 相册（media group），Telegram 存成 5 条独立消息（msg_id 13545–13549，同一秒）。msg_id 去重完全正常（每条只推一次），但**推送粒度是"消息"而非"帖子"** → 一个相册 = N 张卡片。
+- **相册靠推断而非 `grouped_id`**：`private_media.py` 私有路径已按 `grouped_id` 折叠相册，但公开路径读 tg-cli 的 `messages.db`，其 `raw_json` **全表为空**（实测 0/42713 行有值），拿不到 `grouped_id`。改用库里现有信号推断：**空正文 + msg_id 连续 + 时间戳在 10s 窗口内** 的消息折进上一条的卡片（`_group_albums` + `_within_album_window`）。
+- **折叠规则保守**：只有空正文项折叠；任何带文字的消息都另起一帖。这保证两条真实文本帖永不被合并（即便 id 连续紧挨）；10s 窗口拦住"id 连续但隔了几分钟"的独立媒体帖。
+- **相册每个成员 id 都写 seen，不只 head**：照搬 `private_media.py` 的注记——只记 head 会让增量高水位 `max_msg_id` 卡在相册首条，下次跑重新抓到尾部媒体并当占位卡再推一次。
+
+### Tradeoffs
+- **caption 在末条的相册**（Telegram 允许 caption 落在任一成员；实测 yihong 数据均在首条）会拆成"占位相册卡 + 文本卡"两张，而非一张。可接受：罕见，且仍远好于 N 张；无真实样例前不加额外逻辑。
+
+### 验证
+- 188 passed（新增 5 个测试：相册折叠/真实文本帖不合并/超窗独立/纯媒体相册折叠/push 一卡且全 id 入 seen + 幂等重跑 0）。
+- 实跑真实数据：yihong 06-23 窗口 7 条原始消息 → 3 张卡片（18:47 的 5 条相册 → 1；47 分钟后的独立媒体帖 13551 正确保持独立）。
+- 部署：launchd 直跑仓库源码 `run_daily.py`，无需重装，下次 22:00 频道跑自动生效；历史已推 13545–13551 全在 seen，不会回头重推。

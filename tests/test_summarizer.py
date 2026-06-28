@@ -270,7 +270,8 @@ def test_prompt_requires_unified_source_tagged_concise_output():
     assert "形式 A" in SUMMARIZER_SYSTEM
     assert "不要按微信/Telegram分块" in SUMMARIZER_SYSTEM
     assert "每条重点必须" in SUMMARIZER_SYSTEM
-    assert "（群名 / HH:MM）" in SUMMARIZER_SYSTEM
+    assert "（群名）" in SUMMARIZER_SYSTEM
+    assert "不要标注时间" in SUMMARIZER_SYSTEM
     assert "不要写 `微信 /` 或 `Telegram /`" in SUMMARIZER_SYSTEM
     assert "精简来源标签" in SUMMARIZER_SYSTEM
     assert "### 🌅 今日总览" in SUMMARIZER_SYSTEM

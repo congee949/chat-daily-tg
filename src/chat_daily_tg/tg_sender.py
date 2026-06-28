@@ -194,6 +194,7 @@ def split_message(text: str, limit: int = 4096) -> list[str]:
 class TelegramSender:
     bot_token: str
     chat_id: str
+    message_thread_id: int | None = None
     timeout: float = 30.0
     retry_max_attempts: int = 3
     retry_backoff_seconds: list = field(default_factory=lambda: [5, 15, 60])
@@ -209,6 +210,8 @@ class TelegramSender:
                     data = {"chat_id": self.chat_id, "text": payload}
                     if parse_mode is not None:
                         data["parse_mode"] = parse_mode
+                    if self.message_thread_id is not None:
+                        data["message_thread_id"] = self.message_thread_id
                     r = c.post(url, data=data)
                     r.raise_for_status()
                     body = r.json()
@@ -261,6 +264,8 @@ class TelegramSender:
         for i, chunk in enumerate(chunks):
             is_last = i == len(chunks) - 1
             payload: dict = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
+            if self.message_thread_id is not None:
+                payload["message_thread_id"] = self.message_thread_id
             if link and is_last:
                 payload["link_preview_options"] = {
                     "url": link, "is_disabled": False, "prefer_large_media": True,
@@ -326,6 +331,8 @@ class TelegramSender:
                     with open(photo_path, "rb") as fh:
                         files = {"photo": fh}
                         data = {"chat_id": self.chat_id}
+                        if self.message_thread_id is not None:
+                            data["message_thread_id"] = self.message_thread_id
                         if caption:
                             data["caption"] = caption[:1024]
                             if parse_mode is not None:
@@ -365,6 +372,8 @@ class TelegramSender:
                     with open(file_path, "rb") as fh:
                         files = {field_name: fh}
                         data = {"chat_id": self.chat_id}
+                        if self.message_thread_id is not None:
+                            data["message_thread_id"] = self.message_thread_id
                         if caption:
                             cap, cap_mode = _safe_caption(caption)
                             data["caption"] = cap
@@ -428,6 +437,8 @@ class TelegramSender:
                                     m["parse_mode"] = cap_mode
                             media.append(m)
                         data = {"chat_id": self.chat_id, "media": json.dumps(media)}
+                        if self.message_thread_id is not None:
+                            data["message_thread_id"] = self.message_thread_id
                         r = c.post(url, data=data, files=files)
                     finally:
                         for fh in handles:

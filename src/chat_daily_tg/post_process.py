@@ -16,21 +16,25 @@ def _md_links_to_html(text: str) -> str:
 def abbreviate_sources(text: str, mapping: dict[str, str]) -> str:
     """Replace long source names with abbreviations in citation tails.
 
-    Citation formats supported:
-      （群名 / HH:MM）
-      （群名 / sender / HH:MM）
-      （群A / HH:MM；群B / HH:MM）
+    Citation formats supported (no timestamps):
+      （群名）
+      （群名 / sender）
+      （群A；群B）
     """
     if not mapping:
         return text
 
+    # A source name in a citation is bounded on the left by （ or ；, and on the
+    # right by ）, ；, or " /" (sender variant). Replace only in those contexts so
+    # group names appearing in prose aren't touched.
+    right_delims = ("）", "；", " /")
     # Sort by length descending so longer names are replaced first
     for full_name, short_name in sorted(mapping.items(), key=lambda x: len(x[0]), reverse=True):
         if not full_name or not short_name:
             continue
-        # Replace inside parentheses citations only, not elsewhere
-        text = text.replace(f"（{full_name} /", f"（{short_name} /")
-        text = text.replace(f"；{full_name} /", f"；{short_name} /")
+        for left in ("（", "；"):
+            for right in right_delims:
+                text = text.replace(f"{left}{full_name}{right}", f"{left}{short_name}{right}")
     return text
 
 

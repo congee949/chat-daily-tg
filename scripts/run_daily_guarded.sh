@@ -26,13 +26,33 @@ notify() {
   osascript -e "display notification \"${msg//\"/ }\" with title \"chat-daily-tg 守护\"" 2>/dev/null || true
   # Best-effort Telegram alert over the http proxy (TG is unreachable direct here).
   if [ -f "$DATA_DIR/.env" ]; then
-    local tok cid
+    local tok cid thread tgt
     tok=$(grep -m1 '^TG_BOT_TOKEN=' "$DATA_DIR/.env" | cut -d= -f2-)
     cid=$(grep -m1 '^TG_CHAT_ID=' "$DATA_DIR/.env" | cut -d= -f2-)
+    # Route to the 警告/alert forum topic when configured; fall back to DM cid.
+    tgt=$(/usr/bin/python3 - "$cid" <<'PY' 2>/dev/null
+import json, os, sys
+dm = sys.argv[1]
+try:
+    t = json.load(open(os.path.expanduser("~/qwenproxy/.tg-notify-targets.json")))
+    cid = t.get("chat_id", dm) or dm
+    tid = (t.get("topics", {}) or {}).get("alert") or ""
+except Exception:
+    cid, tid = dm, ""
+print(cid)
+print(tid)
+PY
+)
+    if [ -n "$tgt" ]; then
+      { IFS= read -r cid; IFS= read -r thread; } <<< "$tgt"
+    else
+      thread=""
+    fi
     if [ -n "$tok" ] && [ -n "$cid" ]; then
       curl -s --max-time 15 --proxy "$PROXY" \
         "https://api.telegram.org/bot${tok}/sendMessage" \
         --data-urlencode "chat_id=${cid}" \
+        ${thread:+--data-urlencode "message_thread_id=${thread}"} \
         --data-urlencode "text=⚠️ chat-daily-tg 守护: ${msg}" >/dev/null 2>&1 || true
     fi
   fi
@@ -43,6 +63,15 @@ notify() {
 if [ ! -x "$PY" ]; then
   notify "venv python 缺失 ($PY)，今日日报未运行，请重建：cd $PROJECT && uv sync"
   exit 1
+fi
+
+# Random jitter (0–15 min) so the daily run isn't at a perfectly fixed minute.
+# NOTE: cosmetic for this setup — the run reads the LOCAL WeChat DB and delivers to
+# Telegram, so WeChat's servers never observe it; jitter would only matter if we ever
+# posted back INTO WeChat. Kept < 15 min so it never collides with the 9:00/13:00 catch-up.
+# Skip the wait for manual/test runs: CHAT_DAILY_NO_JITTER=1.
+if [ "${CHAT_DAILY_NO_JITTER:-0}" != "1" ]; then
+  sleep $(( RANDOM % 900 ))
 fi
 
 # Normal run — caffeinate holds off sleep, same as the original plist.

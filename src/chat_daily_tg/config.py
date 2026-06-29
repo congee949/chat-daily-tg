@@ -70,12 +70,20 @@ class RawChannel(BaseModel):
     bypassing the LLM summary entirely. `username` (without @) enables the public
     t.me link preview; omit it for private channels (media is downloaded + re-sent).
     `strip_patterns` are regexes; any message LINE matching one is removed before
-    pushing (e.g. a channel's promo header/footer)."""
+    pushing (e.g. a channel's promo header/footer). `prefer_content_link` suits
+    repost-style channels whose posts are mostly a bare external URL: the card then
+    previews that URL (the paper/repo/tweet itself) instead of the t.me permalink,
+    keeping the permalink only as a small 原文↗ jump link."""
     id: str
     name: str
     username: str | None = None
     limit: int = 500
     strip_patterns: list[str] = Field(default_factory=list)
+    prefer_content_link: bool = False
+    # 论坛话题路由 key（对应 ~/qwenproxy/.tg-notify-targets.json 的 topics）。
+    # 默认 channels_news（频道·资讯）；图片/媒体频道设 channels_gallery（频道·图集）。
+    # 找不到 key 时 resolve_tg_target 回落 DM。
+    topic: str = "channels_news"
 
 
 class TelegramSource(BaseModel):

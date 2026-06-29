@@ -40,6 +40,29 @@ def yesterday_iso() -> str:
     return (date.today() - timedelta(days=1)).isoformat()
 
 
+TG_TARGETS = os.path.expanduser("~/qwenproxy/.tg-notify-targets.json")
+
+
+def resolve_tg_target(topic_key: str, dm_chat_id: str) -> tuple[str, int | None]:
+    """Resolve (chat_id, message_thread_id) for a forum topic from the shared route
+    table. Falls back to the DM chat with no thread when the file/chat_id/topic id is
+    missing or 0 — i.e. 'rather deliver to DM than drop'. Mirrors
+    ~/qwenproxy/session-expiry-notify.py::send_tg()."""
+    chat_id: str = dm_chat_id
+    thread_id: int | None = None
+    try:
+        with open(TG_TARGETS) as f:
+            t = json.load(f)
+        chat_id = t.get("chat_id", dm_chat_id) or dm_chat_id
+        tid = (t.get("topics", {}) or {}).get(topic_key)
+        thread_id = tid if tid else None  # 0/None/missing -> DM fallback (no thread)
+        if thread_id is None:
+            chat_id = dm_chat_id          # no topic -> go to DM, not group General
+    except Exception:
+        chat_id, thread_id = dm_chat_id, None
+    return str(chat_id), thread_id
+
+
 # Written to the archive dir after a fully successful pushed run. The launchd
 # catch-up intervals re-invoke run_daily with --skip-if-done, so a morning run
 # that failed (or slept through) is retried later the same day, while a
@@ -74,39 +97,59 @@ def _append_evidence_context(detailed_md: str, evidence_context: str) -> str:
 
 
 def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, incremental: bool) -> None:
-    """Verbatim channel-card stage. Builds its own bot sender and is fully isolated —
-    any failure only logs/notifies. Runs as a standalone 2-hourly forwarder
-    (incremental=True): each channel fetches only messages newer than its high-water
-    mark, so high-volume private channels aren't re-downloaded."""
+    """Verbatim channel-card stage, fully isolated — any failure only logs/notifies.
+    Runs as a standalone 2-hourly forwarder (incremental=True): each channel fetches
+    only messages newer than its high-water mark, so high-volume private channels
+    aren't re-downloaded.
+
+    Channels route to forum topics by their `topic` key (default channels_news; image
+    channels set channels_gallery). Each topic group gets its own sender via
+    resolve_tg_target (group chat + message_thread_id). seen_path is keyed per channel,
+    so splitting the single push into per-topic calls causes no cross-group dup/skip."""
     channels = cfg.sources.telegram.raw_channels if cfg.sources.telegram.enabled else []
     if not channels:
         return
     try:
+        from collections import OrderedDict
         from chat_daily_tg.raw_channels import push_raw_channel_cards
         from chat_daily_tg.tg_sender import TelegramSender
         from chat_daily_tg.paths import DATA_DIR
-        sender = None
-        if not no_push:
-            sender = TelegramSender(
-                bot_token=os.environ[cfg.telegram.bot_token_env],
-                chat_id=os.environ[cfg.telegram.chat_id_env],
-                retry_max_attempts=cfg.retry.max_attempts,
-                retry_backoff_seconds=cfg.retry.backoff_seconds,
+        dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+        bot_token = os.environ[cfg.telegram.bot_token_env]
+        seen_path = DATA_DIR / "raw_channel_seen.txt"
+        groups: "OrderedDict[str, list]" = OrderedDict()
+        for ch in channels:
+            groups.setdefault(ch.topic or "channels_news", []).append(ch)
+        total = 0
+        for topic_key, chs in groups.items():
+            sender = None
+            target = "(no_push)"
+            if not no_push:
+                chat_id, thread_id = resolve_tg_target(topic_key, dm_chat_id)
+                target = f"{chat_id}/thread={thread_id}"
+                sender = TelegramSender(
+                    bot_token=bot_token,
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    retry_max_attempts=cfg.retry.max_attempts,
+                    retry_backoff_seconds=cfg.retry.backoff_seconds,
+                )
+            n = push_raw_channel_cards(
+                channels=chs,
+                since=since,
+                until=until,
+                db_path=cfg.sources.telegram.db_path,
+                sender=sender,
+                archive_dir=archive_dir,
+                seen_path=seen_path,
+                sync_before_export=cfg.sources.telegram.sync_before_export,
+                delay_seconds=cfg.sources.telegram.raw_card_delay_seconds,
+                no_push=no_push,
+                incremental=incremental,
             )
-        n = push_raw_channel_cards(
-            channels=channels,
-            since=since,
-            until=until,
-            db_path=cfg.sources.telegram.db_path,
-            sender=sender,
-            archive_dir=archive_dir,
-            seen_path=DATA_DIR / "raw_channel_seen.txt",
-            sync_before_export=cfg.sources.telegram.sync_before_export,
-            delay_seconds=cfg.sources.telegram.raw_card_delay_seconds,
-            no_push=no_push,
-            incremental=incremental,
-        )
-        log.info("raw channel cards pushed: %d (incremental=%s, no_push=%s)", n, incremental, no_push)
+            total += n
+            log.info("raw channel cards pushed: %d -> topic=%s %s", n, topic_key, target)
+        log.info("raw channel cards pushed total: %d (incremental=%s, no_push=%s)", total, incremental, no_push)
     except Exception as e:
         log.exception("raw channel stage failed: %s", e)
         notify_failure("chat-daily-tg 频道原文卡片失败", f"{type(e).__name__}: {e}")
@@ -446,9 +489,10 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
 
     if not no_push:
         bot_token = os.environ[cfg.telegram.bot_token_env]
-        chat_id = os.environ[cfg.telegram.chat_id_env]
+        dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+        chat_id, thread_id = resolve_tg_target("chat_daily", dm_chat_id)
         tg = TelegramSender(
-            bot_token=bot_token, chat_id=chat_id,
+            bot_token=bot_token, chat_id=chat_id, message_thread_id=thread_id,
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
         )

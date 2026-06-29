@@ -41,6 +41,54 @@ class Card:
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_URL_RE = re.compile(r"https?://[^\s<>]+")
+
+# A Telegram album (media group) arrives as several messages that share a grouped_id,
+# but tg-cli's messages.db stores no raw_json, so grouped_id is unavailable here. We
+# infer the album instead: a media-only item (empty body) whose msg_id directly follows
+# the previous item within this many seconds is another photo of the same post, not its
+# own post. Folding them stops one album from rendering as a caption card plus N
+# "🖼 媒体内容" placeholder cards.
+_ALBUM_WINDOW_SECONDS = 10
+
+
+def _within_album_window(a: sqlite3.Row, b: sqlite3.Row) -> bool:
+    """True when two rows' timestamps are within the album burst window. A bad
+    timestamp counts as "not within" so the rows stay separate posts."""
+    try:
+        return abs(
+            parse_timestamp(a["timestamp"]).timestamp()
+            - parse_timestamp(b["timestamp"]).timestamp()
+        ) <= _ALBUM_WINDOW_SECONDS
+    except Exception:
+        return False
+
+
+def _group_albums(rows: list[sqlite3.Row]) -> list[list[sqlite3.Row]]:
+    """Collapse album items into one logical post each. Returns groups in msg_id order;
+    group[0] is the head (carries the caption + permalink), the rest are the album's
+    extra media-only items. Every member id is preserved so the caller can mark them all
+    seen — recording only the head would stall the incremental high-water mark at the
+    album's first id, re-pushing the rest as placeholders next run."""
+    groups: list[list[sqlite3.Row]] = []
+    for r in sorted(rows, key=lambda r: r["msg_id"]):
+        if groups and not (r["content"] or "").strip():
+            prev = groups[-1][-1]
+            if r["msg_id"] == prev["msg_id"] + 1 and _within_album_window(prev, r):
+                groups[-1].append(r)
+                continue
+        groups.append([r])
+    return groups
+
+
+def _first_external_url(text: str) -> str | None:
+    """First http(s) URL in `text`, with trailing sentence punctuation/quotes trimmed.
+    Used by prefer_content_link channels to preview the body's link itself. Brackets
+    are left intact so URLs like ...wiki/Foo_(bar) survive."""
+    m = _URL_RE.search(text)
+    if not m:
+        return None
+    return m.group(0).rstrip(".,;!?\"'")
 
 
 def visible_text(html: str) -> str:
@@ -77,10 +125,10 @@ def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
     content = strip_promo_lines((row["content"] or "").strip(), channel.strip_patterns)
     username = (channel.username or "").lstrip("@") or None
     msg_id = row["msg_id"]
-    link = f"https://t.me/{username}/{msg_id}" if username and msg_id else None
+    permalink = f"https://t.me/{username}/{msg_id}" if username and msg_id else None
 
     if not content:
-        if link is None:
+        if permalink is None:
             return None  # private + media-only: nothing to render
         content_html = _MEDIA_PLACEHOLDER
     else:
@@ -91,8 +139,24 @@ def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
     fwd = ""
     if row["raw_json"] and "fwd" in str(row["raw_json"]).lower():
         fwd = " <i>[转发]</i>"
-    text_html = f"{header}{fwd}\n\n{content_html}"
-    return Card(text_html=text_html, link=link)
+
+    # Repost-style channels (prefer_content_link): the body is usually a bare external
+    # URL — a paper/repo/tweet. Preview THAT url (the rich card the user already sees in
+    # the channel) instead of the t.me permalink, whose preview is just a "VIEW MESSAGE"
+    # jump-into-channel button. Keep the permalink as a small 原文↗ link so reactions/
+    # comments stay one tap away. Falls back to the permalink preview when the body has
+    # no URL (media-only / plain text).
+    preview_link = permalink
+    permalink_suffix = ""
+    if channel.prefer_content_link and content:
+        ext = _first_external_url(content)
+        if ext:
+            preview_link = ext
+            if permalink:
+                permalink_suffix = f' · <a href="{escape_html(permalink)}">原文↗</a>'
+
+    text_html = f"{header}{fwd}{permalink_suffix}\n\n{content_html}"
+    return Card(text_html=text_html, link=preview_link)
 
 
 def push_raw_channel_cards(
@@ -151,17 +215,19 @@ def push_raw_channel_cards(
             log.warning("raw channel export failed for %s: %s", ch.name, e)
             continue
 
-        # Build per-row so one malformed row (e.g. bad timestamp) skips itself instead
-        # of aborting the whole channel.
-        cards: list[tuple[int, Card]] = []
-        for r in rows:
+        # Fold album items into one card each, then build per-group so one malformed row
+        # (e.g. bad timestamp) skips itself instead of aborting the whole channel. Each
+        # card carries every member msg_id so all of them get marked seen on send.
+        cards: list[tuple[list[int], Card]] = []
+        for group in _group_albums(rows):
+            head = group[0]
             try:
-                c = build_card(r, ch)
+                c = build_card(head, ch)
             except Exception as e:
-                log.warning("raw card build skipped (%s msg %s): %s", ch.name, r["msg_id"], e)
+                log.warning("raw card build skipped (%s msg %s): %s", ch.name, head["msg_id"], e)
                 continue
             if c is not None:
-                cards.append((r["msg_id"], c))
+                cards.append(([r["msg_id"] for r in group], c))
         log.info("raw channel %s: %d msgs → %d cards", ch.name, len(rows), len(cards))
 
         # Archive verbatim cards for auditability (always, even with --no-push).
@@ -177,16 +243,18 @@ def push_raw_channel_cards(
         if no_push:
             continue
 
-        for msg_id, c in cards:
-            key = SeenStore.key(ch.id, msg_id)
-            if key in seen:
+        for ids, c in cards:
+            if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card
                 continue
             try:
                 sender.send_card(c.text_html, link=c.link)
             except Exception as e:
                 log.warning("raw card push failed (%s): %s", ch.name, e)
                 continue
-            seen.add(key)  # write-after-send: a crash re-tries rather than drops
+            # write-after-send: a crash re-tries rather than drops. Record EVERY album
+            # item, or the incremental high-water mark stalls at the head id.
+            for mid in ids:
+                seen.add(SeenStore.key(ch.id, mid))
             total += 1
             if delay_seconds > 0:
                 time.sleep(delay_seconds)

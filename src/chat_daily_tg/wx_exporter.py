@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from chat_daily_tg.media import MediaCandidate, extract_wx_media_candidates
 
 
@@ -70,11 +71,23 @@ def export_group(
         "--since", since, "--until", until,
         "--limit", str(limit), "--format", "markdown",
     ]
+    # The wx daemon reports ready (contacts loaded) ~1.5s before it finishes decrypting the
+    # message DB. On a cold daemon — the usual case for the unattended launchd run after the
+    # Mac has been idle — the first `wx export` races that decryption and returns a non-zero
+    # "找不到消息记录" exit or an empty result. Retry a few times so the daemon can finish
+    # warming before an empty result is taken at face value. A genuinely quiet day still exits
+    # the loop after the retries and returns 0 messages without raising.
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    m = _COUNT_RE.search(proc.stdout)
+    for _ in range(3):
+        if proc.returncode == 0 and m and int(m.group(1)) > 0:
+            break
+        time.sleep(2.0)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        m = _COUNT_RE.search(proc.stdout)
     if proc.returncode != 0:
         raise RuntimeError(f"wx export failed: {proc.stderr or proc.stdout}")
     raw = proc.stdout
-    m = _COUNT_RE.search(raw)
     count = int(m.group(1)) if m else 0
     media_candidates = extract_wx_media_candidates(raw, group_name=group_name)
     cleaned = clean_wx_markdown(raw)

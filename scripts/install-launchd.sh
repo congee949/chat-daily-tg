@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Installs the launchd agents — the daily report (com.chat-daily-tg.agent), the
-# 2-hourly channel forwarder (com.chat-daily-tg.channels), and the 6-hourly
+# 2-hourly channel forwarder (com.chat-daily-tg.channels), and the hourly
 # Bilibili digest (com.chat-daily-tg.bilibili). All plists call their guarded
 # wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
 #

@@ -247,7 +247,7 @@ def run_channels(no_push: bool = False) -> int:
 
 
 def run_bilibili(no_push: bool = False) -> int:
-    """Entry point for the 6-hourly Bilibili digest (--bilibili-only). Polls
+    """Entry point for the hourly Bilibili digest (--bilibili-only). Polls
     whitelisted UPs via opencli, pushes new-video cards to the bilibili forum
     topic. Idempotent via the bvid SeenStore (marked seen only after a
     successful send); a failed/missed run is caught up by the next one thanks
@@ -683,7 +683,7 @@ if __name__ == "__main__":
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     p.add_argument("--bilibili-only", action="store_true",
-                   help="Run only the 6-hourly Bilibili subscription digest (no summary)")
+                   help="Run only the hourly Bilibili subscription digest (no summary)")
     args = p.parse_args()
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))

@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_bilibili_guarded.sh — launchd wrapper for the 6-hourly Bilibili digest.
+# run_bilibili_guarded.sh — launchd wrapper for the hourly Bilibili digest.
 #
 # Same guard as the channel forwarder (venv preflight + macOS/Telegram alert,
 # review finding #16). No jitter / no --skip-if-done: the digest is incremental

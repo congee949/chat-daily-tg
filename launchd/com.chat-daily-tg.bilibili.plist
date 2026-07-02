@@ -25,10 +25,9 @@
 	<string>REPLACE_WITH_DATA_DIR/logs/bilibili-stdout.log</string>
 	<key>StartCalendarInterval</key>
 	<array>
-		<dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>30</integer></dict>
-		<dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
-		<dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
-		<dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
+		<!-- Minute-only entry = every hour at :30 (offset keeps clear of the
+		     channel forwarder's even-hour :00 slots). -->
+		<dict><key>Minute</key><integer>30</integer></dict>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>REPLACE_WITH_PROJECT_DIR</string>

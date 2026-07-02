@@ -17,21 +17,66 @@ class SummaryOutput:
     verification: dict | None = None
 
 
-# Matches closed fences: ```lang [tag]\n...```
-_FENCE_RE = re.compile(r"```(\w+)(?:\s+(\w+))?\r?\n(.*?)```", re.DOTALL)
-# Matches an unclosed (truncated) fence: ```lang [tag]\n...<EOF> or before next fence
-_FENCE_UNCLOSED_RE = re.compile(r"```(\w+)(?:\s+(\w+))?\r?\n(.*?)(?=\n```|$)", re.DOTALL)
+# A fence opener line carries an info string: ```lang [tag]. A closer line is
+# a bare ```. Parsing line-by-line with a depth counter (instead of a
+# non-greedy `.*?` regex) keeps a body's own ```python code block from
+# prematurely terminating the outer fence (review finding #37).
+_FENCE_OPEN_RE = re.compile(r"^```(\w+)(?:\s+(\w+))?\s*$")
+_FENCE_BARE_RE = re.compile(r"^```\s*$")
+
+# The only structural top-level fences this format emits. Their openers are
+# unambiguous (no inner code block is ```markdown concise etc.), so they act as
+# hard block boundaries: even if a body contains an UNBALANCED inner fence (an
+# odd ``` that never closes), the next structural opener ends the current block
+# instead of letting it swallow the following blocks (verification self-review).
+_KNOWN_TOPLEVEL = {
+    ("markdown", "concise"), ("markdown", "detailed"),
+    ("json", "opportunities"), ("json", "verification"),
+}
 
 
 def _extract_fences(text: str) -> dict[tuple[str, str], str]:
+    """Extract top-level fenced blocks keyed by (lang, tag).
+
+    Balanced nested code blocks inside a body are preserved (depth tracking); an
+    unbalanced inner fence cannot swallow a following structural block (a known
+    top-level opener bounds it); a truncated final fence yields whatever was
+    captured before EOF. Last occurrence of a key wins — this restores the
+    pre-rewrite semantics the untagged-json verification fallback relies on when
+    both opportunities and verification are emitted as bare ```json.
+    """
     fences: dict[tuple[str, str], str] = {}
-    for m in _FENCE_RE.finditer(text):
-        lang, tag, body = m.group(1), m.group(2) or "", m.group(3).strip()
-        fences[(lang, tag)] = body
-    for m in _FENCE_UNCLOSED_RE.finditer(text):
+    lines = text.split("\n")
+    i, n = 0, len(lines)
+    while i < n:
+        m = _FENCE_OPEN_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
         key = (m.group(1), m.group(2) or "")
-        if key not in fences:
-            fences[key] = m.group(3).strip()
+        i += 1
+        body_lines: list[str] = []
+        depth = 1
+        while i < n and depth > 0:
+            line = lines[i]
+            mm = _FENCE_OPEN_RE.match(line)
+            if mm and (mm.group(1), mm.group(2) or "") in _KNOWN_TOPLEVEL:
+                # Next structural block begins — stop without consuming this line
+                # so the outer loop reprocesses it (handles a missing/unbalanced
+                # closer on the current block).
+                break
+            if _FENCE_BARE_RE.match(line):
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+                body_lines.append(line)
+            else:
+                if mm:
+                    depth += 1
+                body_lines.append(line)
+            i += 1
+        fences[key] = "\n".join(body_lines).strip()
     return fences
 
 
@@ -126,6 +171,10 @@ def run_summary(
     )
     content, _usage = llm_client.chat(user_prompt, system=SUMMARIZER_SYSTEM)
     initial = _parse_or_repair_summary(llm_client, content, detail_path)
+    # Preserve the pre-verification draft on disk. The verifier rewrites the
+    # body wholesale, so if it hallucinates a removed claim the original text is
+    # always recoverable (review finding #39).
+    _persist_initial_draft(detail_path, initial)
     if evidence_context_builder is not None:
         evidence_context = evidence_context_builder(initial)
         if not evidence_context.strip():
@@ -148,7 +197,19 @@ def run_summary(
         ),
         system=VERIFIER_SYSTEM,
     )
-    return _parse_verified_output(llm_client, verified_content, detail_path)
+    try:
+        return _parse_verified_output(llm_client, verified_content, detail_path)
+    except ValueError as exc:
+        # Verification is an enhancement, not a publish gate. If its output (and
+        # the repair of it) can't be parsed, ship the already-good initial draft
+        # rather than dropping the whole day's report (review finding #34).
+        log.warning("verifier output unparseable (%s); publishing unverified initial draft", exc)
+        return SummaryOutput(
+            concise_md=initial.concise_md,
+            detailed_md=initial.detailed_md,
+            opportunities=initial.opportunities,
+            verification={"error": "verifier_parse_failed"},
+        )
 
 
 FORMAT_REPAIR_SYSTEM = """你是一个严格的格式修复器。
@@ -224,7 +285,50 @@ def _parse_or_repair_summary(llm_client, content: str, detail_path: str) -> Summ
         log.warning("summary parse failed, saved raw output to %s: %s", raw_path, exc)
         repair_prompt = _build_repair_prompt(content, str(exc))
         repaired, _usage = llm_client.chat(repair_prompt, system=FORMAT_REPAIR_SYSTEM)
-        return parse_summary_output(repaired)
+        try:
+            return parse_summary_output(repaired)
+        except ValueError as exc2:
+            # Repair also failed. Rather than crash the whole day's pipeline,
+            # salvage whatever concise body the original draft contained
+            # (review finding #33). Only a draft with no usable concise is fatal.
+            log.warning("repair output still unparseable (%s); attempting best-effort salvage", exc2)
+            fallback = _best_effort_summary(content) or _best_effort_summary(repaired)
+            if fallback is not None:
+                log.warning("salvaged concise body from unparseable draft")
+                return fallback
+            raise
+
+
+def _best_effort_summary(content: str) -> SummaryOutput | None:
+    """Extract whatever concise body is recoverable; None if none usable."""
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    fences = _extract_fences(text)
+    concise = fences.get(("markdown", "concise"), "").strip()
+    if not concise:
+        return None
+    raw_opps = fences.get(("json", "opportunities"))
+    opportunities = {"permanent_additions": [], "hot_leads_additions": [], "death_signals": []}
+    if raw_opps:
+        try:
+            opportunities = _safe_json_loads(raw_opps, "opportunities fence")
+        except ValueError:
+            pass
+    return SummaryOutput(
+        concise_md=concise,
+        detailed_md=fences.get(("markdown", "detailed"), ""),
+        opportunities=opportunities,
+    )
+
+
+def _persist_initial_draft(detail_path: str, initial: SummaryOutput) -> None:
+    """Best-effort: save the pre-verification draft next to the summary."""
+    try:
+        base = Path(detail_path).expanduser()
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.with_name("initial-concise.md").write_text(initial.concise_md, encoding="utf-8")
+        base.with_name("initial-detailed.md").write_text(initial.detailed_md, encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not persist initial draft: %s", exc)
 
 
 def _parse_verified_output(llm_client, content: str, detail_path: str) -> SummaryOutput:

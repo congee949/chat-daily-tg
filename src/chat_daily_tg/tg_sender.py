@@ -230,7 +230,8 @@ class TelegramSender:
         assert last_exc is not None
         raise last_exc
 
-    def send(self, text: str, parse_mode: str | None = None) -> list[int]:
+    def send(self, text: str, parse_mode: str | None = None,
+             *, state_path=None) -> list[int]:
         # Format FIRST, then split, so the chunk length reflects the actual payload
         # sent to Telegram. Splitting raw text let HTML expansion (&->&amp;, <b> tags)
         # push a chunk over the 4096 hard limit and 400 the whole push (CHUNK-1).
@@ -243,15 +244,46 @@ class TelegramSender:
         # format_*_for_telegram keeps every tag pair within a single line, so splitting
         # on newline boundaries never cuts a tag. 3900 leaves margin under 4096.
         chunks = split_message(payload, limit=3900)
-        return [self._send_one(c, parse_mode) for c in chunks]
+        if state_path is None or len(chunks) <= 1:
+            return [self._send_one(c, parse_mode) for c in chunks]
+        return self._send_resumable(chunks, parse_mode, state_path)
 
-    def send_card(self, text_html: str, *, link: str | None = None) -> list[int]:
+    def _send_resumable(self, chunks: list[str], parse_mode: str | None, state_path) -> list[int]:
+        """Send chunks, persisting per-chunk progress so a same-day catch-up rerun
+        resumes instead of re-sending the first half (review finding #42). Resume is
+        gated on a payload hash: if the (non-deterministic) report text changed
+        between runs, restart from the top rather than splice mismatched halves."""
+        from hashlib import sha256
+        from pathlib import Path
+        sp = Path(state_path)
+        digest = sha256("\x00".join(chunks).encode("utf-8")).hexdigest()
+        resume_from = 0
+        try:
+            prev = json.loads(sp.read_text(encoding="utf-8"))
+            if prev.get("hash") == digest and isinstance(prev.get("sent"), int):
+                resume_from = min(prev["sent"], len(chunks))
+        except (OSError, ValueError):
+            pass
+        ids: list[int] = []
+        for i, chunk in enumerate(chunks):
+            if i < resume_from:
+                continue
+            ids.append(self._send_one(chunk, parse_mode))
+            try:
+                sp.write_text(json.dumps({"hash": digest, "sent": i + 1}), encoding="utf-8")
+            except OSError:
+                pass
+        return ids
+
+    def send_card(self, text_html: str, *, link: str | None = None,
+                  button: tuple[str, str] | None = None) -> list[int]:
         """Send a verbatim channel message as an X-Monitor-style card.
 
         `text_html` is already-built Telegram HTML (callers escape their own content).
         For a public channel `link` (a t.me/<username>/<id> URL) enables Telegram's
         rich link-preview card; pass link=None for a private channel to send plain text
-        with no preview.
+        with no preview. `button` is an optional (text, url) inline-keyboard URL button
+        attached to the last chunk.
 
         Long messages are split on newline boundaries; only the LAST chunk carries the
         preview so the card renders once at the end. On a 400 (usually an HTML parse
@@ -264,6 +296,10 @@ class TelegramSender:
         for i, chunk in enumerate(chunks):
             is_last = i == len(chunks) - 1
             payload: dict = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
+            if button is not None and is_last:
+                payload["reply_markup"] = {"inline_keyboard": [[
+                    {"text": button[0], "url": button[1]},
+                ]]}
             if self.message_thread_id is not None:
                 payload["message_thread_id"] = self.message_thread_id
             if link and is_last:
@@ -274,6 +310,50 @@ class TelegramSender:
                 payload["link_preview_options"] = {"is_disabled": True}
             msg_ids.append(self._post_json(url, payload))
         return msg_ids
+
+    def send_rich_message(self, *, markdown: str) -> int:
+        """Send a Bot API rich message (sendRichMessage): one message that mixes
+        text blocks and media blocks (images referenced by public https URL).
+
+        A 400 raises IMMEDIATELY (bad markdown / unfetchable image URL is
+        deterministic — the caller falls back to the classic text+photo push);
+        429 waits per retry_after; transport errors retry with backoff."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendRichMessage"
+        payload: dict = {"chat_id": self.chat_id,
+                         "rich_message": {"markdown": markdown}}
+        if self.message_thread_id is not None:
+            payload["message_thread_id"] = self.message_thread_id
+        last_exc: Exception | None = None
+        attempts = 0
+        rl_hits = 0
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    r = c.post(url, json=payload)
+                    if r.status_code == 429:
+                        rl_hits += 1
+                        if rl_hits >= self.retry_max_attempts:
+                            raise RuntimeError(f"Telegram 429 rate limit: gave up after {rl_hits} waits")
+                        time.sleep(_retry_after(r))
+                        continue
+                    if r.status_code == 400:
+                        raise RuntimeError(f"sendRichMessage 400: {r.text[:200]}")
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return body["result"]["message_id"]
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg sendRichMessage transport failed (attempt %d/%d): %s",
+                            attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc
 
     def _post_json(self, url: str, payload: dict) -> int:
         """POST a JSON sendMessage payload with retry/backoff. Honors 429 retry_after
@@ -316,8 +396,12 @@ class TelegramSender:
         assert last_exc is not None
         raise last_exc
 
-    def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None) -> int:
+    def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None,
+                   button: tuple[str, str] | None = None) -> int:
         """Send a photo via sendPhoto. Caption is hard-capped at Telegram's 1024 limit.
+
+        `button` is an optional (text, url) pair rendered as a single inline-keyboard
+        URL button under the card — a bigger tap target than an <a> link in the caption.
 
         Mirrors _send_one's retry/backoff. Used by the optional daily-card image output;
         callers wrap this in try/except and fall back to the text send() on any failure.
@@ -333,6 +417,11 @@ class TelegramSender:
                         data = {"chat_id": self.chat_id}
                         if self.message_thread_id is not None:
                             data["message_thread_id"] = self.message_thread_id
+                        if button is not None:
+                            # multipart form field — reply_markup must be JSON-encoded
+                            data["reply_markup"] = json.dumps({"inline_keyboard": [[
+                                {"text": button[0], "url": button[1]},
+                            ]]})
                         if caption:
                             data["caption"] = caption[:1024]
                             if parse_mode is not None:

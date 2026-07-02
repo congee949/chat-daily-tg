@@ -94,30 +94,36 @@ def test_upsert_merges_url_match_even_if_titles_drift(tmp_path: Path):
     assert len(list(db.read_all())) == 1
 
 
-def test_upsert_many_single_io_mixed_insert_update(tmp_path: Path):
-    path = tmp_path / "permanent.jsonl"
-    db = PermanentDB(path=path)
+def test_upsert_many_mixed_insert_update(tmp_path: Path):
+    db = PermanentDB(path=tmp_path / "permanent.db")
     db.upsert(_make("恒生银行CNID线上开户", content="v1"))
 
-    import unittest.mock
-    real_open = open
-    call_count = {"read": 0, "write": 0}
-    def counting_open(p, mode="r", *a, **kw):
-        if str(p) == str(path):
-            if "r" in mode:
-                call_count["read"] += 1
-            elif "w" in mode or "a" in mode:
-                call_count["write"] += 1
-        return real_open(p, mode, *a, **kw)
-
-    with unittest.mock.patch("builtins.open", side_effect=counting_open):
-        results = db.upsert_many([
-            _make("恒生银行CNID线上开户", content="v2", captured_at="2026-04-19T10:00:00"),
-            _make("万事达返现", url="https://x.com/a", category="activity"),
-            _make("中行卓隽Plus", content="p1"),
-        ])
+    results = db.upsert_many([
+        _make("恒生银行CNID线上开户", content="v2", captured_at="2026-04-19T10:00:00"),
+        _make("万事达返现", url="https://x.com/a", category="activity"),
+        _make("中行卓隽Plus", content="p1"),
+    ])
     assert [a for a, _ in results] == ["updated", "inserted", "inserted"]
-    assert call_count["read"] == 1
-    assert call_count["write"] == 1
     rows = list(db.read_all())
     assert len(rows) == 3
+
+
+def test_fingerprint_strips_tracking_params():
+    # Same activity link shared with different utm/share tokens → one identity.
+    bare = compute_fingerprint("活动", url="https://e.com/a?id=5", category="activity")
+    utm = compute_fingerprint("活动", url="https://e.com/a?id=5&utm_source=tg&from=group",
+                              category="activity")
+    assert bare == utm
+    # An identity-bearing param still distinguishes different opportunities.
+    other = compute_fingerprint("活动", url="https://e.com/a?id=6", category="activity")
+    assert bare != other
+
+
+def test_upsert_collapses_utm_duplicates(tmp_path: Path):
+    db = PermanentDB(path=tmp_path / "permanent.db")
+    db.upsert(_make("活动甲", url="https://e.com/a?id=5", category="activity"))
+    action, saved = db.upsert(
+        _make("活动甲", url="https://e.com/a?id=5&utm_source=tg", category="activity"))
+    assert action == "updated"
+    assert saved.mention_count == 2
+    assert len(list(db.read_all())) == 1

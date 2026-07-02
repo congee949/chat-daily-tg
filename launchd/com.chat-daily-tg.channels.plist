@@ -11,12 +11,11 @@
 	<string>com.chat-daily-tg.channels</string>
 	<key>ProgramArguments</key>
 	<array>
-		<!-- caffeinate -is: hold off idle/system sleep while a forwarder pass runs. -->
-		<string>/usr/bin/caffeinate</string>
-		<string>-is</string>
-		<string>REPLACE_WITH_PROJECT_DIR/.venv/bin/python</string>
-		<string>REPLACE_WITH_PROJECT_DIR/run_daily.py</string>
-		<string>--channels-only</string>
+		<!-- Go through the guarded wrapper (venv preflight + macOS/Telegram alert),
+		     NOT python directly: a missing .venv otherwise exits 127 silently. The
+		     wrapper runs caffeinate + --channels-only itself. -->
+		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_channels_guarded.sh</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>

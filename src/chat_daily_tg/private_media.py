@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chat_daily_tg.config import RawChannel
+from chat_daily_tg.notifier import notify_failure
 from chat_daily_tg.raw_channels import strip_promo_lines_html, visible_text
 from chat_daily_tg.raw_seen import SeenStore
 from chat_daily_tg.tg_sender import TelegramSender, escape_html
@@ -51,6 +52,15 @@ def dump_channel(chat_id: str, since: str, until: str, out_dir: Path, limit: int
     """Run the telethon downloader and return its message manifest (oldest→newest).
     min_id>0 fetches only messages newer than that id (incremental forwarder)."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Fail fast with a clear cause when the kabi-tg-cli interpreter is gone (uv
+    # prune/upgrade can break this path the same way it broke .venv). Without
+    # this, every private channel dies with an opaque errno buried in stderr
+    # (review finding #20).
+    if not os.access(TG_CLI_PYTHON, os.X_OK):
+        raise RuntimeError(
+            f"kabi-tg-cli python not executable at {TG_CLI_PYTHON} — reinstall with "
+            "`uv tool install kabi-tg-cli` or set CHAT_DAILY_TG_CLI_PYTHON"
+        )
     cmd = [TG_CLI_PYTHON, str(_DUMP_SCRIPT), str(chat_id), since, until, str(out_dir),
            str(limit), str(min_id)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -84,21 +94,23 @@ def group_posts(manifest: list[dict]) -> list[Post]:
     return posts
 
 
-def _send_media(post_media: list[tuple[str, str]], sender: TelegramSender, caption: str) -> None:
-    """Send a post's media: single → send_media; all-visual album → media group;
-    mixed types → fall back to individual sends (caption on the first SUCCESSFUL
-    item — pinning it to item 0 would silently drop the verbatim text whenever
-    item 0 fails but a later item succeeds, because the post is then marked seen).
-    A per-item failure is tolerated (logged) so one bad item doesn't unwind the
-    whole post; it only raises if EVERY item failed."""
+def _send_media(post_media: list[tuple[str, str]], sender: TelegramSender, caption: str) -> int:
+    """Send a post's media; returns the count of items that FAILED to send (0 = all sent).
+
+    single → send_media; all-visual album → media group; mixed types → individual
+    sends (caption on the first SUCCESSFUL item — pinning it to item 0 would
+    silently drop the verbatim text whenever item 0 fails but a later item
+    succeeds). A per-item failure is tolerated (logged) so one bad item doesn't
+    unwind the whole post; it raises only if EVERY item failed (nothing delivered).
+    A non-zero return lets the caller surface the partial loss (review finding #13)."""
     if len(post_media) == 1:
         path, kind = post_media[0]
         sender.send_media(path, kind, caption=caption)
-        return
+        return 0
     visual = all(k in ("photo", "video") for _, k in post_media)
     if visual:
         sender.send_media_group(post_media, caption=caption)
-        return
+        return 0
     ok = 0
     caption_pending = bool(caption)
     last_exc: Exception | None = None
@@ -112,6 +124,7 @@ def _send_media(post_media: list[tuple[str, str]], sender: TelegramSender, capti
             log.warning("mixed-album item failed (%s): %s", path, e)
     if ok == 0 and last_exc is not None:
         raise last_exc
+    return len(post_media) - ok
 
 
 def push_private_channel(
@@ -144,6 +157,7 @@ def push_private_channel(
              channel.name, len(manifest), len(posts))
 
     pushed = 0
+    dropped_posts: list[tuple[int, int]] = []  # (first_msg_id, dropped_count)
     try:
         for p in posts:
             key = SeenStore.key(channel.id, p.first_msg_id) if seen is not None else None
@@ -154,6 +168,7 @@ def push_private_channel(
             has_text = bool(visible_text(content_html).strip())
             header = f"📢 <b>{escape_html(channel.name)}</b> · {p.time}"
             body = f"{header}\n\n{content_html}" if has_text else header
+            dropped = 0
             try:
                 if p.media:
                     # Merge text + media into ONE message: the text rides as the media
@@ -161,10 +176,10 @@ def push_private_channel(
                     # don't count) — only when that overflows do we fall back to a
                     # separate text message + bare media.
                     if len(visible_text(body)) <= 1024:
-                        _send_media(p.media, sender, caption=body)
+                        dropped = _send_media(p.media, sender, caption=body)
                     else:
                         sender.send_card(body, link=None)
-                        _send_media(p.media, sender, caption="")
+                        dropped = _send_media(p.media, sender, caption="")
                 elif has_text:
                     sender.send_card(body, link=None)
                 else:
@@ -172,6 +187,13 @@ def push_private_channel(
             except Exception as e:
                 log.warning("private post push failed (%s msg %s): %s", channel.name, p.first_msg_id, e)
                 continue
+            if dropped:
+                # The incremental high-water mark is a max over seen ids, so a later
+                # fully-sent post advances it past this one regardless — withholding
+                # `seen` here wouldn't actually trigger a retry. So mark seen as usual
+                # and collect the loss for ONE aggregated alert per channel below,
+                # turning a silent media loss into a visible one (review finding #13).
+                dropped_posts.append((p.first_msg_id, dropped))
             if key is not None:
                 # Write-after-send, and record EVERY album item id — recording only
                 # the first would stall max_msg_id at the album head, making the next
@@ -181,6 +203,14 @@ def push_private_channel(
             pushed += 1
             if delay_seconds > 0:
                 _t.sleep(delay_seconds)
+        if dropped_posts:
+            total = sum(d for _, d in dropped_posts)
+            ids = ", ".join(str(mid) for mid, _ in dropped_posts)
+            notify_failure(
+                "chat-daily-tg 私有频道媒体丢失",
+                f"{channel.name}: {total} 个媒体未发出（{len(dropped_posts)} 帖：msg {ids}；"
+                "文本已送达，需手动补），见日志。",
+            )
     finally:
         # The verbatim text is already delivered; the heavy media binaries are
         # re-downloadable next run, so don't let them accumulate in the archive tree.

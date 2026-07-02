@@ -54,7 +54,11 @@ class LLMClient:
             # TransportError covers TimeoutException, ConnectError, ReadError,
             # ProxyError and ProtocolError (e.g. RemoteProtocolError when the
             # proxy/server drops the connection mid-request, seen 2026-06-10).
-            except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            # ValueError covers json.JSONDecodeError; KeyError/IndexError cover a
+            # 200 OK whose body is a proxy error page or {"error":...} with no
+            # choices — a soft failure that's just as retryable (review finding #10).
+            except (httpx.HTTPStatusError, httpx.TransportError,
+                    ValueError, KeyError, IndexError) as e:
                 last_exc = e
                 attempts += 1
                 log.warning("llm call failed (attempt %d/%d): %s",

@@ -5,13 +5,24 @@ import shutil
 DATA_DIR = Path.home() / "chat-daily"
 LEGACY_DATA_DIR = Path.home() / "wx-daily"
 CONFIG_PATH = DATA_DIR / "config.yaml"
+
+# Single shared SQLite store for permanent / hot_leads / repeat_topics.
+DB_PATH = DATA_DIR / "chat-daily.db"
+
+# Legacy JSONL stores — no longer written. Kept only so the one-off migration
+# (scripts/migrate_jsonl_to_sqlite.py) can find and import the old data.
 PERMANENT_JSONL = DATA_DIR / "permanent.jsonl"
-PERMANENT_MD = DATA_DIR / "permanent.md"
 REPEAT_TOPICS_JSONL = DATA_DIR / "repeat_topics.jsonl"
+
+# Human-readable derived views (regenerated from the DB each run).
+PERMANENT_MD = DATA_DIR / "permanent.md"
 HOT_LEADS_DIR = DATA_DIR / "hot-leads"
 HOT_LEADS_LATEST = HOT_LEADS_DIR / "latest.md"
 ARCHIVE_DIR = DATA_DIR / "archive"
 LOG_DIR = DATA_DIR / "logs"
+
+# Bilibili digest dedup (raw_seen.SeenStore, keys "bilibili:<bvid>").
+BILIBILI_SEEN_PATH = DATA_DIR / "bilibili_seen.txt"
 
 
 def migrate_legacy_config_if_needed(path: Path = CONFIG_PATH) -> None:

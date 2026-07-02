@@ -47,6 +47,7 @@ sanitize:
     assert cfg.hot_leads.retention_days == 14
     assert cfg.schedule.timezone == "Asia/Shanghai"
     assert cfg.sanitize.enabled is False
+    assert cfg.archive.media_retention_days == 14  # default, not set in this fixture
 
 
 def test_load_config_missing_groups_raises(tmp_path: Path):

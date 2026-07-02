@@ -315,6 +315,109 @@ def test_build_user_prompt_includes_repeat_context():
     assert "重复/旧闻降权" in prompt
 
 
+def test_concise_internal_code_block_not_truncated():
+    # A code block pasted inside the concise body must not terminate the fence.
+    text = (
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "有人贴了代码：\n"
+        "```python\n"
+        "print('hi')\n"
+        "```\n"
+        "后面还有重要内容和来源（群A）\n"
+        "```\n\n"
+        "```markdown detailed\nd\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}\n'
+        "```"
+    )
+    out = parse_summary_output(text)
+    assert "print('hi')" in out.concise_md
+    assert "后面还有重要内容" in out.concise_md
+
+
+def test_unbalanced_inner_fence_does_not_swallow_following_blocks():
+    # An unbalanced ```python inside detailed must NOT swallow the opportunities
+    # block (self-review regression P1-1).
+    text = (
+        "```markdown concise\n### 🌅 今日总览\n- 内容够长够长够长够长够长够长够长够长够长\n```\n\n"
+        "```markdown detailed\n群友贴了半段代码：\n```python\nprint('未闭合\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[{"title":"X"}],"hot_leads_additions":[],"death_signals":[]}\n'
+        "```"
+    )
+    out = parse_summary_output(text)
+    assert out.opportunities["permanent_additions"] == [{"title": "X"}]
+
+
+def test_two_untagged_json_fences_keep_verification():
+    # opportunities AND verification both emitted as bare ```json → the verification
+    # fence must still be found (self-review regression P1-2; last-wins semantics).
+    text = (
+        "```markdown concise\nc\n```\n\n```markdown detailed\nd\n```\n\n"
+        "```json\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[]}\n'
+        "```\n\n"
+        "```json\n"
+        '{"checked_claims":[{"claim":"x","status":"supported"}]}\n'
+        "```"
+    )
+    out = parse_verified_summary_output(text)
+    assert out.verification["checked_claims"][0]["claim"] == "x"
+
+
+def test_run_summary_falls_back_to_initial_when_verifier_unparseable(tmp_path):
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, system=None):
+            self.calls.append((prompt, system))
+            if len(self.calls) == 1:
+                return SAMPLE_OUTPUT, {}        # valid initial draft
+            return "garbage no fences", {}      # verifier + its repair both fail
+
+    llm = FakeLLM()
+    out = run_summary(
+        llm_client=llm,
+        date="2026-05-06",
+        groups_with_content=[("微信 / G1", "c")],
+        detail_path=str(tmp_path / "summary.md"),
+    )
+    assert "Test concise" in out.concise_md          # initial body shipped
+    assert out.verification == {"error": "verifier_parse_failed"}
+
+
+def test_run_summary_salvages_initial_when_repair_fails(tmp_path):
+    bad_draft = (
+        "```markdown concise\n### 🌅 今日总览\n- 有用内容\n```\n\n"
+        "```markdown detailed\nd\n```\n\n"
+        "```json opportunities\n{bad json}\n```"
+    )
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, system=None):
+            self.calls.append((prompt, system))
+            if len(self.calls) == 1:
+                return bad_draft, {}                 # invalid opportunities JSON
+            return "still garbage no fences", {}     # repair also fails
+
+    llm = FakeLLM()
+    out = run_summary(
+        llm_client=llm,
+        date="2026-05-06",
+        groups_with_content=[("微信 / G1", "c")],
+        detail_path=str(tmp_path / "summary.md"),
+        evidence_context_builder=lambda o: "",       # skip verifier
+    )
+    assert "有用内容" in out.concise_md
+    assert out.opportunities["permanent_additions"] == []
+    assert len(llm.calls) == 2
+
+
 def test_sanitize_json_fixes_invalid_unicode_escape():
     bad = r'{"key": "hello \uzzzz world"}'
     result = _sanitize_json(bad)

@@ -55,6 +55,28 @@ def test_chat_retries_remote_protocol_error_then_raises(httpx_mock: HTTPXMock):
     assert len(httpx_mock.get_requests()) == 3
 
 
+def test_chat_retries_200_with_malformed_body(httpx_mock: HTTPXMock):
+    # 200 OK but no 'choices' (proxy error page / {"error":...}) — a soft failure
+    # that must be retried, not crash the pipeline on the first call (finding #10).
+    httpx_mock.add_response(
+        url="http://127.0.0.1:8317/v1/chat/completions",
+        method="POST",
+        json={"error": "upstream rate limited"},
+        is_reusable=True,
+    )
+    client = LLMClient(
+        endpoint="http://127.0.0.1:8317/v1",
+        model="m",
+        api_key="k",
+        max_tokens=100,
+        retry_max_attempts=3,
+        retry_backoff_seconds=[0],
+    )
+    with pytest.raises((KeyError, IndexError, ValueError)):
+        client.chat("hi")
+    assert len(httpx_mock.get_requests()) == 3
+
+
 def test_chat_completion_merges_provider_extra_body(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url="https://api.deepseek.com/chat/completions",

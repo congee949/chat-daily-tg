@@ -1,4 +1,5 @@
 from pytest_httpx import HTTPXMock
+import json
 import pytest
 import httpx
 from chat_daily_tg.tg_sender import (
@@ -270,6 +271,39 @@ def test_send_photo_omits_empty_caption(httpx_mock: HTTPXMock, tmp_path):
     assert "caption" not in body   # pure image, no caption field
 
 
+def test_send_photo_button_becomes_inline_keyboard(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 3}},
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_photo(png, caption="hi", button=("看视频", "https://example.com/v"))
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "reply_markup" in body and "inline_keyboard" in body
+    assert "https://example.com/v" in body
+
+
+def test_send_card_button_on_last_chunk_only(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+        is_reusable=True,
+    )
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    long_text = "\n".join(["L" * 100] * 60)  # forces >1 chunk at limit 3900
+    s.send_card(long_text, button=("打开", "https://example.com/x"))
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) > 1
+    payloads = [json.loads(r.read()) for r in reqs]
+    assert all("reply_markup" not in p for p in payloads[:-1])
+    kb = payloads[-1]["reply_markup"]["inline_keyboard"]
+    assert kb == [[{"text": "打开", "url": "https://example.com/x"}]]
+
+
 def test_send_photo_truncates_caption(httpx_mock: HTTPXMock, tmp_path):
     httpx_mock.add_response(
         url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
@@ -322,3 +356,32 @@ def test_send_media_overlong_visible_caption_degrades_to_plain(httpx_mock: HTTPX
     assert "Z" * 1025 not in body
     assert "<b>" not in body         # tags stripped, not sliced mid-tag
     assert "parse_mode" not in body  # plain text: stray '<' must not hit the HTML parser
+
+
+def test_send_multichunk_resumes_after_partial_failure(tmp_path, httpx_mock, mocker):
+    """A 2-chunk push whose 2nd chunk fails must, on the next run, resume from the
+    2nd chunk instead of re-sending the first half (review finding #42)."""
+    import json as _json
+    import httpx
+    import pytest
+    from chat_daily_tg.tg_sender import TelegramSender
+
+    mocker.patch("chat_daily_tg.tg_sender.time.sleep")
+    long_text = ("A" * 3800) + "\n" + ("B" * 3800)  # two newline-split chunks
+    state = tmp_path / "push-state.json"
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", retry_max_attempts=1)
+
+    url = "https://api.telegram.org/bot-TOKEN-/sendMessage"
+    # Run 1: chunk 1 ok, chunk 2 fails.
+    httpx_mock.add_response(url=url, method="POST", json={"ok": True, "result": {"message_id": 1}})
+    httpx_mock.add_response(url=url, method="POST", status_code=500, json={"ok": False})
+    with pytest.raises(httpx.HTTPStatusError):
+        s.send(long_text, state_path=state)
+    assert _json.loads(state.read_text())["sent"] == 1  # progress recorded
+
+    # Run 2: only the 2nd chunk should be (re)sent.
+    httpx_mock.add_response(url=url, method="POST", json={"ok": True, "result": {"message_id": 2}})
+    ids = s.send(long_text, state_path=state)
+    assert ids == [2]
+    # Total POSTs = chunk1(ok) + chunk2(fail) + chunk2(ok) = 3, NOT 4 (no first-half resend).
+    assert len(httpx_mock.get_requests()) == 3

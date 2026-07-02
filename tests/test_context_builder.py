@@ -28,17 +28,18 @@ def test_active_permanent_summary_lists_alive(tmp_path: Path):
 
 def test_active_hot_leads_summary_only_within_window(tmp_path: Path):
     today = date.today()
-    append_day_leads(tmp_path, today.isoformat(), [
+    db = tmp_path / "hl.db"
+    append_day_leads(db, today.isoformat(), [
         HotLead(id="fresh", captured_at=today.isoformat(), title="Fresh lead",
                 summary="", category="arbitrage", source_group="G",
                 source_sender="A", status="alive"),
     ])
-    append_day_leads(tmp_path, (today - timedelta(days=30)).isoformat(), [
+    append_day_leads(db, (today - timedelta(days=30)).isoformat(), [
         HotLead(id="old", captured_at=(today - timedelta(days=30)).isoformat(),
                 title="Old lead", summary="", category="arbitrage",
                 source_group="G", source_sender="A", status="alive"),
     ])
-    s = active_hot_leads_summary(tmp_path, retention_days=14)
+    s = active_hot_leads_summary(db, retention_days=14)
     assert "Fresh lead" in s
     assert "Old lead" not in s
 

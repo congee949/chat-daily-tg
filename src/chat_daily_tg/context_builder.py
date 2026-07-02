@@ -21,10 +21,10 @@ def active_permanent_summary(db_path: Path, max_items: int = 50) -> str:
     return "\n".join(lines)
 
 
-def active_hot_leads_summary(root: Path, retention_days: int = 14,
+def active_hot_leads_summary(db_path: Path, retention_days: int = 14,
                               max_items: int = 50) -> str:
     cutoff = date.today() - timedelta(days=retention_days)
-    leads = load_all_leads(root)
+    leads = load_all_leads(db_path)
     lines = []
     for l in leads:
         if l.status != "alive":

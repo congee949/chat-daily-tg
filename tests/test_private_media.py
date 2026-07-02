@@ -79,6 +79,40 @@ def test_push_private_channel_album_advances_high_water_mark(tmp_path, monkeypat
         assert SeenStore.key("-100x", mid) in seen
 
 
+def test_push_private_channel_partial_media_loss_alerts_and_marks_seen(tmp_path, monkeypatch):
+    """A mixed album where one item fails: the post is still marked seen (the
+    high-water mark advances regardless) but the loss is alerted, not silent."""
+    from chat_daily_tg import private_media
+    from chat_daily_tg.config import RawChannel
+    from chat_daily_tg.raw_seen import SeenStore
+
+    manifest = [
+        {"msg_id": 30, "date": "2026-06-05T10:00:00+08:00", "text": "mix", "grouped_id": 7,
+         "media": [{"path": "/x/a.jpg", "kind": "photo"}, {"path": "/x/b.pdf", "kind": "document"}]},
+    ]
+    monkeypatch.setattr(private_media, "dump_channel", lambda *a, **k: manifest)
+    alerts = []
+    monkeypatch.setattr(private_media, "notify_failure", lambda t, m: alerts.append((t, m)))
+
+    class FakeSender:
+        def send_media(self, path, kind, caption=""):
+            if kind == "document":
+                raise RuntimeError("400 bad")
+            return 1
+
+        def send_card(self, *a, **k):
+            return 1
+
+    seen = SeenStore(tmp_path / "seen.txt")
+    pushed = private_media.push_private_channel(
+        channel=RawChannel(id="-100y", name="C"), since="2026-06-05", until="2026-06-06",
+        out_dir=tmp_path / "d", sender=FakeSender(), limit=500, seen=seen, delay_seconds=0,
+    )
+    assert pushed == 1
+    assert len(alerts) == 1                          # partial loss surfaced
+    assert SeenStore.key("-100y", 30) in seen        # still marked seen (HWM consistency)
+
+
 def test_send_media_single_photo_with_caption(httpx_mock: HTTPXMock, tmp_path):
     f = tmp_path / "a.jpg"
     f.write_bytes(b"fakejpg")
@@ -160,3 +194,12 @@ def test_send_media_group_album(httpx_mock: HTTPXMock, tmp_path):
     body = httpx_mock.get_request().read().decode(errors="ignore")
     assert "sendMediaGroup" not in body  # method is in URL, not body
     assert "attach://file0" in body and "attach://file2" in body
+
+
+def test_dump_channel_preflight_rejects_missing_kabi_python(tmp_path, monkeypatch):
+    import pytest
+    from chat_daily_tg import private_media
+    monkeypatch.setattr(private_media, "TG_CLI_PYTHON", str(tmp_path / "no-such-python"))
+    with pytest.raises(RuntimeError, match="kabi-tg-cli"):
+        private_media.dump_channel("-100x", "2026-01-01", "2026-01-02",
+                                   tmp_path / "out", limit=10)

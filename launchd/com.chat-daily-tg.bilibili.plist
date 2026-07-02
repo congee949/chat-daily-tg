@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>REPLACE_WITH_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.chat-daily-tg.bilibili</string>
+	<key>ProgramArguments</key>
+	<array>
+		<!-- Guarded wrapper (venv preflight + macOS/Telegram alert), NOT python
+		     directly: a missing .venv otherwise exits 127 silently. The wrapper
+		     runs caffeinate + --bilibili-only itself. -->
+		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_bilibili_guarded.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/bilibili-stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/bilibili-stdout.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<!-- Minute-only entry = every hour at :30 (offset keeps clear of the
+		     channel forwarder's even-hour :00 slots). -->
+		<dict><key>Minute</key><integer>30</integer></dict>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>REPLACE_WITH_PROJECT_DIR</string>
+</dict>
+</plist>

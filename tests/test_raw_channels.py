@@ -261,3 +261,30 @@ def test_send_card_degrades_to_plain_on_400(httpx_mock: HTTPXMock):
     second = json.loads(httpx_mock.get_requests()[1].read().decode())
     assert "parse_mode" not in second
     assert second["text"] == "📢 x\n\nhi"  # tags stripped
+
+
+def test_push_raw_channels_alerts_when_all_private_fail(tmp_path, monkeypatch):
+    """All private channels failing together (e.g. kabi interpreter gone) must
+    surface an alert instead of returning a quiet 0 (review finding #20)."""
+    import chat_daily_tg.private_media as pm
+    import chat_daily_tg.notifier as notifier
+    from chat_daily_tg.raw_channels import push_raw_channel_cards
+    from chat_daily_tg.config import RawChannel
+
+    def boom(**kwargs):
+        raise RuntimeError("kabi dead")
+
+    monkeypatch.setattr(pm, "push_private_channel", boom)
+    alerts = []
+    monkeypatch.setattr(notifier, "notify_failure", lambda t, m: alerts.append((t, m)))
+
+    chans = [RawChannel(id="-100a", name="A"), RawChannel(id="-100b", name="B")]  # private
+    n = push_raw_channel_cards(
+        channels=chans, since="2026-06-05", until="2026-06-06",
+        db_path=tmp_path / "tg.db", sender=None, archive_dir=tmp_path / "arch",
+        seen_path=tmp_path / "seen.txt", sync_before_export=False, delay_seconds=0,
+        no_push=False, incremental=True,
+    )
+    assert n == 0
+    assert len(alerts) == 1
+    assert "私有频道全部失败" in alerts[0][0]

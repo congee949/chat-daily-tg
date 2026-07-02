@@ -5,9 +5,10 @@ from datetime import date, timedelta
 import json
 import logging
 import os
+import re
 import sys
 
-from chat_daily_tg.archive import safe_filename, prepare_archive_day
+from chat_daily_tg.archive import safe_filename, prepare_archive_day, cleanup_old_media
 from chat_daily_tg.config import load_config
 from chat_daily_tg.env import load_env_file
 from chat_daily_tg.llm_client import LLMClient
@@ -17,7 +18,10 @@ from chat_daily_tg.notifier import notify_failure
 from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR, log_file_for
 from chat_daily_tg.summarizer import run_summary
 from chat_daily_tg.tg_sender import TelegramSender
-from chat_daily_tg.vision import VisionClient, analyze_media_candidates, vision_markdown, write_vision_analyses
+from chat_daily_tg.vision import (
+    VisionClient, analyze_media_candidates, build_citation_block, resolve_citations,
+    vision_markdown, write_vision_analyses,
+)
 from chat_daily_tg.wx_exporter import export_group
 from chat_daily_tg.telegram_exporter import export_chat
 from chat_daily_tg.sanitize import sanitize_for_llm
@@ -31,7 +35,7 @@ from chat_daily_tg.evidence_index import (
     build_evidence_context_for_summary,
     build_evidence_index,
 )
-from chat_daily_tg.post_process import post_process_concise
+from chat_daily_tg.post_process import abbreviate_sources, post_process_concise
 
 log = logging.getLogger("run_daily")
 
@@ -68,10 +72,75 @@ def resolve_tg_target(topic_key: str, dm_chat_id: str) -> tuple[str, int | None]
 # that failed (or slept through) is retried later the same day, while a
 # completed run makes the catch-ups no-ops.
 COMPLETE_MARKER = ".run-complete"
+# Written once opportunities are persisted, BEFORE the (separately-retried) push.
+# A same-day catch-up after a push failure then skips re-persisting — which would
+# otherwise re-append hot leads under fresh non-deterministic ids (review #40).
+PERSISTED_MARKER = ".persisted"
 
 
 def completion_marker(date_str: str):
     return prepare_archive_day(date_str) / COMPLETE_MARKER
+
+
+def _persist_opportunities(out, date_str: str, hot_leads_dir) -> None:
+    """Write the run's opportunities to the shared DB (idempotent upserts)."""
+    from datetime import datetime as _dt
+    from chat_daily_tg.db import PermanentDB, PermanentEntry, compute_fingerprint
+    from chat_daily_tg.hot_leads import HotLead, append_day_leads
+    from chat_daily_tg.repeat_topics import RepeatTopicDB, mentions_from_json
+    from chat_daily_tg.death_signals import apply_death_signals
+    from chat_daily_tg.paths import DB_PATH
+
+    pdb = PermanentDB(DB_PATH)
+    now_iso = _dt.now().isoformat()
+    candidates: list[PermanentEntry] = []
+    for add in out.opportunities.get("permanent_additions", []):
+        title = add.get("title", "")
+        url = add.get("url")
+        category = add.get("category", "misc")
+        fp = compute_fingerprint(title, url, category)
+        candidates.append(PermanentEntry(
+            id=f"{date_str}-{fp[:8]}",
+            captured_at=now_iso,
+            source_group=add.get("source_group", ""),
+            source_sender=add.get("source_sender", ""),
+            category=category,
+            type=add.get("type", "permanent"),
+            title=title,
+            content=add.get("content", ""),
+            url=url,
+            expires_at=add.get("expires_at"),
+            notes=add.get("notes"),
+        ))
+    for action, saved in pdb.upsert_many(candidates):
+        log.info("permanent %s (mention=%d): %s", action, saved.mention_count, saved.title)
+
+    hot_leads_new: list[HotLead] = []
+    for i, add in enumerate(out.opportunities.get("hot_leads_additions", [])):
+        hot_leads_new.append(HotLead(
+            id=f"{date_str}-hot-{i:03d}",
+            captured_at=date_str,
+            title=add.get("title", ""),
+            summary=add.get("summary", ""),
+            category=add.get("category", "arbitrage"),
+            source_group=add.get("source_group", ""),
+            source_sender=add.get("source_sender", ""),
+            status="alive",
+            risk_notes=add.get("risk_notes"),
+        ))
+    append_day_leads(DB_PATH, date_str, hot_leads_new, md_root=hot_leads_dir)
+    log.info("hot leads added: %d", len(hot_leads_new))
+
+    topic_mentions = mentions_from_json(out.opportunities.get("topic_mentions", []))
+    repeat_updated = RepeatTopicDB(DB_PATH).upsert_many(topic_mentions, seen_date=date_str)
+    log.info("repeat topics updated: %d", len(repeat_updated))
+
+    n_updated = apply_death_signals(
+        signals=out.opportunities.get("death_signals", []),
+        db_path=DB_PATH,
+        hot_leads_db=DB_PATH,
+    )
+    log.info("death signals applied: %d", n_updated)
 
 
 def main(date_str: str | None = None, model_alias: str | None = None, no_push: bool = False,
@@ -102,10 +171,10 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
     only messages newer than its high-water mark, so high-volume private channels
     aren't re-downloaded.
 
-    Channels route to forum topics by their `topic` key (default channels_news; image
-    channels set channels_gallery). Each topic group gets its own sender via
-    resolve_tg_target (group chat + message_thread_id). seen_path is keyed per channel,
-    so splitting the single push into per-topic calls causes no cross-group dup/skip."""
+    Channels route to forum topics by their `topic` key (default channels_news).
+    Each topic group gets its own sender via resolve_tg_target (group chat +
+    message_thread_id). seen_path is keyed per channel, so splitting the single
+    push into per-topic calls causes no cross-group dup/skip."""
     channels = cfg.sources.telegram.raw_channels if cfg.sources.telegram.enabled else []
     if not channels:
         return
@@ -177,6 +246,121 @@ def run_channels(no_push: bool = False) -> int:
         return 1
 
 
+def run_bilibili(no_push: bool = False) -> int:
+    """Entry point for the hourly Bilibili digest (--bilibili-only). Polls
+    whitelisted UPs via opencli, pushes new-video cards to the bilibili forum
+    topic. Idempotent via the bvid SeenStore (marked seen only after a
+    successful send); a failed/missed run is caught up by the next one thanks
+    to the 48h lookback window."""
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"bilibili-{tag}"))
+    try:
+        from chat_daily_tg.bilibili_digest import build_summarizer, push_digest
+        from chat_daily_tg.bilibili_fetcher import (
+            BridgeUnavailableError, fetch_new_videos, probe_bridge,
+        )
+        from chat_daily_tg.paths import BILIBILI_SEEN_PATH
+        from chat_daily_tg.raw_seen import SeenStore
+        from chat_daily_tg.tg_sender import TelegramSender
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        src = cfg.sources.bilibili
+        if not src.enabled or not src.fetch.whitelist:
+            log.info("bilibili source disabled or whitelist empty, nothing to do")
+            return 0
+        try:
+            probe_bridge()
+        except BridgeUnavailableError as e:
+            # Common launchd cold-environment failure (Chrome/daemon not up) —
+            # distinct message from a login expiry. The 48h lookback catches up
+            # next run, so exit non-zero for visibility but nothing is lost.
+            log.error("opencli bridge unavailable: %s", e)
+            notify_failure("chat-daily-tg B站桥接不可用",
+                           f"opencli daemon/Chrome bridge 不在线，本轮 digest 跳过（下轮自动追回）。{e}")
+            return 1
+
+        seen = SeenStore(BILIBILI_SEEN_PATH)
+        videos = fetch_new_videos(
+            src, seen,
+            retry_max_attempts=cfg.retry.max_attempts,
+            retry_backoff_seconds=cfg.retry.backoff_seconds,
+        )
+        log.info("bilibili new videos: %d", len(videos))
+        if not videos:
+            return 0
+
+        sender = None
+        if not no_push:
+            dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+            chat_id, thread_id = resolve_tg_target(src.digest.topic, dm_chat_id)
+            sender = TelegramSender(
+                bot_token=os.environ[cfg.telegram.bot_token_env],
+                chat_id=chat_id, message_thread_id=thread_id,
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+            )
+            log.info("bilibili digest target: %s/thread=%s", chat_id, thread_id)
+        workdir = prepare_archive_day(tag)
+        sent = push_digest(videos, sender=sender, seen=seen, cfg=cfg,
+                           summarizer=build_summarizer(cfg), workdir=workdir,
+                           no_push=no_push)
+        log.info("✓ bilibili digest complete: %d/%d cards sent (no_push=%s)",
+                 sent, len(videos), no_push)
+        return 0
+    except Exception as e:
+        log.exception("bilibili digest failed: %s", e)
+        notify_failure("chat-daily-tg B站digest失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
+_TIME_RE = re.compile(r"\d{2}:\d{2}")
+
+
+def _citation_caption(analysis) -> str:
+    """WeChat timestamps are 'YYYY-MM-DD HH:MM'; Telegram's are tz-suffixed ISO —
+    regex-extract HH:MM instead of slicing so both formats caption correctly."""
+    c = analysis.candidate
+    m = _TIME_RE.search(c.timestamp)
+    time_part = m.group(0) if m else c.timestamp
+    return f"📷 {c.platform} · {c.group_name} · {time_part}"
+
+
+def _push_rich_digest(tg, cfg, concise_md: str, citation_map: dict) -> bool:
+    """Send the digest as ONE rich message with the cited images INLINE at the
+    LLM's [IMGn] marker positions — the original 图文混排 ask (Bot API 10.x
+    sendRichMessage). Returns False on ANY failure so the caller falls back to
+    the classic text + trailing-photos push; all uploaded KV source images are
+    deleted in every case (Telegram re-hosts them during the send)."""
+    from chat_daily_tg.img_relay import delete_image, upload_image
+    uploaded: dict[str, str] = {}  # local_path -> relay url (dedupes repeat citations)
+    try:
+        # Rich messages consume MARKDOWN, so build from the RAW concise output
+        # (post_process_concise would have converted [label](url) links into
+        # Telegram-HTML <a> tags, which rich markdown must not receive).
+        md = abbreviate_sources(concise_md, cfg.source_abbreviations)
+        segments = resolve_citations(md, citation_map)
+        if not any(analysis for _, analysis in segments):
+            return False
+        parts: list[str] = []
+        for text_chunk, analysis in segments:
+            parts.append(text_chunk)
+            if analysis:
+                path = analysis.candidate.local_path
+                if path not in uploaded:
+                    uploaded[path] = upload_image(cfg.img_relay, path)
+                caption = _citation_caption(analysis).replace('"', "'")
+                parts.append(f'\n\n![]({uploaded[path]} "{caption}")\n\n')
+        tg.send_rich_message(markdown="".join(parts))
+        return True
+    except Exception as e:
+        log.warning("rich digest push failed, falling back to text+photo: %s", e)
+        return False
+    finally:
+        for url in uploaded.values():
+            delete_image(cfg.img_relay, url)
+
+
 def _fact_risk_report(verification: dict) -> str:
     risky_statuses = {"downgraded", "removed", "needs_verification"}
     risky_claims = [
@@ -214,6 +398,12 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         len(cfg.sources.telegram.chats) if cfg.sources.telegram.enabled else 0,
         cfg.models.summary.model,
     )
+    try:
+        removed, freed = cleanup_old_media(cfg.archive.media_retention_days)
+        if removed:
+            log.info("media cleanup: removed %d dirs, freed %.1fMB", removed, freed / 1024 / 1024)
+    except Exception as e:
+        log.warning("media cleanup failed (non-fatal): %s", e)
     if not cfg.sources.wechat.groups and not (
         cfg.sources.telegram.enabled and cfg.sources.telegram.chats
     ):
@@ -230,6 +420,7 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     # by this daily summary run.
     groups_with_content: list[tuple[str, str]] = []
     media_candidates = []
+    citation_map = {}
     for group in cfg.sources.wechat.groups:
         out_path = archive_dir / f"wechat-{safe_filename(group)}.md"
         try:
@@ -306,7 +497,10 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")
             if vision_md.strip():
                 groups_with_content.append(("图片理解 / 多来源", vision_md))
-            log.info("vision analyses included: %d", len(analyses))
+            citation_md, citation_map = build_citation_block(analyses)
+            if citation_md:
+                groups_with_content.append(("可引用图片列表", citation_md))
+            log.info("vision analyses included: %d (citable: %d)", len(analyses), len(citation_map))
         except Exception as e:
             log.warning("vision analysis skipped: %s", e)
 
@@ -323,13 +517,13 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     from chat_daily_tg.context_builder import (
         active_permanent_summary, active_hot_leads_summary, active_repeat_topics_summary,
     )
-    from chat_daily_tg.paths import PERMANENT_JSONL, HOT_LEADS_DIR, REPEAT_TOPICS_JSONL
+    from chat_daily_tg.paths import DB_PATH
 
-    perm_ctx = active_permanent_summary(PERMANENT_JSONL)
+    perm_ctx = active_permanent_summary(DB_PATH)
     hot_ctx = active_hot_leads_summary(
-        HOT_LEADS_DIR, retention_days=cfg.hot_leads.retention_days,
+        DB_PATH, retention_days=cfg.hot_leads.retention_days,
     )
-    repeat_ctx = active_repeat_topics_summary(REPEAT_TOPICS_JSONL, today=date_str)
+    repeat_ctx = active_repeat_topics_summary(DB_PATH, today=date_str)
 
     # Cross-group clustering (preprocessing)
     clusters = cluster_cross_group_topics(groups_with_content)
@@ -419,73 +613,33 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         notify_failure("chat-daily-tg 日报生成异常", f"精简版输出过短（{len(concise_processed.strip())} 字符），可能 LLM 格式解析失败。日志: {log_file_for(date_str)}")
         return 1
 
-    # 4.5. Persist opportunities
+    # 4.5. Persist opportunities. Persistence is idempotent across same-day catch-up
+    # reruns (the .persisted marker guards re-appending non-deterministic hot-lead ids,
+    # review #40) and fully isolated: any failure here — persistence OR derived-view
+    # regeneration — logs but NEVER blocks the already-generated report push (review #43).
     from datetime import datetime as _dt
-    from chat_daily_tg.db import PermanentDB, PermanentEntry
-    from chat_daily_tg.hot_leads import HotLead, append_day_leads, regenerate_latest
-    from chat_daily_tg.permanent_md import regenerate_permanent_md
     from chat_daily_tg.paths import (
-        PERMANENT_JSONL, PERMANENT_MD, REPEAT_TOPICS_JSONL, HOT_LEADS_DIR, HOT_LEADS_LATEST,
+        DB_PATH, PERMANENT_MD, HOT_LEADS_DIR, HOT_LEADS_LATEST,
     )
-    from chat_daily_tg.repeat_topics import RepeatTopicDB, mentions_from_json
-
-    from chat_daily_tg.db import compute_fingerprint
-    pdb = PermanentDB(PERMANENT_JSONL)
-    now_iso = _dt.now().isoformat()
-    candidates: list[PermanentEntry] = []
-    for add in out.opportunities.get("permanent_additions", []):
-        title = add.get("title", "")
-        url = add.get("url")
-        category = add.get("category", "misc")
-        fp = compute_fingerprint(title, url, category)
-        candidates.append(PermanentEntry(
-            id=f"{date_str}-{fp[:8]}",
-            captured_at=now_iso,
-            source_group=add.get("source_group", ""),
-            source_sender=add.get("source_sender", ""),
-            category=category,
-            type=add.get("type", "permanent"),
-            title=title,
-            content=add.get("content", ""),
-            url=url,
-            expires_at=add.get("expires_at"),
-            notes=add.get("notes"),
-        ))
-    for action, saved in pdb.upsert_many(candidates):
-        log.info("permanent %s (mention=%d): %s", action, saved.mention_count, saved.title)
-
-    hot_leads_new: list[HotLead] = []
-    for i, add in enumerate(out.opportunities.get("hot_leads_additions", [])):
-        lead = HotLead(
-            id=f"{date_str}-hot-{i:03d}",
-            captured_at=date_str,
-            title=add.get("title", ""),
-            summary=add.get("summary", ""),
-            category=add.get("category", "arbitrage"),
-            source_group=add.get("source_group", ""),
-            source_sender=add.get("source_sender", ""),
-            status="alive",
-            risk_notes=add.get("risk_notes"),
-        )
-        hot_leads_new.append(lead)
-    append_day_leads(HOT_LEADS_DIR, date_str, hot_leads_new)
-    log.info("hot leads added: %d", len(hot_leads_new))
-
-    topic_mentions = mentions_from_json(out.opportunities.get("topic_mentions", []))
-    repeat_updated = RepeatTopicDB(REPEAT_TOPICS_JSONL).upsert_many(topic_mentions, seen_date=date_str)
-    log.info("repeat topics updated: %d", len(repeat_updated))
-
-    from chat_daily_tg.death_signals import apply_death_signals as _apply_ds
-    n_updated = _apply_ds(
-        signals=out.opportunities.get("death_signals", []),
-        db_path=PERMANENT_JSONL,
-        hot_leads_root=HOT_LEADS_DIR,
-    )
-    log.info("death signals applied: %d", n_updated)
-
-    # Regenerate derived views
-    regenerate_permanent_md(PERMANENT_JSONL, PERMANENT_MD)
-    regenerate_latest(HOT_LEADS_DIR, HOT_LEADS_LATEST, retention_days=cfg.hot_leads.retention_days)
+    persisted_marker = archive_dir / PERSISTED_MARKER
+    try:
+        if persisted_marker.exists():
+            log.info("opportunities already persisted for %s, skipping re-persist (catch-up)", date_str)
+        else:
+            _persist_opportunities(out, date_str, HOT_LEADS_DIR)
+            persisted_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+        # Derived views regenerate from the DB each run (idempotent).
+        from chat_daily_tg.permanent_md import regenerate_permanent_md
+        from chat_daily_tg.hot_leads import regenerate_latest
+        regenerate_permanent_md(DB_PATH, PERMANENT_MD)
+        regenerate_latest(DB_PATH, HOT_LEADS_LATEST, retention_days=cfg.hot_leads.retention_days)
+    except Exception as e:
+        log.warning("opportunity persistence/regeneration failed (non-fatal, report still pushes): %s", e)
+        # The report still ships, but the day's opportunities didn't persist — and
+        # a successful push writes COMPLETE, so catch-up won't retry. Surface it
+        # rather than lose the data silently.
+        notify_failure("chat-daily-tg 机会持久化失败",
+                       f"{type(e).__name__}: {e}（报告已照常推送，当天机会可能未入库）")
 
     if not no_push:
         bot_token = os.environ[cfg.telegram.bot_token_env]
@@ -518,8 +672,30 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             # (Text still sends below if the image failed — image_sent would be False.)
             log.info("image_only mode: skipping text push")
         else:
-            tg.send(concise_processed, parse_mode="HTML")
-            log.info("TG push complete")
+            # The LLM's [IMGn] markers only PICK the image (at most one, AI-preferred);
+            # the digest text itself always goes out as one intact message (markers
+            # stripped), so the multi-chunk resume via state_path stays safe (review
+            # finding #42). The chosen photo follows as its own trailing message —
+            # Telegram has no single-message text+image format that fits a full
+            # digest (caption cap is 1024 visible chars; user decision 2026-07-02).
+            segments = resolve_citations(concise_processed, citation_map) if citation_map else []
+            cited_list = [analysis for _, analysis in segments if analysis]
+            if cited_list and cfg.img_relay.enabled and _push_rich_digest(tg, cfg, out.concise_md, citation_map):
+                log.info("TG push complete (single rich message, %d inline image(s))", len(cited_list))
+            else:
+                full_text = "".join(chunk for chunk, _ in segments) if segments else concise_processed
+                tg.send(full_text, parse_mode="HTML",
+                        state_path=archive_dir / ".text-push-state.json")
+                sent = 0
+                for cited in cited_list:
+                    try:
+                        tg.send_media(cited.candidate.local_path, "photo",
+                                      caption=_citation_caption(cited))
+                        sent += 1
+                    except Exception as e:
+                        log.warning("citation image send failed (%s): %s",
+                                    cited.candidate.raw_ref, e)
+                log.info("TG push complete (%d/%d trailing cited image(s))", sent, len(cited_list))
     else:
         log.info("TG push skipped (--no-push)")
 
@@ -540,8 +716,12 @@ if __name__ == "__main__":
                    help="Exit 0 immediately if this date's run already completed (catch-up schedule)")
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
+    p.add_argument("--bilibili-only", action="store_true",
+                   help="Run only the hourly Bilibili subscription digest (no summary)")
     args = p.parse_args()
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))
+    if args.bilibili_only:
+        sys.exit(run_bilibili(no_push=args.no_push))
     sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push,
                   skip_if_done=args.skip_if_done))

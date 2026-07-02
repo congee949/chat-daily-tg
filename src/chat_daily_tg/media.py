@@ -58,7 +58,7 @@ def write_media_candidates(path: Path, candidates: list[MediaCandidate]) -> None
 
 
 def _is_valid_image_file(path: str | None) -> tuple[bool, str]:
-    """Layer 1 prefilter: file size and resolution checks."""
+    """Layer 1 prefilter: file size, decodability, and resolution checks."""
     if not path:
         return True, "no local path"
     p = Path(path).expanduser()
@@ -73,10 +73,13 @@ def _is_valid_image_file(path: str | None) -> tuple[bool, str]:
         from PIL import Image as PILImage
         with PILImage.open(p) as img:
             w, h = img.size
-            if w < 300 or h < 300:
-                return False, f"too small resolution ({w}x{h})"
-    except Exception:
-        pass
+    except Exception as e:
+        # e.g. WeChat's proprietary wxgf format dumped by `wx extract` with a
+        # .jpg name — Telegram can't decode it either (sendPhoto 400s), so it
+        # must never reach vision or a digest citation.
+        return False, f"undecodable image ({type(e).__name__})"
+    if w < 300 or h < 300:
+        return False, f"too small resolution ({w}x{h})"
     return True, "pass"
 
 

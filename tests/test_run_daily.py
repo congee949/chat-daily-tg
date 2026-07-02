@@ -10,6 +10,7 @@ def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
     monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
@@ -122,9 +123,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     verification_path = tmp_path / "archive" / "2026" / "04" / "17" / "verification.json"
     assert verification_path.exists()
     assert "测试主题" in verification_path.read_text(encoding="utf-8")
-    repeat_path = tmp_path / "repeat_topics.jsonl"
-    assert repeat_path.exists()
-    assert "T" in repeat_path.read_text(encoding="utf-8")
+    from chat_daily_tg.repeat_topics import RepeatTopicDB
+    topics = list(RepeatTopicDB(tmp_path / "chat-daily.db").read_all())
+    assert any(t.title == "T" for t in topics)
 
 
 def test_run_daily_raw_channels_only_config_fails_fast(tmp_path, monkeypatch):
@@ -207,6 +208,7 @@ def test_run_daily_adds_vision_markdown_to_summary_prompt(tmp_path, monkeypatch)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
     monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
@@ -308,12 +310,116 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "vision.md").exists()
 
 
+def test_run_daily_sends_cited_image_inline_when_llm_marks_it(tmp_path, monkeypatch):
+    """When the LLM inserts [IMG1] in its concise output, the push must split
+    around it and post the image via sendPhoto right after that text chunk."""
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+models:
+  summary: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+  vision:
+    enabled: true
+    endpoint: "http://vision"
+    model: "vision"
+    api_key_env: "VK"
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("VK", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+
+    from chat_daily_tg.media import MediaCandidate
+    from chat_daily_tg.vision import VisionAnalysis
+
+    image_path = tmp_path / "a.png"
+    image_path.write_bytes(b"fake image")
+    candidate = MediaCandidate(
+        platform="微信", group_name="G1", timestamp="2026-04-17 10:00", sender_name="A",
+        media_type="图片", local_path=str(image_path), context="活动入口截图",
+        reason="高价值", score=0.9,
+    )
+    analysis = VisionAnalysis(
+        candidate=candidate, type="activity_poster", value_score=0.8,
+        summary="图片里是活动入口", key_facts=["满减活动"], risk_flags=[],
+        should_include_in_daily=True, reason="有活动信息",
+    )
+    llm_content = (
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发这条测试断言。[IMG1]\n"
+        "- 第二条测试 bullet 增加长度以确保总长度足够。\n"
+        "\n"
+        "### 💰 钱 / 活动\n"
+        "- **测试主题**：测试内容足够长，超过一百字符限制这条断言检查。\n"
+        "```\n\n"
+        "```markdown detailed\nDetailed\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+    verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("run_daily.analyze_media_candidates", return_value=[analysis]), \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1", message_count=1, content="# group\nmessage",
+            media_candidates=[candidate],
+        )
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_cls.return_value.__enter__.return_value.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        rc = run_daily.main(date_str="2026-04-17")
+
+    assert rc == 0
+    post_calls = tg_client_cls.return_value.__enter__.return_value.post.call_args_list
+    photo_calls = [c for c in post_calls if c.args[0].endswith("/sendPhoto")]
+    message_calls = [c for c in post_calls if c.args[0].endswith("/sendMessage")]
+    # The digest goes out as ONE intact text message (marker stripped), and the
+    # cited photo follows as a trailing message with only the source caption.
+    assert len(photo_calls) == 1
+    assert len(message_calls) == 1
+    text = message_calls[0].kwargs["data"]["text"]
+    assert "测试总览内容" in text and "测试主题" in text  # full digest, not split
+    assert "[IMG1]" not in text
+    assert photo_calls[0].kwargs["data"]["caption"] == "📷 微信 · G1 · 10:00"
+
+
 def test_run_daily_adds_embedding_evidence_to_verifier_prompt(tmp_path, monkeypatch):
     import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
     monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
@@ -399,6 +505,7 @@ def test_run_daily_writes_fact_risk_report(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
     monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
@@ -474,6 +581,7 @@ def test_run_daily_no_push_skips_telegram_send(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
     monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
     monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
     monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
@@ -537,3 +645,75 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "summary.md").exists()
     # But a --no-push run is not "delivered": no marker, so catch-up still retries
     assert not (tmp_path / "archive" / "2026" / "04" / "17" / ".run-complete").exists()
+
+
+
+def _rich_cfg_and_map(tmp_img_path: str):
+    from chat_daily_tg.config import ImgRelay
+    from chat_daily_tg.media import MediaCandidate
+    from chat_daily_tg.vision import VisionAnalysis
+
+    class _Cfg:
+        img_relay = ImgRelay(enabled=True, account_id="a", namespace_id="n",
+                             worker_base="https://r.example.workers.dev",
+                             api_token_env="CF_TEST_TOKEN")
+        source_abbreviations = {}
+
+    analysis = VisionAnalysis(
+        candidate=MediaCandidate(
+            platform="微信", group_name="G1", timestamp="2026-04-17 10:00", sender_name="A",
+            media_type="图片", local_path=tmp_img_path, context="ctx", reason="r", score=0.9,
+        ),
+        type="activity_poster", value_score=0.8, summary="s", key_facts=[],
+        risk_flags=[], should_include_in_daily=True, reason="r",
+    )
+    return _Cfg(), {1: analysis}
+
+
+def test_push_rich_digest_inline_markdown_and_cleanup(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    concise_md = "### 🧠 AI / 工具\n- AI 重点内容 [IMG1]\n\n### 🔗 资源\n- 一个链接"
+    tg = MagicMock()
+
+    with patch("chat_daily_tg.img_relay.upload_image",
+               return_value="https://r.example.workers.dev/k.jpg") as up, \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, concise_md, citation_map)
+
+    assert ok is True
+    md = tg.send_rich_message.call_args.kwargs["markdown"]
+    assert '![](https://r.example.workers.dev/k.jpg "📷 微信 · G1 · 10:00")' in md
+    # image block sits between the cited bullet and the following section
+    assert md.index("AI 重点内容") < md.index("![](") < md.index("### 🔗 资源")
+    assert "[IMG1]" not in md
+    dele.assert_called_once()
+
+
+def test_push_rich_digest_returns_false_on_failure_for_fallback(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    tg = MagicMock()
+
+    with patch("chat_daily_tg.img_relay.upload_image", side_effect=RuntimeError("kv down")), \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+
+    assert ok is False
+    tg.send_rich_message.assert_not_called()
+    dele.assert_not_called()  # nothing uploaded, nothing to delete
+
+
+def test_push_rich_digest_send_failure_still_deletes_kv(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    tg = MagicMock()
+    tg.send_rich_message.side_effect = RuntimeError("400 photo fetch failed")
+
+    with patch("chat_daily_tg.img_relay.upload_image",
+               return_value="https://r.example.workers.dev/k.jpg"), \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+
+    assert ok is False
+    dele.assert_called_once()

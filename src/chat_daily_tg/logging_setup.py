@@ -12,9 +12,14 @@ _TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
 _REDACTED = "<REDACTED_TG_TOKEN>"
 
 
+def redact(text: str) -> str:
+    """Mask Telegram bot tokens in arbitrary text (notifications, alerts, etc.)."""
+    return _TOKEN_RE.sub(_REDACTED, text)
+
+
 class _RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        return _TOKEN_RE.sub(_REDACTED, super().format(record))
+        return redact(super().format(record))
 
 
 def configure_logging(log_file: Path, level: int = logging.INFO) -> None:

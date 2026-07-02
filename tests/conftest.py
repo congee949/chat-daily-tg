@@ -9,3 +9,5 @@ def _no_proxy_env(monkeypatch):
     for var in ("ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
         monkeypatch.delenv(var, raising=False)
         monkeypatch.delenv(var.lower(), raising=False)
+    # Never let a real Telegram alert fire from notify_failure during tests.
+    monkeypatch.delenv("CHAT_DAILY_TG_ALERTS", raising=False)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
 import json
 import re
 from pathlib import Path
 from typing import Iterator, Literal
+
+from chat_daily_tg.sqlite_util import connect
 
 
 TopicStatus = Literal["active", "dormant"]
@@ -69,72 +71,112 @@ class RepeatTopic:
         return self.mention_count >= 2 or self.consecutive_days >= 2
 
 
+_FIELDS = (
+    "id", "title", "first_seen", "last_seen", "seen_dates", "mention_count",
+    "last_summary", "status", "last_source_group", "last_source_sender",
+    "last_new_information",
+)
+
+
+def _row_to_topic(row) -> RepeatTopic:
+    try:
+        seen = json.loads(row["seen_dates"]) if row["seen_dates"] else []
+    except (ValueError, TypeError):
+        seen = []
+    return RepeatTopic(
+        id=row["id"], title=row["title"], first_seen=row["first_seen"],
+        last_seen=row["last_seen"], seen_dates=list(seen),
+        mention_count=row["mention_count"], last_summary=row["last_summary"],
+        status=row["status"], last_source_group=row["last_source_group"],
+        last_source_sender=row["last_source_sender"],
+        last_new_information=row["last_new_information"],
+    )
+
+
 class RepeatTopicDB:
     def __init__(self, path: Path):
         self.path = path
 
-    def _ensure(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.path.touch()
+    def _conn(self):
+        return connect(self.path)
 
     def read_all(self) -> Iterator[RepeatTopic]:
-        if not self.path.exists():
-            return
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                yield RepeatTopic(**json.loads(line))
+        conn = self._conn()
+        try:
+            for row in conn.execute("SELECT * FROM repeat_topics ORDER BY rowid"):
+                yield _row_to_topic(row)
+        finally:
+            conn.close()
 
-    def _rewrite(self, topics: list[RepeatTopic]) -> None:
-        self._ensure()
-        with open(self.path, "w", encoding="utf-8") as f:
-            for topic in topics:
-                f.write(json.dumps(asdict(topic), ensure_ascii=False) + "\n")
+    @staticmethod
+    def _write(conn, topic: RepeatTopic) -> None:
+        data = {
+            "id": topic.id, "title": topic.title, "first_seen": topic.first_seen,
+            "last_seen": topic.last_seen,
+            "seen_dates": json.dumps(topic.seen_dates, ensure_ascii=False),
+            "mention_count": topic.mention_count, "last_summary": topic.last_summary,
+            "status": topic.status, "last_source_group": topic.last_source_group,
+            "last_source_sender": topic.last_source_sender,
+            "last_new_information": topic.last_new_information,
+        }
+        placeholders = ", ".join(f":{c}" for c in _FIELDS)
+        conn.execute(
+            f"INSERT INTO repeat_topics ({', '.join(_FIELDS)}) VALUES ({placeholders}) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            + ", ".join(f"{c}=excluded.{c}" for c in _FIELDS if c != "id"),
+            data,
+        )
 
     def upsert_many(self, mentions: list[TopicMention], seen_date: str) -> list[RepeatTopic]:
-        topics = list(self.read_all())
-        by_id = {topic.id: topic for topic in topics}
-        updated: list[RepeatTopic] = []
-        for mention in mentions:
-            title = mention.title.strip()
-            if not title:
-                continue
-            tid = topic_id(title)
-            if tid in by_id:
-                topic = by_id[tid]
-                if seen_date not in topic.seen_dates:
-                    topic.seen_dates.append(seen_date)
-                    topic.seen_dates.sort()
-                    topic.mention_count += 1
-                topic.title = title
-                topic.last_seen = max(topic.last_seen, seen_date)
-                topic.last_summary = mention.summary or topic.last_summary
-                topic.last_source_group = mention.source_group or topic.last_source_group
-                topic.last_source_sender = mention.source_sender or topic.last_source_sender
-                if mention.has_new_information and mention.new_information:
-                    topic.last_new_information = mention.new_information
-                topic.status = "active"
-            else:
-                topic = RepeatTopic(
-                    id=tid,
-                    title=title,
-                    first_seen=seen_date,
-                    last_seen=seen_date,
-                    seen_dates=[seen_date],
-                    mention_count=1,
-                    last_summary=mention.summary,
-                    last_source_group=mention.source_group,
-                    last_source_sender=mention.source_sender,
-                    last_new_information=mention.new_information if mention.has_new_information else None,
-                )
-                topics.append(topic)
-                by_id[tid] = topic
-            updated.append(topic)
-        self._rewrite(topics)
-        return updated
+        conn = self._conn()
+        try:
+            by_id: dict[str, RepeatTopic] = {}
+            for row in conn.execute("SELECT * FROM repeat_topics"):
+                t = _row_to_topic(row)
+                by_id[t.id] = t
+            updated: list[RepeatTopic] = []
+            touched: list[RepeatTopic] = []
+            for mention in mentions:
+                title = mention.title.strip()
+                if not title:
+                    continue
+                tid = topic_id(title)
+                if tid in by_id:
+                    topic = by_id[tid]
+                    if seen_date not in topic.seen_dates:
+                        topic.seen_dates.append(seen_date)
+                        topic.seen_dates.sort()
+                        topic.mention_count += 1
+                    topic.title = title
+                    topic.last_seen = max(topic.last_seen, seen_date)
+                    topic.last_summary = mention.summary or topic.last_summary
+                    topic.last_source_group = mention.source_group or topic.last_source_group
+                    topic.last_source_sender = mention.source_sender or topic.last_source_sender
+                    if mention.has_new_information and mention.new_information:
+                        topic.last_new_information = mention.new_information
+                    topic.status = "active"
+                else:
+                    topic = RepeatTopic(
+                        id=tid,
+                        title=title,
+                        first_seen=seen_date,
+                        last_seen=seen_date,
+                        seen_dates=[seen_date],
+                        mention_count=1,
+                        last_summary=mention.summary,
+                        last_source_group=mention.source_group,
+                        last_source_sender=mention.source_sender,
+                        last_new_information=mention.new_information if mention.has_new_information else None,
+                    )
+                    by_id[tid] = topic
+                updated.append(topic)
+                touched.append(topic)
+            with conn:
+                for topic in touched:
+                    self._write(conn, topic)
+            return updated
+        finally:
+            conn.close()
 
 
 def mentions_from_json(items: list[dict]) -> list[TopicMention]:

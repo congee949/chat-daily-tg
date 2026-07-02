@@ -81,8 +81,7 @@ class RawChannel(BaseModel):
     strip_patterns: list[str] = Field(default_factory=list)
     prefer_content_link: bool = False
     # 论坛话题路由 key（对应 ~/qwenproxy/.tg-notify-targets.json 的 topics）。
-    # 默认 channels_news（频道·资讯）；图片/媒体频道设 channels_gallery（频道·图集）。
-    # 找不到 key 时 resolve_tg_target 回落 DM。
+    # 默认 channels_news（频道·资讯）。找不到 key 时 resolve_tg_target 回落 DM。
     topic: str = "channels_news"
 
 
@@ -109,6 +108,10 @@ class Sanitize(BaseModel):
     enabled: bool = False
 
 
+class Archive(BaseModel):
+    media_retention_days: int = 14
+
+
 class Config(BaseModel):
     groups: list[str] | None = None
     sources: Sources = Field(default_factory=Sources)
@@ -121,6 +124,7 @@ class Config(BaseModel):
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
+    archive: Archive = Field(default_factory=Archive)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("groups")

@@ -207,3 +207,44 @@
 - 188 passed（新增 5 个测试：相册折叠/真实文本帖不合并/超窗独立/纯媒体相册折叠/push 一卡且全 id 入 seen + 幂等重跑 0）。
 - 实跑真实数据：yihong 06-23 窗口 7 条原始消息 → 3 张卡片（18:47 的 5 条相册 → 1；47 分钟后的独立媒体帖 13551 正确保持独立）。
 - 部署：launchd 直跑仓库源码 `run_daily.py`，无需重装，下次 22:00 频道跑自动生效；历史已推 13545–13551 全在 seen，不会回头重推。
+
+---
+
+## 2026-07-02 — 微信图片下载接入 wx extract + 媒体保留期清理
+
+用户发现"每天获取的内容有没有多媒体"这个问题的答案比预想的更极端：核对 `media_candidates.jsonl` 实测数据后确认，微信侧图片候选 **100% `local_path=None`**——`extract_wx_media_candidates` 从未真正下载过图片，只是从文本里解析 `local_id` 占位符打分，vision 的 `not candidate.local_path` 前置过滤直接把所有微信图片挡在外面。同时发现 Telegram 侧 `tg_media/` 已无清理地堆了 1.3G（20 天），是因为 `telegram_media.export_chat_media` 不分打分先无条件全下载。
+
+### Design Decisions
+- **微信下载走"先打分后下载"，不照搬 Telegram 的"先下载后筛选"**：`wx attachments --json` 返回的 `local_id` 字段与导出文本里的 `local_id=NNN` 是同一 ID（实测核对过），因此可以在拿到图片文件之前，先用现成的 `score_media_context`（纯文本关键词打分，媒体不到场也能算）筛出 score≥0.45（与 `vision.py` 的 `min_prefilter_score` 对齐，不留二次过滤的缝隙），只对达标的候选调 `wx attachments`（每群一次，取 local_id→attachment_id 映射）+ `wx extract`（按需逐张）。今日样本验证：76 条微信图片候选里只有 13 条（17%）达标，量级远低于 Telegram 现在"全下载"的做法。
+- **落盘位置与命名对齐 Telegram 既有约定**：`archive/日期/wx_media/<safe_filename(group_name)>/<local_id>.jpg`，与 `tg_media/<chat_name>/<msg_id>.jpg` 同构，`cleanup_old_media` 可以用同一套逻辑处理两者。
+- **提取幂等 + 单项失败隔离**：`out_path.exists()` 时跳过重复解密；单张 `wx extract` 非零退出只 `log.warning` 并保留 `local_path=None`，不让一张坏图拖垮整个 `export_group`。
+- **保留期清理是独立的、覆盖两条路径的通用函数**：新增 `archive.cleanup_old_media(retention_days)`，只删 `tg_media`/`wx_media` 子目录（媒体可重新下载），不动同目录下的 `summary.md`/`vision.jsonl` 等文本归档（这些量小、是真正的永久记录）。默认 14 天，与 `HotLeads.retention_days` 现有默认对齐，新增 `Archive.media_retention_days` 配置项。在 `_run`（每日总结入口）顶部调用，try/except 包裹、失败仅 `log.warning`，不得阻塞日报——`--channels-only`/`--bilibili-only` 两个独立入口不调用它，因为频道转发媒体本就在 `private_media.py` 里下载完即删（`finally: shutil.rmtree`），没有堆积问题。
+
+### Tradeoffs
+- **只支持图片**：`wx` CLI 的 `attachments --kind` 目前只接受 `image`，视频/语音/文件类消息仍然只有 `local_id` 占位、无法下载，这是底层 CLI 的能力边界，不在本次范围内。
+- **打分先于下载，意味着"看不到图片内容"的打分可能误伤**：纯文本关键词打分无法识别"图片本身很有价值但配文很短"的情况（例如一张关键截图配文只有"看"）。Telegram 侧靠"全下载+vision 二次筛"能兜住这类情况，微信侧为了控制体积放弃了这个兜底。可接受，因为 vision 分析成本本身也是稀缺资源，且用户已经在"下载范围"的澄清问题里选择了"先打分再下载"。
+
+### 验证
+- 239 passed（新增 `test_wx_exporter.py` 3 例：高分候选下载成功/低分候选零 wx 调用/单张 extract 失败不中断；`test_archive.py` 3 例：清理过期媒体目录/保留近期/archive 目录不存在时 no-op；`test_config.py` 补 1 断言：`Archive.media_retention_days` 默认 14）。
+- 未做真实环境端到端跑（未接触生产 `~/chat-daily` 配置/凭证），下一次日报（或手动 `--no-push` 跑一次过去日期）应确认 `media_candidates.jsonl` 里微信条目出现真实 `local_path`，且 `wx_media/` 目录按打分门槛只落高分图。
+
+---
+
+## 2026-07-02（续）— 每日推送里插图：LLM 主动引用 `[IMGn]`，按引用点插入图片
+
+用户希望能在每日推送里实际看到高分图片，且要求"插在对应文字附近"而非"文字发完后堆一批图"，明确选择了较重的方案：让写总结的 LLM 自己判断某条重点是否有对应截图、在恰当位置插入引用标记，而不是靠启发式规则事后猜配对。
+
+### Design Decisions
+- **引用池 = vision 已筛选出的高分子集，不新增过滤层**：`analyze_media_candidates` 本就只返回 `value_score>=0.65` 的 `VisionAnalysis`，这正是用户要的"打分靠前的几张"。新增 `vision.build_citation_block(analyses)` 只是在这批基础上按 `value_score` 排序、封顶 `MAX_CITATIONS=5`（防止总结被图片刷屏），生成一个带编号的"可引用图片"markdown 块喂给总结 LLM，同时返回 `id_map={n: VisionAnalysis}` 供推送时反查。
+- **标记走字面 token `[IMGn]`，不碰 parser**：`parse_summary_output` 按 fence 抽取，`[IMGn]` 只是 `concise` fence 里的普通文本，原样穿过既有解析逻辑，零改动。`post_process.py` 的 `_MD_LINK_RE` 只匹配 `[text](url)`（要求紧跟括号），`[IMGn]` 没有括号，不会被误处理。
+- **拆分逻辑做成"文本+图 pair"而非"逐行插入"**：`vision.resolve_citations(text, id_map)` 两遍处理——先把不在 `id_map` 里的编号（LLM 幻觉）直接从文本抹掉但不产生断点，再按剩下的合法标记切分成 `[(text_chunk, image_or_None), ...]`；每个 `text_chunk` 与"结束这段文字的那个引用标记"对应的图片配对，最后一段（最后一个标记之后的文字）永远配 `None`。推送时对每个 pair 先 `tg.send(text_chunk)` 再 `tg.send_media(image, "photo")`，天然实现"图片紧跟它印证的那段文字"。
+- **图片文件已提前下载好，引用只是"选哪张、放哪"**：不需要现场下载——vision 分析阶段用的 `candidate.local_path` 就是本地文件（微信走今天新接的 `wx extract`，Telegram 走 `telegram_media.py`），引用机制只做筛选和排版，不涉及新的下载路径。
+- **resumability 只在"没有真正用到引用"时保留**：原来单条 `tg.send(..., state_path=...)` 支持同日补跑续传（review #42）。只要本次 push 真的产生了带图片的 segment，就切到逐段发送（无 `state_path`）；如果 vision 开了但 LLM 没引用任何图（`resolve_citations` 返回的所有 segment 图片都是 `None`），仍然走原来的单条可续传路径——用 `any(analysis for _, analysis in segments)` 判断，而不是简单地"citation_map 非空就切分支"（citation_map 非空只代表"有图可引用"，不代表"这次真的引用了"，用后者判断避免了大多数日子里因为 vision 恰好开着就无谓丢失续传能力）。
+
+### Tradeoffs
+- **多段推送没有逐段续传状态**：真正命中引用的那次 push，如果中途崩溃，同日补跑会全部重发（已知限制，写进代码注释而非工程化解决）。card 图片推送（`tg.send_photo` 发 PNG 卡片）今天也是同样没有续传状态，属于既有的不对称，未额外加码解决。
+- **封顶 5 张引用池**：不是"vision 分析出的所有高分图都能被引用"，只暴露 value_score 最高的 5 张给 LLM 挑；vision.jsonl/vision.md 归档不受影响（仍是完整列表），只是可引用范围收窄。
+
+### 验证
+- 249 passed（新增 `test_vision.py` 6 例：`build_citation_block` 排序封顶/空输入；`resolve_citations` 合法标记切分/未知编号剔除不断段/无标记单段/local_path 缺失时丢弃标记；`test_run_daily.py` 新增 1 例端到端：LLM 输出里带 `[IMG1]`，断言 mock 的 httpx 层确实收到 1 次 `sendPhoto` + ≥1 次 `sendMessage`，且发出的文本里不残留 `[IMG1]` 字面量）。
+- 未做真实环境验证：LLM 是否真的会按 prompt 指示恰当地引用图片（而不是从不引用，或引用位置很怪），这是模型行为问题，单测测不出来，需要至少跑一次真实 `--no-push`（vision 开启）观察 concise 输出。

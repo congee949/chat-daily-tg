@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,59 @@ def vision_markdown(analyses: list[VisionAnalysis]) -> str:
         lines.append(f"- 判断：{'进入日报' if item.should_include_in_daily else '仅归档'}，{item.reason}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+MAX_CITATIONS = 5  # cap so the digest doesn't turn into a photo slideshow
+
+_CITATION_RE = re.compile(r"\[IMG(\d+)\]")
+
+
+def build_citation_block(analyses: list[VisionAnalysis]) -> tuple[str, dict[int, VisionAnalysis]]:
+    """Top MAX_CITATIONS analyses by value_score, presented to the summary LLM as
+    a numbered, citable list. Returns (markdown_block, id_map); id_map is used by
+    resolve_citations() to turn any [IMGn] markers the LLM emits back into images."""
+    ranked = sorted(analyses, key=lambda a: a.value_score, reverse=True)[:MAX_CITATIONS]
+    if not ranked:
+        return "", {}
+    id_map = {i + 1: item for i, item in enumerate(ranked)}
+    lines = [
+        "# 可引用图片",
+        "",
+        "如果下面某条重点有对应截图能直接印证，在该条 bullet 末尾追加引用标记 "
+        "`[IMGn]`（n 用下面列出的编号）；没有合适的图就不要引用，禁止编造列表之外"
+        "的编号；一条 bullet 最多引用 1 张图。",
+        "",
+    ]
+    for cid, item in id_map.items():
+        c = item.candidate
+        lines.append(f"## [IMG{cid}] {c.platform} / {c.group_name} / {c.timestamp}")
+        lines.append(f"- 摘要：{item.summary}")
+        if item.key_facts:
+            lines.append("- 关键信息：" + "；".join(item.key_facts))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n", id_map
+
+
+def resolve_citations(
+    text: str, id_map: dict[int, VisionAnalysis],
+) -> list[tuple[str, VisionAnalysis | None]]:
+    """Split text on [IMGn] markers into ordered (text_chunk, image_or_None) segments.
+
+    Unknown ids (LLM hallucination, or a candidate whose local_path is missing) are
+    stripped from the text rather than leaked as a raw bracket token, without
+    breaking the segment there.
+    """
+    valid = {cid: item for cid, item in id_map.items() if item.candidate.local_path}
+    text = _CITATION_RE.sub(lambda m: m.group(0) if int(m.group(1)) in valid else "", text)
+    segments: list[tuple[str, VisionAnalysis | None]] = []
+    last_end = 0
+    for m in _CITATION_RE.finditer(text):
+        segments.append((text[last_end:m.start()], valid[int(m.group(1))]))
+        last_end = m.end()
+    tail = text[last_end:]
+    if tail.strip() or not segments:
+        segments.append((tail, None))
+    return segments
 
 
 def write_vision_analyses(path: Path, analyses: list[VisionAnalysis]) -> None:

@@ -18,52 +18,19 @@ DATA_DIR="${CHAT_DAILY_DATA_DIR:-$HOME/chat-daily}"
 PY="${CHAT_DAILY_PY:-$PROJECT/.venv/bin/python}"
 PROXY="${CHAT_DAILY_ALERT_PROXY:-http://127.0.0.1:1082}"
 LOG="$DATA_DIR/logs/guard-$(date +%F).log"
+GUARD_TITLE="chat-daily-tg 守护"
 mkdir -p "$DATA_DIR/logs"
 
-notify() {
-  local msg="$1"
-  # Offline fallback first — never depends on network/proxy being up.
-  osascript -e "display notification \"${msg//\"/ }\" with title \"chat-daily-tg 守护\"" 2>/dev/null || true
-  # Best-effort Telegram alert over the http proxy (TG is unreachable direct here).
-  if [ -f "$DATA_DIR/.env" ]; then
-    local tok cid thread tgt
-    tok=$(grep -m1 '^TG_BOT_TOKEN=' "$DATA_DIR/.env" | cut -d= -f2-)
-    cid=$(grep -m1 '^TG_CHAT_ID=' "$DATA_DIR/.env" | cut -d= -f2-)
-    # Route to the 警告/alert forum topic when configured; fall back to DM cid.
-    tgt=$(/usr/bin/python3 - "$cid" <<'PY' 2>/dev/null
-import json, os, sys
-dm = sys.argv[1]
-try:
-    t = json.load(open(os.path.expanduser("~/qwenproxy/.tg-notify-targets.json")))
-    cid = t.get("chat_id", dm) or dm
-    tid = (t.get("topics", {}) or {}).get("alert") or ""
-except Exception:
-    cid, tid = dm, ""
-print(cid)
-print(tid)
-PY
-)
-    if [ -n "$tgt" ]; then
-      { IFS= read -r cid; IFS= read -r thread; } <<< "$tgt"
-    else
-      thread=""
-    fi
-    if [ -n "$tok" ] && [ -n "$cid" ]; then
-      curl -s --max-time 15 --proxy "$PROXY" \
-        "https://api.telegram.org/bot${tok}/sendMessage" \
-        --data-urlencode "chat_id=${cid}" \
-        ${thread:+--data-urlencode "message_thread_id=${thread}"} \
-        --data-urlencode "text=⚠️ chat-daily-tg 守护: ${msg}" >/dev/null 2>&1 || true
-    fi
-  fi
-  echo "$(date '+%F %T') ALERT: $msg" >> "$LOG"
-}
+source "$PROJECT/scripts/guard_common.sh"
 
 # Pre-flight: the exact failure that ate 2026-06-12 — venv python vanished.
 if [ ! -x "$PY" ]; then
-  notify "venv python 缺失 ($PY)，今日日报未运行，请重建：cd $PROJECT && uv sync"
+  guard_notify "venv python 缺失 ($PY)，今日日报未运行，请重建：cd $PROJECT && uv sync"
   exit 1
 fi
+
+# Make Telegram/DeepSeek reachable for the Python run + enable in-Python TG alerts.
+guard_setup_env
 
 # Random jitter (0–15 min) so the daily run isn't at a perfectly fixed minute.
 # NOTE: cosmetic for this setup — the run reads the LOCAL WeChat DB and delivers to
@@ -78,6 +45,6 @@ fi
 /usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  notify "日报运行失败 exit=$rc，详见 $DATA_DIR/logs/$(date +%F).log"
+  guard_notify "日报运行失败 exit=$rc，详见 $DATA_DIR/logs/$(date +%F).log"
 fi
 exit "$rc"

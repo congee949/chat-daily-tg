@@ -1,8 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import date, timedelta
-import json
 from pathlib import Path
+
+from chat_daily_tg.sqlite_util import connect
 
 
 @dataclass
@@ -19,27 +20,24 @@ class HotLead:
     death_signal: str | None = None
 
 
-def _day_file(root: Path, date_str: str) -> Path:
+_FIELDS = (
+    "id", "captured_at", "title", "summary", "category", "source_group",
+    "source_sender", "status", "risk_notes", "death_signal",
+)
+
+
+def _row_to_lead(row) -> HotLead:
+    return HotLead(**{k: row[k] for k in _FIELDS})
+
+
+def _day_file(md_root: Path, date_str: str) -> Path:
     y, m, d = date_str.split("-")
-    return root / y / m / f"{d}.md"
+    return md_root / y / m / f"{d}.md"
 
 
-def _day_jsonl(root: Path, date_str: str) -> Path:
-    """Internal storage: every day's new leads stored as JSONL alongside md."""
-    y, m, d = date_str.split("-")
-    return root / y / m / f"{d}.jsonl"
-
-
-def append_day_leads(root: Path, date_str: str, leads: list[HotLead]) -> Path | None:
-    """Write that day's new hot leads to YYYY/MM/DD.md and .jsonl.
-    Returns md path if anything was written, else None.
-    """
-    if not leads:
-        return None
-    md = _day_file(root, date_str)
-    jl = _day_jsonl(root, date_str)
+def _write_day_md(md_root: Path, date_str: str, leads: list[HotLead]) -> Path:
+    md = _day_file(md_root, date_str)
     md.parent.mkdir(parents=True, exist_ok=True)
-
     md_lines = [f"# {date_str} 热点板新增", ""]
     for lead in leads:
         block = [
@@ -54,31 +52,58 @@ def append_day_leads(root: Path, date_str: str, leads: list[HotLead]) -> Path | 
         block.extend([f"- ID：`{lead.id}`", ""])
         md_lines.extend(block)
     md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-
-    # JSONL
-    with open(jl, "a", encoding="utf-8") as f:
-        for lead in leads:
-            f.write(json.dumps(asdict(lead), ensure_ascii=False) + "\n")
     return md
 
 
-def load_all_leads(root: Path) -> list[HotLead]:
-    """Walk all YYYY/MM/DD.jsonl and load."""
-    out: list[HotLead] = []
-    if not root.exists():
-        return out
-    for jl in sorted(root.rglob("*.jsonl")):
-        with open(jl, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    out.append(HotLead(**json.loads(line)))
-    return out
+def append_day_leads(
+    db_path: Path, date_str: str, leads: list[HotLead], md_root: Path | None = None
+) -> Path | None:
+    """Persist that day's new hot leads to the DB (upsert by id, idempotent on
+    rerun). Optionally also write a human-readable YYYY/MM/DD.md under md_root.
+
+    Returns the md path if one was written, else None.
+    """
+    if not leads:
+        return None
+    conn = connect(db_path)
+    try:
+        placeholders = ", ".join(f":{c}" for c in _FIELDS)
+        sql = (
+            f"INSERT INTO hot_leads ({', '.join(_FIELDS)}) VALUES ({placeholders}) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            + ", ".join(f"{c}=excluded.{c}" for c in _FIELDS if c != "id")
+        )
+        with conn:
+            for lead in leads:
+                conn.execute(sql, {
+                    "id": lead.id, "captured_at": lead.captured_at,
+                    "title": lead.title, "summary": lead.summary,
+                    "category": lead.category, "source_group": lead.source_group,
+                    "source_sender": lead.source_sender, "status": lead.status,
+                    "risk_notes": lead.risk_notes, "death_signal": lead.death_signal,
+                })
+    finally:
+        conn.close()
+    if md_root is not None:
+        return _write_day_md(md_root, date_str, leads)
+    return None
 
 
-def regenerate_latest(root: Path, latest_md: Path, retention_days: int = 14) -> None:
+def load_all_leads(db_path: Path) -> list[HotLead]:
+    """Load every stored hot lead."""
+    if not Path(db_path).exists():
+        return []
+    conn = connect(db_path)
+    try:
+        return [_row_to_lead(r) for r in conn.execute(
+            "SELECT * FROM hot_leads ORDER BY rowid")]
+    finally:
+        conn.close()
+
+
+def regenerate_latest(db_path: Path, latest_md: Path, retention_days: int = 14) -> None:
     cutoff = date.today() - timedelta(days=retention_days)
-    leads = load_all_leads(root)
+    leads = load_all_leads(db_path)
     active = [
         l for l in leads
         if l.status == "alive"
@@ -90,7 +115,7 @@ def regenerate_latest(root: Path, latest_md: Path, retention_days: int = 14) -> 
 
     lines = [
         "# 热点板 — 活跃机会",
-        f"> 保留窗口：{retention_days} 天；自动生成，改 YYYY/MM/DD.jsonl 不改这里",
+        f"> 保留窗口：{retention_days} 天；自动生成，改数据库不改这里",
         "",
     ]
     for cat, items in sorted(by_cat.items()):
@@ -111,30 +136,24 @@ def regenerate_latest(root: Path, latest_md: Path, retention_days: int = 14) -> 
     latest_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def mark_lead_status(root: Path, lead_id: str, status: str,
-                      death_signal: str | None = None) -> bool:
-    """Find a lead by id across all day-jsonl files and update its status."""
-    if not root.exists():
+def mark_lead_status(db_path: Path, lead_id: str, status: str,
+                     death_signal: str | None = None) -> bool:
+    """Update a lead's status by id. Returns True if a row was updated."""
+    if not Path(db_path).exists():
         return False
-    found = False
-    for jl in root.rglob("*.jsonl"):
-        leads = []
-        modified = False
-        with open(jl, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("id") == lead_id:
-                    data["status"] = status
-                    if death_signal is not None:
-                        data["death_signal"] = death_signal
-                    modified = True
-                    found = True
-                leads.append(data)
-        if modified:
-            with open(jl, "w", encoding="utf-8") as f:
-                for data in leads:
-                    f.write(json.dumps(data, ensure_ascii=False) + "\n")
-    return found
+    conn = connect(db_path)
+    try:
+        with conn:
+            if death_signal is not None:
+                cur = conn.execute(
+                    "UPDATE hot_leads SET status = ?, death_signal = ? WHERE id = ?",
+                    (status, death_signal, lead_id),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE hot_leads SET status = ? WHERE id = ?",
+                    (status, lead_id),
+                )
+            return cur.rowcount > 0
+    finally:
+        conn.close()

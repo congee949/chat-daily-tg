@@ -230,7 +230,8 @@ class TelegramSender:
         assert last_exc is not None
         raise last_exc
 
-    def send(self, text: str, parse_mode: str | None = None) -> list[int]:
+    def send(self, text: str, parse_mode: str | None = None,
+             *, state_path=None) -> list[int]:
         # Format FIRST, then split, so the chunk length reflects the actual payload
         # sent to Telegram. Splitting raw text let HTML expansion (&->&amp;, <b> tags)
         # push a chunk over the 4096 hard limit and 400 the whole push (CHUNK-1).
@@ -243,7 +244,36 @@ class TelegramSender:
         # format_*_for_telegram keeps every tag pair within a single line, so splitting
         # on newline boundaries never cuts a tag. 3900 leaves margin under 4096.
         chunks = split_message(payload, limit=3900)
-        return [self._send_one(c, parse_mode) for c in chunks]
+        if state_path is None or len(chunks) <= 1:
+            return [self._send_one(c, parse_mode) for c in chunks]
+        return self._send_resumable(chunks, parse_mode, state_path)
+
+    def _send_resumable(self, chunks: list[str], parse_mode: str | None, state_path) -> list[int]:
+        """Send chunks, persisting per-chunk progress so a same-day catch-up rerun
+        resumes instead of re-sending the first half (review finding #42). Resume is
+        gated on a payload hash: if the (non-deterministic) report text changed
+        between runs, restart from the top rather than splice mismatched halves."""
+        from hashlib import sha256
+        from pathlib import Path
+        sp = Path(state_path)
+        digest = sha256("\x00".join(chunks).encode("utf-8")).hexdigest()
+        resume_from = 0
+        try:
+            prev = json.loads(sp.read_text(encoding="utf-8"))
+            if prev.get("hash") == digest and isinstance(prev.get("sent"), int):
+                resume_from = min(prev["sent"], len(chunks))
+        except (OSError, ValueError):
+            pass
+        ids: list[int] = []
+        for i, chunk in enumerate(chunks):
+            if i < resume_from:
+                continue
+            ids.append(self._send_one(chunk, parse_mode))
+            try:
+                sp.write_text(json.dumps({"hash": digest, "sent": i + 1}), encoding="utf-8")
+            except OSError:
+                pass
+        return ids
 
     def send_card(self, text_html: str, *, link: str | None = None) -> list[int]:
         """Send a verbatim channel message as an X-Monitor-style card.

@@ -1,14 +1,22 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import json
+import logging
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import time
+from chat_daily_tg.archive import safe_filename
 from chat_daily_tg.media import MediaCandidate, extract_wx_media_candidates
 
+log = logging.getLogger(__name__)
 
 WX_BINARY = shutil.which("wx") or "/opt/homebrew/bin/wx"
+
+# Only download candidates worth vision's attention — matches vision.py's
+# min_prefilter_score, so nothing downloaded here is thrown away downstream.
+_MIN_DOWNLOAD_SCORE = 0.45
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,64 @@ def clean_wx_markdown(md: str) -> str:
 _COUNT_RE = re.compile(r"导出\s+(\d+)\s+条消息")
 
 
+def _attachment_ids_by_local_id(group_name: str, since: str, until: str) -> dict[int, str]:
+    """`wx attachments --json` local_id matches the local_id=NNN already parsed
+    from export text — this maps that id to the opaque attachment_id `wx extract` needs."""
+    cmd = [
+        WX_BINARY, "attachments", group_name, "--kind", "image",
+        "--since", since, "--until", until, "--json", "--limit", "10000",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        log.warning("wx attachments failed for %s: %s", group_name, proc.stderr or proc.stdout)
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        log.warning("wx attachments returned non-JSON for %s", group_name)
+        return {}
+    return {item["local_id"]: item["attachment_id"] for item in data.get("attachments", [])}
+
+
+def _download_wx_images(
+    candidates: list[MediaCandidate], *, group_name: str, since: str, until: str, media_dir: Path,
+) -> list[MediaCandidate]:
+    """Extract score-qualifying image candidates via `wx extract`, in place.
+
+    Only candidates already worth vision's attention are downloaded — the score comes
+    from message-text keywords alone (media.py), so this needs no image data up front.
+    Per-item extract failures are logged and skipped; they never abort the export.
+    """
+    qualifies = {
+        idx for idx, c in enumerate(candidates)
+        if c.media_type == "图片" and c.score >= _MIN_DOWNLOAD_SCORE and c.raw_ref
+    }
+    if not qualifies:
+        return candidates
+    by_local_id = _attachment_ids_by_local_id(group_name, since, until)
+    if not by_local_id:
+        return candidates
+    media_dir.mkdir(parents=True, exist_ok=True)
+    updated: dict[int, MediaCandidate] = {}
+    for idx in qualifies:
+        c = candidates[idx]
+        local_id = int(c.raw_ref.split("=", 1)[1])
+        attachment_id = by_local_id.get(local_id)
+        if not attachment_id:
+            continue
+        out_path = media_dir / f"{local_id}.jpg"
+        if not out_path.exists():
+            proc = subprocess.run(
+                [WX_BINARY, "extract", attachment_id, "-o", str(out_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                log.warning("wx extract failed for local_id=%d: %s", local_id, proc.stderr or proc.stdout)
+                continue
+        updated[idx] = replace(c, local_path=str(out_path))
+    return [updated.get(i, c) for i, c in enumerate(candidates)]
+
+
 def export_group(
     group_name: str,
     since: str,
@@ -90,6 +156,10 @@ def export_group(
     raw = proc.stdout
     count = int(m.group(1)) if m else 0
     media_candidates = extract_wx_media_candidates(raw, group_name=group_name)
+    media_dir = out_path.parent / "wx_media" / safe_filename(group_name)
+    media_candidates = _download_wx_images(
+        media_candidates, group_name=group_name, since=since, until=until, media_dir=media_dir,
+    )
     cleaned = clean_wx_markdown(raw)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(cleaned, encoding="utf-8")

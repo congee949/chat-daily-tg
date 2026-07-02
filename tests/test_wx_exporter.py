@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from chat_daily_tg.wx_exporter import export_group, clean_wx_markdown
@@ -141,3 +142,77 @@ def test_clean_against_real_fixture():
         assert signal in out, f"lost signal {signal!r} after cleanup"
 
     assert "\n\n\n" not in out
+
+
+def test_export_group_downloads_high_score_wx_images(tmp_path: Path):
+    out_path = tmp_path / "out.md"
+    raw = (
+        "# 群聊\n\n> 导出 2 条消息\n\n"
+        "### 2026-04-17 10:00\n\n**A**: 这个活动价格怎么样\n\n"
+        "### 2026-04-17 10:01\n\n**A**: [图片] local_id=123\n\n"
+    )
+    attachments_json = json.dumps({"attachments": [{"local_id": 123, "attachment_id": "abc123"}]})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[1] == "export":
+            return MagicMock(returncode=0, stdout=raw, stderr="")
+        if cmd[1] == "attachments":
+            return MagicMock(returncode=0, stdout=attachments_json, stderr="")
+        if cmd[1] == "extract":
+            assert cmd[2] == "abc123"
+            out_file = Path(cmd[cmd.index("-o") + 1])
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_bytes(b"fake-jpeg")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected wx subcommand: {cmd}")
+
+    with patch("chat_daily_tg.wx_exporter.subprocess.run", side_effect=fake_run):
+        result = export_group("示例微信群A", "2026-04-17", "2026-04-18", out_path)
+
+    assert len(result.media_candidates) == 1
+    cand = result.media_candidates[0]
+    assert cand.local_path is not None
+    assert Path(cand.local_path).read_bytes() == b"fake-jpeg"
+
+
+def test_export_group_skips_low_score_wx_images_without_any_wx_calls(tmp_path: Path):
+    out_path = tmp_path / "out.md"
+    raw = (
+        "# 群聊\n\n> 导出 1 条消息\n\n"
+        "### 2026-04-17 10:00\n\n**A**: [图片] local_id=999\n\n"
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[1])
+        return MagicMock(returncode=0, stdout=raw, stderr="")
+
+    with patch("chat_daily_tg.wx_exporter.subprocess.run", side_effect=fake_run):
+        result = export_group("示例微信群A", "2026-04-17", "2026-04-18", out_path)
+
+    assert calls == ["export"]  # no attachments/extract call for a below-threshold candidate
+    assert result.media_candidates[0].local_path is None
+
+
+def test_export_group_wx_extract_failure_is_skipped_not_raised(tmp_path: Path):
+    out_path = tmp_path / "out.md"
+    raw = (
+        "# 群聊\n\n> 导出 2 条消息\n\n"
+        "### 2026-04-17 10:00\n\n**A**: 这个活动价格怎么样\n\n"
+        "### 2026-04-17 10:01\n\n**A**: [图片] local_id=123\n\n"
+    )
+    attachments_json = json.dumps({"attachments": [{"local_id": 123, "attachment_id": "abc123"}]})
+
+    def fake_run(cmd, **kwargs):
+        if cmd[1] == "export":
+            return MagicMock(returncode=0, stdout=raw, stderr="")
+        if cmd[1] == "attachments":
+            return MagicMock(returncode=0, stdout=attachments_json, stderr="")
+        if cmd[1] == "extract":
+            return MagicMock(returncode=1, stdout="", stderr="decrypt failed")
+        raise AssertionError(f"unexpected wx subcommand: {cmd}")
+
+    with patch("chat_daily_tg.wx_exporter.subprocess.run", side_effect=fake_run):
+        result = export_group("示例微信群A", "2026-04-17", "2026-04-18", out_path)
+
+    assert result.media_candidates[0].local_path is None

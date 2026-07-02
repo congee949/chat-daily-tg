@@ -182,12 +182,15 @@ def push_raw_channel_cards(
     channel's high-water mark, so high-volume private channels aren't re-downloaded."""
     seen = SeenStore(seen_path)
     total = 0
+    private_attempted = 0
+    private_failed = 0
     for ch in channels:
         hwm = seen.max_msg_id(ch.id) if incremental else 0
         # Private channels (no public username) get the media-download path: Telegram
         # can't render a preview card for t.me/c links, so we download media via the
         # user session and re-upload it through the bot.
         if not (ch.username or "").lstrip("@"):
+            private_attempted += 1
             try:
                 from chat_daily_tg.private_media import push_private_channel
                 total += push_private_channel(
@@ -197,6 +200,7 @@ def push_raw_channel_cards(
                     delay_seconds=delay_seconds, no_push=no_push,
                 )
             except Exception as e:
+                private_failed += 1
                 log.warning("private channel push failed for %s: %s", ch.name, e)
             continue
 
@@ -258,6 +262,17 @@ def push_raw_channel_cards(
             total += 1
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
+
+    # All private channels failing together is the signature of a broken shared
+    # dependency (e.g. the kabi-tg-cli interpreter vanished) — not bad luck on one
+    # channel. Surface it instead of returning a quiet 0 (review finding #20).
+    if private_attempted and private_failed == private_attempted:
+        from chat_daily_tg.notifier import notify_failure
+        notify_failure(
+            "chat-daily-tg 私有频道全部失败",
+            f"{private_failed}/{private_attempted} 个私有频道转发失败"
+            "（可能 kabi-tg-cli 解释器失效），见日志。",
+        )
     return total
 
 

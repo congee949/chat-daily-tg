@@ -150,6 +150,22 @@ class Archive(BaseModel):
     media_retention_days: int = 14
 
 
+class ImgRelay(BaseModel):
+    """Ephemeral Cloudflare KV image relay for single-message rich digests.
+
+    sendRichMessage only accepts publicly fetchable https image URLs (attach://,
+    file_id, and Telegram's own file URLs are all rejected — tested 2026-07-02).
+    The relay uploads the cited image to the user's own CF Workers KV under an
+    unguessable key, Telegram re-hosts it at send time, and the key is deleted
+    immediately after (ttl_seconds is the belt-and-braces backstop)."""
+    enabled: bool = False
+    account_id: str = ""
+    namespace_id: str = ""
+    worker_base: str = ""            # e.g. https://tg-img-relay.<sub>.workers.dev
+    api_token_env: str = "CF_KV_API_TOKEN"
+    ttl_seconds: int = 300
+
+
 class Config(BaseModel):
     groups: list[str] | None = None
     sources: Sources = Field(default_factory=Sources)
@@ -163,6 +179,7 @@ class Config(BaseModel):
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
     archive: Archive = Field(default_factory=Archive)
+    img_relay: ImgRelay = Field(default_factory=ImgRelay)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("groups")

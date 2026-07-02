@@ -8,6 +8,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.5",
     "tenacity>=8.2",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]

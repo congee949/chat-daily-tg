@@ -63,16 +63,29 @@ def test_vision_client_posts_image_and_parses_json(tmp_path, httpx_mock: HTTPXMo
     assert encoded in body
 
 
-def test_analyze_media_candidates_filters_low_score_and_missing_path(tmp_path, httpx_mock: HTTPXMock):
+def _real_image(path, size=(400, 400)):
+    """A real JPEG big enough to clear the thumbnail gate (>=10KB, >=300x300)."""
+    import random
+    from PIL import Image as PILImage
+    img = PILImage.new("RGB", size)
+    img.putdata([(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                 for _ in range(size[0] * size[1])])
+    img.save(path, quality=95)
+    assert path.stat().st_size >= 10 * 1024
+
+
+def test_analyze_media_candidates_filters_low_score_missing_path_and_thumbnails(tmp_path, httpx_mock: HTTPXMock):
     image = tmp_path / "a.jpg"
-    image.write_bytes(b"fake image")
+    _real_image(image)
+    thumb = tmp_path / "thumb.jpg"
+    thumb.write_bytes(b"tiny thumbnail bytes")  # < 10KB → thumbnail gate drops it
     httpx_mock.add_response(
         url="https://vision.example/v1/chat/completions",
         method="POST",
         json={
             "choices": [{
                 "message": {
-                    "content": '{"type":"risk_screenshot","value_score":0.7,"summary":"风险","key_facts":[],"risk_flags":["封号"],"should_include_in_daily":true,"reason":"有风险"}'
+                    "content": '{"type":"risk_screenshot","value_score":0.85,"summary":"风险","key_facts":[],"risk_flags":["封号"],"should_include_in_daily":true,"reason":"有风险"}'
                 }
             }]
         },
@@ -83,13 +96,35 @@ def test_analyze_media_candidates_filters_low_score_and_missing_path(tmp_path, h
         client=client,
         candidates=[
             _candidate(str(image), score=0.8),
-            _candidate(str(image), score=0.1),
-            _candidate("", score=0.9),
+            _candidate(str(image), score=0.1),   # below prefilter
+            _candidate("", score=0.9),           # no local path
+            _candidate(str(thumb), score=0.9),   # thumbnail-sized file
         ],
     )
 
     assert len(out) == 1
     assert "风险" in vision_markdown(out)
+
+
+def test_analyze_media_candidates_excludes_below_08_value_score(tmp_path, httpx_mock: HTTPXMock):
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions",
+        method="POST",
+        json={
+            "choices": [{
+                "message": {
+                    "content": '{"type":"price_screenshot","value_score":0.7,"summary":"价格","key_facts":["满减"],"risk_flags":[],"should_include_in_daily":true,"reason":"一般"}'
+                }
+            }]
+        },
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+
+    out = analyze_media_candidates(client=client, candidates=[_candidate(str(image), score=0.8)])
+
+    assert out == []  # 0.7 < the 0.8 include bar
 
 
 def test_build_citation_block_ranks_and_caps_by_value_score():
@@ -110,11 +145,29 @@ def test_build_citation_block_empty_input():
     assert id_map == {}
 
 
+def test_build_citation_block_prefers_telegram_over_wechat():
+    from dataclasses import replace as dc_replace
+    tg = _analysis("/x/tg.jpg", value_score=0.85)
+    wx = _analysis("/x/wx.jpg", value_score=0.95)
+    wx = VisionAnalysis(
+        candidate=dc_replace(wx.candidate, platform="微信"),
+        type=wx.type, value_score=wx.value_score, summary=wx.summary,
+        key_facts=wx.key_facts, risk_flags=wx.risk_flags,
+        should_include_in_daily=wx.should_include_in_daily, reason=wx.reason,
+    )
+
+    _, id_map = build_citation_block([wx, tg])
+
+    # TG image ranks first despite the WeChat one having a higher value_score
+    assert id_map[1].candidate.platform == "Telegram"
+    assert id_map[2].candidate.platform == "微信"
+
+
 def test_resolve_citations_splits_on_valid_markers():
     id_map = {1: _analysis("/x/1.jpg"), 2: _analysis("/x/2.jpg")}
     text = "开头文字\n[IMG1]\n中间文字\n[IMG2]\n结尾文字"
 
-    segments = resolve_citations(text, id_map)
+    segments = resolve_citations(text, id_map, max_images=2)
 
     # each text chunk pairs with the image whose marker ended it — the final
     # tail (after the last marker) has no image.
@@ -124,6 +177,38 @@ def test_resolve_citations_splits_on_valid_markers():
     assert segments[0][0] == "开头文字\n"
     assert segments[1][0] == "\n中间文字\n"
     assert segments[2][0] == "\n结尾文字"
+
+
+def test_resolve_citations_caps_to_three_images_by_default():
+    id_map = {i: _analysis(f"/x/{i}.jpg") for i in range(1, 5)}
+    text = "甲 [IMG1] 乙 [IMG2] 丙 [IMG3] 丁 [IMG4] 尾"
+
+    segments = resolve_citations(text, id_map)
+
+    images = [img for _, img in segments if img]
+    assert len(images) == 3
+    # doc order when no AI section: first three kept, fourth stripped
+    assert [i.candidate.local_path for i in images] == ["/x/1.jpg", "/x/2.jpg", "/x/3.jpg"]
+    full_text = "".join(t for t, _ in segments)
+    assert "[IMG" not in full_text  # dropped marker stripped, not leaked
+
+
+def test_resolve_citations_prefers_ai_section_marker_when_capping():
+    id_map = {1: _analysis("/x/money.jpg"), 2: _analysis("/x/ai.jpg")}
+    text = (
+        "### 💰 钱 / 活动\n- 活动内容 [IMG1]\n\n"
+        "### 🧠 AI / 工具\n- AI 内容 [IMG2]\n\n"
+        "### ⚠️ 风险\n- 风险内容"
+    )
+
+    segments = resolve_citations(text, id_map, max_images=1)
+
+    images = [img for _, img in segments if img]
+    assert len(images) == 1
+    assert images[0].candidate.local_path == "/x/ai.jpg"
+    full_text = "".join(t for t, _ in segments)
+    assert "[IMG" not in full_text
+    assert "活动内容" in full_text and "风险内容" in full_text
 
 
 def test_resolve_citations_strips_unknown_id_without_breaking_segment():

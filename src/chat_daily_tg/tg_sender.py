@@ -311,6 +311,50 @@ class TelegramSender:
             msg_ids.append(self._post_json(url, payload))
         return msg_ids
 
+    def send_rich_message(self, *, markdown: str) -> int:
+        """Send a Bot API rich message (sendRichMessage): one message that mixes
+        text blocks and media blocks (images referenced by public https URL).
+
+        A 400 raises IMMEDIATELY (bad markdown / unfetchable image URL is
+        deterministic — the caller falls back to the classic text+photo push);
+        429 waits per retry_after; transport errors retry with backoff."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendRichMessage"
+        payload: dict = {"chat_id": self.chat_id,
+                         "rich_message": {"markdown": markdown}}
+        if self.message_thread_id is not None:
+            payload["message_thread_id"] = self.message_thread_id
+        last_exc: Exception | None = None
+        attempts = 0
+        rl_hits = 0
+        while attempts < self.retry_max_attempts:
+            try:
+                with httpx.Client(timeout=self.timeout) as c:
+                    r = c.post(url, json=payload)
+                    if r.status_code == 429:
+                        rl_hits += 1
+                        if rl_hits >= self.retry_max_attempts:
+                            raise RuntimeError(f"Telegram 429 rate limit: gave up after {rl_hits} waits")
+                        time.sleep(_retry_after(r))
+                        continue
+                    if r.status_code == 400:
+                        raise RuntimeError(f"sendRichMessage 400: {r.text[:200]}")
+                    r.raise_for_status()
+                    body = r.json()
+                    if not body.get("ok"):
+                        raise RuntimeError(f"Telegram API error: {body}")
+                    return body["result"]["message_id"]
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_exc = e
+                attempts += 1
+                log.warning("tg sendRichMessage transport failed (attempt %d/%d): %s",
+                            attempts, self.retry_max_attempts, e)
+                if attempts >= self.retry_max_attempts:
+                    break
+                idx = min(attempts - 1, len(self.retry_backoff_seconds) - 1)
+                time.sleep(self.retry_backoff_seconds[idx])
+        assert last_exc is not None
+        raise last_exc
+
     def _post_json(self, url: str, payload: dict) -> int:
         """POST a JSON sendMessage payload with retry/backoff. Honors 429 retry_after
         and degrades to plain text once on a 400 parse error."""

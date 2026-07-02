@@ -403,11 +403,14 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     post_calls = tg_client_cls.return_value.__enter__.return_value.post.call_args_list
     photo_calls = [c for c in post_calls if c.args[0].endswith("/sendPhoto")]
     message_calls = [c for c in post_calls if c.args[0].endswith("/sendMessage")]
+    # The digest goes out as ONE intact text message (marker stripped), and the
+    # cited photo follows as a trailing message with only the source caption.
     assert len(photo_calls) == 1
-    assert len(message_calls) >= 1
-    # The marker itself must not leak into the delivered text.
-    for c in message_calls:
-        assert "[IMG1]" not in c.kwargs["data"]["text"]
+    assert len(message_calls) == 1
+    text = message_calls[0].kwargs["data"]["text"]
+    assert "测试总览内容" in text and "测试主题" in text  # full digest, not split
+    assert "[IMG1]" not in text
+    assert photo_calls[0].kwargs["data"]["caption"] == "📷 微信 · G1 · 10:00"
 
 
 def test_run_daily_adds_embedding_evidence_to_verifier_prompt(tmp_path, monkeypatch):
@@ -642,3 +645,75 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert (tmp_path / "archive" / "2026" / "04" / "17" / "summary.md").exists()
     # But a --no-push run is not "delivered": no marker, so catch-up still retries
     assert not (tmp_path / "archive" / "2026" / "04" / "17" / ".run-complete").exists()
+
+
+
+def _rich_cfg_and_map(tmp_img_path: str):
+    from chat_daily_tg.config import ImgRelay
+    from chat_daily_tg.media import MediaCandidate
+    from chat_daily_tg.vision import VisionAnalysis
+
+    class _Cfg:
+        img_relay = ImgRelay(enabled=True, account_id="a", namespace_id="n",
+                             worker_base="https://r.example.workers.dev",
+                             api_token_env="CF_TEST_TOKEN")
+        source_abbreviations = {}
+
+    analysis = VisionAnalysis(
+        candidate=MediaCandidate(
+            platform="微信", group_name="G1", timestamp="2026-04-17 10:00", sender_name="A",
+            media_type="图片", local_path=tmp_img_path, context="ctx", reason="r", score=0.9,
+        ),
+        type="activity_poster", value_score=0.8, summary="s", key_facts=[],
+        risk_flags=[], should_include_in_daily=True, reason="r",
+    )
+    return _Cfg(), {1: analysis}
+
+
+def test_push_rich_digest_inline_markdown_and_cleanup(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    concise_md = "### 🧠 AI / 工具\n- AI 重点内容 [IMG1]\n\n### 🔗 资源\n- 一个链接"
+    tg = MagicMock()
+
+    with patch("chat_daily_tg.img_relay.upload_image",
+               return_value="https://r.example.workers.dev/k.jpg") as up, \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, concise_md, citation_map)
+
+    assert ok is True
+    md = tg.send_rich_message.call_args.kwargs["markdown"]
+    assert '![](https://r.example.workers.dev/k.jpg "📷 微信 · G1 · 10:00")' in md
+    # image block sits between the cited bullet and the following section
+    assert md.index("AI 重点内容") < md.index("![](") < md.index("### 🔗 资源")
+    assert "[IMG1]" not in md
+    dele.assert_called_once()
+
+
+def test_push_rich_digest_returns_false_on_failure_for_fallback(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    tg = MagicMock()
+
+    with patch("chat_daily_tg.img_relay.upload_image", side_effect=RuntimeError("kv down")), \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+
+    assert ok is False
+    tg.send_rich_message.assert_not_called()
+    dele.assert_not_called()  # nothing uploaded, nothing to delete
+
+
+def test_push_rich_digest_send_failure_still_deletes_kv(tmp_path):
+    import run_daily
+    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    tg = MagicMock()
+    tg.send_rich_message.side_effect = RuntimeError("400 photo fetch failed")
+
+    with patch("chat_daily_tg.img_relay.upload_image",
+               return_value="https://r.example.workers.dev/k.jpg"), \
+         patch("chat_daily_tg.img_relay.delete_image") as dele:
+        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+
+    assert ok is False
+    dele.assert_called_once()

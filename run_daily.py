@@ -35,7 +35,7 @@ from chat_daily_tg.evidence_index import (
     build_evidence_context_for_summary,
     build_evidence_index,
 )
-from chat_daily_tg.post_process import post_process_concise
+from chat_daily_tg.post_process import abbreviate_sources, post_process_concise
 
 log = logging.getLogger("run_daily")
 
@@ -324,6 +324,41 @@ def _citation_caption(analysis) -> str:
     m = _TIME_RE.search(c.timestamp)
     time_part = m.group(0) if m else c.timestamp
     return f"📷 {c.platform} · {c.group_name} · {time_part}"
+
+
+def _push_rich_digest(tg, cfg, concise_md: str, citation_map: dict) -> bool:
+    """Send the digest as ONE rich message with the cited images INLINE at the
+    LLM's [IMGn] marker positions — the original 图文混排 ask (Bot API 10.x
+    sendRichMessage). Returns False on ANY failure so the caller falls back to
+    the classic text + trailing-photos push; all uploaded KV source images are
+    deleted in every case (Telegram re-hosts them during the send)."""
+    from chat_daily_tg.img_relay import delete_image, upload_image
+    uploaded: dict[str, str] = {}  # local_path -> relay url (dedupes repeat citations)
+    try:
+        # Rich messages consume MARKDOWN, so build from the RAW concise output
+        # (post_process_concise would have converted [label](url) links into
+        # Telegram-HTML <a> tags, which rich markdown must not receive).
+        md = abbreviate_sources(concise_md, cfg.source_abbreviations)
+        segments = resolve_citations(md, citation_map)
+        if not any(analysis for _, analysis in segments):
+            return False
+        parts: list[str] = []
+        for text_chunk, analysis in segments:
+            parts.append(text_chunk)
+            if analysis:
+                path = analysis.candidate.local_path
+                if path not in uploaded:
+                    uploaded[path] = upload_image(cfg.img_relay, path)
+                caption = _citation_caption(analysis).replace('"', "'")
+                parts.append(f'\n\n![]({uploaded[path]} "{caption}")\n\n')
+        tg.send_rich_message(markdown="".join(parts))
+        return True
+    except Exception as e:
+        log.warning("rich digest push failed, falling back to text+photo: %s", e)
+        return False
+    finally:
+        for url in uploaded.values():
+            delete_image(cfg.img_relay, url)
 
 
 def _fact_risk_report(verification: dict) -> str:
@@ -637,31 +672,30 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             # (Text still sends below if the image failed — image_sent would be False.)
             log.info("image_only mode: skipping text push")
         else:
+            # The LLM's [IMGn] markers only PICK the image (at most one, AI-preferred);
+            # the digest text itself always goes out as one intact message (markers
+            # stripped), so the multi-chunk resume via state_path stays safe (review
+            # finding #42). The chosen photo follows as its own trailing message —
+            # Telegram has no single-message text+image format that fits a full
+            # digest (caption cap is 1024 visible chars; user decision 2026-07-02).
             segments = resolve_citations(concise_processed, citation_map) if citation_map else []
-            if not any(analysis for _, analysis in segments):
-                # No citation actually landed (vision may be enabled with nothing to
-                # cite, or the LLM chose not to). state_path lets a multi-chunk push
-                # resume across a same-day catch-up instead of re-sending the first
-                # half (review finding #42) — only safe for this single-call path;
-                # the branch below sends multiple messages with no per-segment
-                # resume state (known limitation).
-                tg.send(concise_processed, parse_mode="HTML",
-                        state_path=archive_dir / ".text-push-state.json")
-                log.info("TG push complete")
+            cited_list = [analysis for _, analysis in segments if analysis]
+            if cited_list and cfg.img_relay.enabled and _push_rich_digest(tg, cfg, out.concise_md, citation_map):
+                log.info("TG push complete (single rich message, %d inline image(s))", len(cited_list))
             else:
-                image_count = 0
-                for text_chunk, analysis in segments:
-                    if text_chunk.strip():
-                        tg.send(text_chunk, parse_mode="HTML")
-                    if analysis:
-                        try:
-                            tg.send_media(analysis.candidate.local_path, "photo",
-                                           caption=_citation_caption(analysis))
-                            image_count += 1
-                        except Exception as e:
-                            log.warning("citation image send failed (%s): %s",
-                                        analysis.candidate.raw_ref, e)
-                log.info("TG push complete (%d cited image(s))", image_count)
+                full_text = "".join(chunk for chunk, _ in segments) if segments else concise_processed
+                tg.send(full_text, parse_mode="HTML",
+                        state_path=archive_dir / ".text-push-state.json")
+                sent = 0
+                for cited in cited_list:
+                    try:
+                        tg.send_media(cited.candidate.local_path, "photo",
+                                      caption=_citation_caption(cited))
+                        sent += 1
+                    except Exception as e:
+                        log.warning("citation image send failed (%s): %s",
+                                    cited.candidate.raw_ref, e)
+                log.info("TG push complete (%d/%d trailing cited image(s))", sent, len(cited_list))
     else:
         log.info("TG push skipped (--no-push)")
 

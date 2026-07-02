@@ -248,3 +248,40 @@
 ### 验证
 - 249 passed（新增 `test_vision.py` 6 例：`build_citation_block` 排序封顶/空输入；`resolve_citations` 合法标记切分/未知编号剔除不断段/无标记单段/local_path 缺失时丢弃标记；`test_run_daily.py` 新增 1 例端到端：LLM 输出里带 `[IMG1]`，断言 mock 的 httpx 层确实收到 1 次 `sendPhoto` + ≥1 次 `sendMessage`，且发出的文本里不残留 `[IMG1]` 字面量）。
 - 未做真实环境验证：LLM 是否真的会按 prompt 指示恰当地引用图片（而不是从不引用，或引用位置很怪），这是模型行为问题，单测测不出来，需要至少跑一次真实 `--no-push`（vision 开启）观察 concise 输出。
+
+### 修订（同日，三轮用户反馈后收敛为「全文一条 + 文末一图」）
+用户对逐段插图的两版实推效果均不满意（V1 按引用点切分文字+独立图片消息 → 太碎；V2 图+段落文字合并为 caption 单条 → 每图仍是一条消息），核心诉求收敛为「日报尽量一条消息、图片放文末、最多一张、优先 AI 相关」。
+
+- **单消息方案探索与否决**：(a) `sendPhoto` caption 上限 1024 可见字符，全文 ~2300 字符装不下；(b) 链接预览挂图（`link_preview_options.url`）**实测否决**——bot 先静默上传（`disable_notification`+发后即删）拿 `api.telegram.org/file/bot<token>/` 文件 URL 可公网拉取（200），但 Telegram 预览爬虫不渲染它（content-type 为 octet-stream；用户实看确认无图），且该 URL 内嵌 bot token 有转发泄漏风险；(c) 公共图床有公网 URL 但私群截图隐私不可接受。用户在「压缩日报到 1024 内图文真合一」与「保持信息量、接受两条消息」中选了后者。
+- **最终形态**：`resolve_citations` 保留（默认 `max_images=1`，AI/工具 section 标记优先于文档顺序，多余标记从文字里剥离），但不再按标记位置切分推送——全文永远合成**一条完整文字消息**（`state_path` 断点续传因此恢复），选中的那张图作为**紧随的独立图片消息**（caption 仅来源行）。`_send_cited_segments`（caption 合并逻辑）整体删除，e2e 断言改为「1 条 sendMessage 全文 + 1 条 sendPhoto 尾图」。
+- **prompt 同步**：`[IMGn]` 规则从「一条 bullet 最多 1 张」改为「全文最多 1 张，优先 AI/工具 相关截图」——标记位置只用于让 LLM 做语义挑图，不再影响排版。
+- 251 passed；实推验证最终形态（全文一条 + Claude Code 截图尾随，演示时手动指定 IMG4，因当日 concise 是旧 3 标记 prompt 生成、AI section 恰无标记）。
+
+### 再修订（同日晚，用户要求重查最新 Bot API 后彻底翻案：单条图文混排可行）
+用户不满足于两条消息，要求重读 https://core.telegram.org/bots/api。抓取实时文档发现线上已是 **Bot API 10.1**（训练数据只到 ~9.0），10.x 新增 **sendRichMessage**：单条消息 32768 字符 + 最多 50 个媒体块（RichBlockPhoto 等）图文混排，支持论坛 topic——此前「Telegram 没有图文混排消息类型」的结论在新 API 下不成立。
+
+- **媒体来源实测**（全部真调 API）：`attach://` ❌ `RICH_MESSAGE_PHOTO_URL_INVALID`；`file_id` ❌ 同错；`api.telegram.org/file/bot<token>/` URL ❌ `NO_MEDIA_FOUND`；纯 http/裸 IP ❌（访问日志为空，TG 根本不来抓）；**https + 正规域名公网 URL ✅**。TG 在 sendRichMessage 调用期间同步抓图并转存为自己的 PhotoSize（返回体可见），源 URL 发完即可销毁。
+- **中转基础设施选型**：用户提供 bwg（美国 VPS）与 R4S（OpenWrt 主路由）。R4S 国内家宽+磁盘满直接排除；bwg 443 被 sui 面板占用、补域名/证书要动代理基础设施。最终改用**用户自己 CF 账号的 Worker + KV**（`tg-img-relay.g00094522.workers.dev`，本机 wrangler OAuth 过期→refresh_token 手动续期→REST API 部署）：随机 48 位 hex key、TTL 自动过期、发后即删、不经任何第三方图床。生产凭证为用户手工创建的**最小权限 API Token**（仅 Account/Workers KV Storage/Edit，永久有效，存 `.env` 的 `CF_KV_API_TOKEN`）。
+- **代码落地**：新增 `img_relay.py`（KV upload/delete）、`TelegramSender.send_rich_message`（400 立即抛不重试→触发回退；429/传输错误按既有策略）、`run_daily._push_rich_digest`（用 RAW concise markdown 走 rich markdown 语法——不能用 post_process 后的 HTML 链接；`[IMGn]` 标记位置即图片插入位置，图文混排回归「引用点插图」的最初设想）、config 新增 `ImgRelay`。**任何一步失败都回退**到「全文一条+尾图一条」老路径，KV 清理放 finally。
+- 257 passed；生产代码路径实推验证成功（完整 07-01 日报 + 内嵌 Claude Code 截图，单条消息）。
+
+### Open Questions / 已知保留
+- rich 消息在旧版 Telegram 客户端上的降级表现未验证（用户当前客户端渲染正常）。
+- sendRichMessage 的 429/限流行为与普通消息是否同池未知，按同池假设处理。
+- CF Worker `tg-img-relay` 与 KV namespace 属账号级长期资源，如弃用此功能需手动删除（dashboard → Workers & Pages / KV）。
+
+### 三修（同日，放开 3 张 + 治「图糊」）
+用户反馈图片太糊，要求：放开到 3 张、vision 分 >0.8 才进日报、"用原图不压缩"。
+
+- **糊的根因不是压缩**：管线全程字节原样（wx extract → KV → TG 当场抓取），实测确认糊图源头是**微信缩略图**——本地库里没在设备上点开过的图只存 96×210 thumb，`wx extract` 只能拿到缓存有的东西（昨天演示那张就是 96×210/5KB，vision 还打了 0.9 分照样入选）。这是 wx CLI/微信缓存的边界，管线无法凭空拿到原图。
+- **修法 = 三重收紧**：(1) `analyze_media_candidates` 进 vision 前加 `_is_valid_image_file` 门槛（≥10KB 且 ≥300×300，PIL 检测，pillow 加入依赖）——缩略图不喂 vision 也进不了日报；(2) `min_include_score` 0.65→0.8；(3) `resolve_citations` 默认 `max_images` 1→3，prompt 同步"最多 3 张、确有印证才引用"。`_push_rich_digest` 改多图（每图独立 KV 上传、按 local_path 去重、finally 全量清理），回退路径改为遍历发送全部引用图。
+- **昨日数据回测**：6 张旧标准通过的图，新标准下 2 张 96×210 缩略图 + 2 张 0.70 分被挡，剩 2 张清晰大图（531×800、595×1280）——精准命中用户抱怨的糊图。
+- **TG 端展示说明**：富消息图片块由 TG 生成多档 PhotoSize 展示（与普通照片消息同机制，平台行为不可绕过）；源图 ≥1280 长边时点开看的最大档观感正常。真"原件文件"只能走 sendDocument 文件卡片，那就不是内嵌图了，不采用。
+- 258 passed（重写 vision 过滤 2 例：缩略图/低分排除；cap 改 3 例；AI 优先测试显式 max_images=1）。
+
+### 四修（同日深夜，实跑暴露 wxgf 坏文件 + TG 图偏好 + 端到端全通）
+- **实跑第一轮富消息 400 失败**（`RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`）：LLM 引了 3 张图，其中 `37678.jpg` 文件头是 `wxgf`——**微信私有格式**，`wx extract` 原样导出但套 .jpg 名，PIL/Telegram 均无法解码（连 sendPhoto 都 3 连 400）。它能混进引用池是 `_is_valid_image_file` 的历史宽容逻辑：PIL 打不开→跳过检查放行（pillow 非依赖时代的降级路径）。回退保险按设计工作：文字照常送达 + 2/3 张好图独立发出，日报未丢。
+- **修复**：pillow 已是硬依赖，`_is_valid_image_file` 改为 PIL 解析失败→直接判无效（`undecodable image`），wxgf/损坏文件进不了 vision 更进不了引用。
+- **TG 图偏好**（用户要求）：`build_citation_block` 排序改为 `(platform=="Telegram", value_score)` 降序——TG 图（≥1280 原图质量）严格优先于微信图进入引用池；引用指令同步加"同等相关时优先 Telegram 来源"。
+- **修复后重跑 07-01 全链路真推成功**：`vision analyses included: 2 (citable: 2)`（wxgf+缩略图全被门槛挡掉，恰余两张电丸清晰大图）→ `TG push complete (single rich message, 2 inline image(s))`，单条图文混排，无回退。附带收益：vision 阶段 17min→3min（缩略图不再空耗视觉分析）。
+- 259 passed（新增 TG 偏好排序 1 例）。

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs BOTH launchd agents — the daily report (com.chat-daily-tg.agent) and the
-# 2-hourly channel forwarder (com.chat-daily-tg.channels). Both plists call their
-# guarded wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
+# Installs the launchd agents — the daily report (com.chat-daily-tg.agent), the
+# 2-hourly channel forwarder (com.chat-daily-tg.channels), and the 6-hourly
+# Bilibili digest (com.chat-daily-tg.bilibili). All plists call their guarded
+# wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
 #
 # Secrets (DEEPSEEK_API_KEY / TG_BOT_TOKEN / TG_CHAT_ID / GOOGLE_API_KEY / VISION_API_KEY)
 # live in ~/chat-daily/.env and are loaded by run_daily at runtime — never baked into
@@ -51,6 +52,7 @@ PY
 
 install_label "com.chat-daily-tg.agent"
 install_label "com.chat-daily-tg.channels"
+install_label "com.chat-daily-tg.bilibili"
 
 # grep with || true so missing match doesn't abort the script
 launchctl list | grep chat-daily-tg || true

@@ -21,6 +21,9 @@ HOT_LEADS_LATEST = HOT_LEADS_DIR / "latest.md"
 ARCHIVE_DIR = DATA_DIR / "archive"
 LOG_DIR = DATA_DIR / "logs"
 
+# Bilibili digest dedup (raw_seen.SeenStore, keys "bilibili:<bvid>").
+BILIBILI_SEEN_PATH = DATA_DIR / "bilibili_seen.txt"
+
 
 def migrate_legacy_config_if_needed(path: Path = CONFIG_PATH) -> None:
     """Copy the old wx-daily config on first chat-daily run, without deleting old data."""

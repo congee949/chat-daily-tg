@@ -94,9 +94,47 @@ class TelegramSource(BaseModel):
     sync_before_export: bool = True
 
 
+class BilibiliUp(BaseModel):
+    """One whitelisted UP. Matching is by uid ONLY — Bilibili display names are
+    mutable, so `name` is a human-readable annotation, never a match key."""
+    uid: int
+    name: str | None = None
+
+
+class BilibiliOpencli(BaseModel):
+    profile: str | None = None       # opencli --profile; None = default profile
+    timeout_seconds: float = 60.0    # per opencli subprocess call
+
+
+class BilibiliFetch(BaseModel):
+    whitelist: list[BilibiliUp] = Field(default_factory=list)
+    blacklist: list[BilibiliUp] = Field(default_factory=list)
+    max_per_digest: int = 30
+    # Wide window on purpose: bvid dedup makes overlap free, and a failed/slept-through
+    # run is caught up by the next one instead of losing videos (design doc §12).
+    lookback_hours: int = 48
+    per_up_limit: int = 8            # user-videos --limit per whitelisted UP
+
+
+class BilibiliDigest(BaseModel):
+    topic: str = "bilibili"          # forum-topic key in ~/qwenproxy/.tg-notify-targets.json
+    summary_enabled: bool = True
+    cover_enabled: bool = True
+    link_enabled: bool = True        # 在 B 站观看 inline-keyboard button under each card
+    card_delay_seconds: float = 1.0  # pause between cards (TG rate limits)
+
+
+class BilibiliSource(BaseModel):
+    enabled: bool = False
+    opencli: BilibiliOpencli = Field(default_factory=BilibiliOpencli)
+    fetch: BilibiliFetch = Field(default_factory=BilibiliFetch)
+    digest: BilibiliDigest = Field(default_factory=BilibiliDigest)
+
+
 class Sources(BaseModel):
     wechat: WechatSource = Field(default_factory=WechatSource)
     telegram: TelegramSource = Field(default_factory=TelegramSource)
+    bilibili: BilibiliSource = Field(default_factory=BilibiliSource)
 
 
 class Retry(BaseModel):
@@ -151,8 +189,9 @@ class Config(BaseModel):
         has_telegram = self.sources.telegram.enabled and bool(
             self.sources.telegram.chats or self.sources.telegram.raw_channels
         )
-        if not has_wechat and not has_telegram:
-            raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, or sources.telegram.raw_channels")
+        has_bilibili = self.sources.bilibili.enabled and bool(self.sources.bilibili.fetch.whitelist)
+        if not has_wechat and not has_telegram and not has_bilibili:
+            raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, sources.telegram.raw_channels, or sources.bilibili")
         return self
 
     def override_summary_model(self, model_name: str) -> None:

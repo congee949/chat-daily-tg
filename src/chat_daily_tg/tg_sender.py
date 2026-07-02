@@ -275,13 +275,15 @@ class TelegramSender:
                 pass
         return ids
 
-    def send_card(self, text_html: str, *, link: str | None = None) -> list[int]:
+    def send_card(self, text_html: str, *, link: str | None = None,
+                  button: tuple[str, str] | None = None) -> list[int]:
         """Send a verbatim channel message as an X-Monitor-style card.
 
         `text_html` is already-built Telegram HTML (callers escape their own content).
         For a public channel `link` (a t.me/<username>/<id> URL) enables Telegram's
         rich link-preview card; pass link=None for a private channel to send plain text
-        with no preview.
+        with no preview. `button` is an optional (text, url) inline-keyboard URL button
+        attached to the last chunk.
 
         Long messages are split on newline boundaries; only the LAST chunk carries the
         preview so the card renders once at the end. On a 400 (usually an HTML parse
@@ -294,6 +296,10 @@ class TelegramSender:
         for i, chunk in enumerate(chunks):
             is_last = i == len(chunks) - 1
             payload: dict = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
+            if button is not None and is_last:
+                payload["reply_markup"] = {"inline_keyboard": [[
+                    {"text": button[0], "url": button[1]},
+                ]]}
             if self.message_thread_id is not None:
                 payload["message_thread_id"] = self.message_thread_id
             if link and is_last:
@@ -346,8 +352,12 @@ class TelegramSender:
         assert last_exc is not None
         raise last_exc
 
-    def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None) -> int:
+    def send_photo(self, photo_path, caption: str = "", parse_mode: str | None = None,
+                   button: tuple[str, str] | None = None) -> int:
         """Send a photo via sendPhoto. Caption is hard-capped at Telegram's 1024 limit.
+
+        `button` is an optional (text, url) pair rendered as a single inline-keyboard
+        URL button under the card — a bigger tap target than an <a> link in the caption.
 
         Mirrors _send_one's retry/backoff. Used by the optional daily-card image output;
         callers wrap this in try/except and fall back to the text send() on any failure.
@@ -363,6 +373,11 @@ class TelegramSender:
                         data = {"chat_id": self.chat_id}
                         if self.message_thread_id is not None:
                             data["message_thread_id"] = self.message_thread_id
+                        if button is not None:
+                            # multipart form field — reply_markup must be JSON-encoded
+                            data["reply_markup"] = json.dumps({"inline_keyboard": [[
+                                {"text": button[0], "url": button[1]},
+                            ]]})
                         if caption:
                             data["caption"] = caption[:1024]
                             if parse_mode is not None:

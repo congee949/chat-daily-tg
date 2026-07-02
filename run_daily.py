@@ -246,6 +246,74 @@ def run_channels(no_push: bool = False) -> int:
         return 1
 
 
+def run_bilibili(no_push: bool = False) -> int:
+    """Entry point for the 6-hourly Bilibili digest (--bilibili-only). Polls
+    whitelisted UPs via opencli, pushes new-video cards to the bilibili forum
+    topic. Idempotent via the bvid SeenStore (marked seen only after a
+    successful send); a failed/missed run is caught up by the next one thanks
+    to the 48h lookback window."""
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"bilibili-{tag}"))
+    try:
+        from chat_daily_tg.bilibili_digest import build_summarizer, push_digest
+        from chat_daily_tg.bilibili_fetcher import (
+            BridgeUnavailableError, fetch_new_videos, probe_bridge,
+        )
+        from chat_daily_tg.paths import BILIBILI_SEEN_PATH
+        from chat_daily_tg.raw_seen import SeenStore
+        from chat_daily_tg.tg_sender import TelegramSender
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        src = cfg.sources.bilibili
+        if not src.enabled or not src.fetch.whitelist:
+            log.info("bilibili source disabled or whitelist empty, nothing to do")
+            return 0
+        try:
+            probe_bridge()
+        except BridgeUnavailableError as e:
+            # Common launchd cold-environment failure (Chrome/daemon not up) —
+            # distinct message from a login expiry. The 48h lookback catches up
+            # next run, so exit non-zero for visibility but nothing is lost.
+            log.error("opencli bridge unavailable: %s", e)
+            notify_failure("chat-daily-tg B站桥接不可用",
+                           f"opencli daemon/Chrome bridge 不在线，本轮 digest 跳过（下轮自动追回）。{e}")
+            return 1
+
+        seen = SeenStore(BILIBILI_SEEN_PATH)
+        videos = fetch_new_videos(
+            src, seen,
+            retry_max_attempts=cfg.retry.max_attempts,
+            retry_backoff_seconds=cfg.retry.backoff_seconds,
+        )
+        log.info("bilibili new videos: %d", len(videos))
+        if not videos:
+            return 0
+
+        sender = None
+        if not no_push:
+            dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+            chat_id, thread_id = resolve_tg_target(src.digest.topic, dm_chat_id)
+            sender = TelegramSender(
+                bot_token=os.environ[cfg.telegram.bot_token_env],
+                chat_id=chat_id, message_thread_id=thread_id,
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+            )
+            log.info("bilibili digest target: %s/thread=%s", chat_id, thread_id)
+        workdir = prepare_archive_day(tag)
+        sent = push_digest(videos, sender=sender, seen=seen, cfg=cfg,
+                           summarizer=build_summarizer(cfg), workdir=workdir,
+                           no_push=no_push)
+        log.info("✓ bilibili digest complete: %d/%d cards sent (no_push=%s)",
+                 sent, len(videos), no_push)
+        return 0
+    except Exception as e:
+        log.exception("bilibili digest failed: %s", e)
+        notify_failure("chat-daily-tg B站digest失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
 _TIME_RE = re.compile(r"\d{2}:\d{2}")
 
 
@@ -614,8 +682,12 @@ if __name__ == "__main__":
                    help="Exit 0 immediately if this date's run already completed (catch-up schedule)")
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
+    p.add_argument("--bilibili-only", action="store_true",
+                   help="Run only the 6-hourly Bilibili subscription digest (no summary)")
     args = p.parse_args()
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))
+    if args.bilibili_only:
+        sys.exit(run_bilibili(no_push=args.no_push))
     sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push,
                   skip_if_done=args.skip_if_done))

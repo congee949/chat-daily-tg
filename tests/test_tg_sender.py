@@ -1,4 +1,5 @@
 from pytest_httpx import HTTPXMock
+import json
 import pytest
 import httpx
 from chat_daily_tg.tg_sender import (
@@ -268,6 +269,39 @@ def test_send_photo_omits_empty_caption(httpx_mock: HTTPXMock, tmp_path):
     body = httpx_mock.get_request().read().decode("utf-8", "replace")
     assert "12345" in body
     assert "caption" not in body   # pure image, no caption field
+
+
+def test_send_photo_button_becomes_inline_keyboard(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 3}},
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    s.send_photo(png, caption="hi", button=("看视频", "https://example.com/v"))
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "reply_markup" in body and "inline_keyboard" in body
+    assert "https://example.com/v" in body
+
+
+def test_send_card_button_on_last_chunk_only(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 1}},
+        is_reusable=True,
+    )
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+    long_text = "\n".join(["L" * 100] * 60)  # forces >1 chunk at limit 3900
+    s.send_card(long_text, button=("打开", "https://example.com/x"))
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) > 1
+    payloads = [json.loads(r.read()) for r in reqs]
+    assert all("reply_markup" not in p for p in payloads[:-1])
+    kb = payloads[-1]["reply_markup"]["inline_keyboard"]
+    assert kb == [[{"text": "打开", "url": "https://example.com/x"}]]
 
 
 def test_send_photo_truncates_caption(httpx_mock: HTTPXMock, tmp_path):

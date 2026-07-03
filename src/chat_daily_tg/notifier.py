@@ -28,11 +28,16 @@ def notify_failure(title: str, message: str) -> None:
 
 
 def _notify_macos(title: str, message: str) -> None:
-    """Show a macOS notification via osascript. No-ops if osascript missing."""
+    """Show a macOS notification via osascript. No-ops if osascript missing
+    (e.g. running the bilibili digest on the r4s Linux box) — the Telegram
+    alert branch must still fire, so a missing binary can't be fatal."""
     safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
     safe_msg = message.replace("\\", "\\\\").replace('"', '\\"')
     script = f'display notification "{safe_msg}" with title "{safe_title}"'
-    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    try:
+        subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    except OSError:
+        pass
 
 
 def _notify_telegram(text: str) -> None:

@@ -117,8 +117,6 @@ def card_caption(video: BiliVideo, summary: str | None) -> str:
     meta = [escape_html(video.author)]
     if video.duration:
         meta.append(escape_html(video.duration))
-    if video.publish_time:
-        meta.append(video.publish_time.strftime("%m-%d %H:%M"))
     lines = [f"<b>{escape_html(video.title)}</b>", "👤 " + " · ".join(meta)]
     if summary:
         lines.append(f"📝 {escape_html(summary)}")

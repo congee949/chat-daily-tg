@@ -442,8 +442,21 @@ step 1 API 直连（已实现，§8），step 2 视稳定性迁 r4s。以下为 
       **切换日 Mac 侧先 unload launchd**，seen 文件拷过去做种）
 - [ ] 观察 medialist 接口风控表现；若收紧，切回 Mac `transport: opencli` 过渡
 
-### 18.4 结论
+### 18.4 结论与执行记录（2026-07-03 已迁移）
 
-step 1（API 直连）已消除桌面依赖，Mac 上已无「开关网页」问题——**迁移紧迫性
-因此下降**，r4s 迁移的净收益只剩「Mac 关机/休眠时数字报不断更」。建议先让 api
-transport 在 Mac 稳定运行一周，确有需求再按 18.3 清单迁移。
+用户选定出口方案 2 的变体：**bwg 上跑 tinyproxy（EPEL 一次性启用安装），
+绑定 tailscale IP `100.87.113.14:8888`、ACL 只放行 100.64.0.0/10、仅允许
+CONNECT 443**——tailscale 本身就是加密隧道，无需 ssh 转发守护。实测
+r4s→bwg→Telegram 302 / Gemini 可达。
+
+迁移已按 18.3 清单执行完毕：
+- 依赖：pip3 --user（清华镜像；musl wheel 全命中）+ tzdata
+- 代码：git archive HEAD → `/root/chat-daily-tg`；notifier 补了 Linux 无
+  osascript 的兼容（e2c656c）
+- 摘要：r4s 侧 config 的 models.vision 改为 Gemini 多模态直连（经 bwg 出口）
+- cron：`30 * * * *` 走 `scripts/run_bilibili_r4s.sh`（flock 防重叠、
+  TZ=CST-8——musl 下命名时区静默回退 UTC 会重现 8h 偏差，必须用 POSIX 格式）
+- 切换顺序：Mac launchd unload → seen 文件同步 → r4s cron 启用 → 受控真发
+  验证（1/1 卡片 8s，含 Gemini 摘要与封面）
+- Mac 侧 plist 保留未删，installer 中注释掉 bilibili label 防双跑；回滚 =
+  r4s `crontab` 移除该行 + Mac `launchctl load`

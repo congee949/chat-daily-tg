@@ -52,7 +52,10 @@ PY
 
 install_label "com.chat-daily-tg.agent"
 install_label "com.chat-daily-tg.channels"
-install_label "com.chat-daily-tg.bilibili"
+# 2026-07-03: B站 digest 已迁移到 r4s cron（scripts/run_bilibili_r4s.sh，经
+# bwg tinyproxy 出口）。Mac 侧 plist 保留但不安装，防止双跑重复推送；
+# 需要切回 Mac 时取消下行注释并 unload r4s cron。
+# install_label "com.chat-daily-tg.bilibili"
 
 # grep with || true so missing match doesn't abort the script
 launchctl list | grep chat-daily-tg || true

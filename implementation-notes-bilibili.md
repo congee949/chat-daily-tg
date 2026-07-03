@@ -39,3 +39,11 @@
 
 - **冷启动未实测**（§14.6）：Chrome 完全退出状态下 `--window background` 能否工作未验证（不便中断在用的 Chrome）。`probe_bridge()`（`opencli doctor` 探活）+ 48h lookback 已兜底：bridge 不在时告警退出、下轮追回。建议某次 Chrome 关闭时手动跑一次 `--bilibili-only --no-push` 确认。
 - 首轮实测 48h 只有 5 条新视频，`max_per_digest: 30` 上限宽松；如后续觉得吵，调小该值或收缩白名单即可。
+
+## r4s 迁移（2026-07-03，用户选定 bwg tailscale 隧道方案）
+
+- **出口**：bwg 装 tinyproxy（EPEL `--enablerepo` 一次性启用，repo 保持 disabled），绑 tailscale IP `100.87.113.14:8888`，ACL 100.64.0.0/10，仅 CONNECT 443。tailscale 即隧道，无 ssh 转发守护。
+- **musl 两坑**：无 venv 模块（pip3 --user 替代）；命名时区静默回退 UTC（cron 内 `TZ=CST-8` POSIX 格式，否则 8h 偏差复现）。pypi 直连超时，走清华镜像。
+- **摘要分叉**：r4s config 的 models.vision → Gemini 多模态直连；Mac config 保持 CLIProxyAPI（用户 7/2 已从 qwenproxy 切过去），两份 config 有意不同步。
+- **切换顺序**：Mac launchd unload → seen 同步 → r4s cron（flock 防 cron 重叠——launchd 有同 label 防重入而 cron 没有）→ 受控真发验证 1/1（8s，Gemini 摘要 + bwg 推送 + 封面直连）。
+- **防双跑**：installer 注释掉 bilibili label；回滚路径写入设计文档 §18.4。

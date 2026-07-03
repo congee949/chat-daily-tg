@@ -84,9 +84,14 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
 
 
 def download_cover(url: str, dest: Path) -> Path | None:
-    """Best-effort cover download; None on any failure (card falls back to text)."""
+    """Best-effort cover download; None on any failure (card falls back to text).
+
+    trust_env=False: hdslb.com is Bilibili CDN — same direct-connection invariant
+    as the fetcher (the guard's HTTPS_PROXY would route it via an overseas exit)."""
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+        with httpx.Client(timeout=30.0, follow_redirects=True, trust_env=False,
+                          headers={"User-Agent": "Mozilla/5.0",
+                                   "Referer": "https://www.bilibili.com/"}) as c:
             r = c.get(url)
             r.raise_for_status()
         dest.parent.mkdir(parents=True, exist_ok=True)

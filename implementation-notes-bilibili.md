@@ -12,6 +12,19 @@
 
 - **观看链接改为 inline-keyboard 按钮**（2026-07-02 用户反馈）：caption 里不再放 🔗 文字链接，改为卡片下方「▶️ 在 B 站观看」URL 按钮（`TelegramSender.send_photo/send_card` 新增 `button=(text, url)` 参数，send_card 只挂最后一个 chunk）。`link_enabled` 语义随之变为控制按钮开关。
 
+- **API 直连 transport（2026-07-02 晚，建议路径 step 1）**：为消除「每小时开关 Chrome 页面」的桌面依赖，新增 `transport: api`（默认）——medialist + view 两个接口实测零 cookie/零 WBI 签名（arc/search 会 -352 风控，故弃用），单 UP 一次调用拿齐全部字段，快 ~15 倍。关键约束：B站 httpx 请求 `trust_env=False`，绝不能走 guard 的 HTTPS_PROXY（海外出口 = 风控）。opencli 保留为 fallback。双端一致性已实测（相同 bvid 集合、字段一致）。
+- **顺带修正 8 小时时区偏差**：对比发现 opencli `publish_time` 字符串是 UTC，旧卡片展示的发布时间一直偏早 8 小时；api 模式用 unix `pubtime` 转本地时间，正确。
+- **可靠性收紧**：两条 transport 均新增「全部 UP 失败 → raise 告警」，防止 transport 挂掉后无限期静默零推送。
+
+- **对抗式审查修复批（2026-07-03）**：多 Agent 审查（correctness / failure-modes / concurrency 三路完成；verify 阶段与 consistency 路撞订阅额度，findings 由主循环逐条对照代码人工核实）。已修：
+  - P1 解析循环逐条隔离——单条脏数据（字符串 pubtime/毫秒时间戳/非法 duration）此前会击穿整轮抓取并引发每小时告警风暴，现单条跳过（`_parse_media_item` + per-item try）
+  - P1 `cnt_info.play` int 收敛——脏值透传会在 `card_caption` 的 `f"{view:,}"` 炸掉整轮推送（caption 构建在 per-card try 之外）
+  - P1 `download_cover` 补 `trust_env=False`——hdslb CDN 与 fetcher 同属"B站请求直连"不变量
+  - P2 -352 风控止损——IP 级判决，首个 UP 命中即中止本轮（降频不绕过），不再对已风控 IP 连打 22 次
+  - P2 connect 级瞬时抖动重试（`httpx.HTTPTransport(retries=2)`），防误触 all-fail 告警
+  - P2 联合投稿去重——同一 bvid 出现在多个白名单 UP 空间时一轮只出一张卡（`_finalize` 内去重）
+  - 记录不修（P2，与现有管道行为一致）：持续故障时告警无冷却（每小时一条）；opencli 路径 detail 阶段全灭不告警（已是 fallback）；手动运行与 launchd 并发无跨进程锁（launchd 同 label 不自我重叠）
+
 ## Deviations
 
 - **Tier 2 完整视频摘要未实现**（spec §8 列为 P1 子项）：封面+标题+简介的一句话摘要实测已够决策用；下载视频+大文件多模态成本高，留作未来扩展。相应地 `summary_strategy` / `video_summary_up_whitelist` / `dynamic_type` / `up_source` / `cron` / `card_style` 等配置字段未落地——按最小 schema 实现。

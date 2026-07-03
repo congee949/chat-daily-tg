@@ -165,9 +165,24 @@ append-only 逐行 key 存储），key 形如 `bilibili:<bvid>`，路径新增
 - `src/chat_daily_tg/raw_seen.py`：`SeenStore` 做 bvid 去重（见 §12）
 - `scripts/guard_common.sh`：guardian 包装
 
-## 8. B 站数据获取策略（使用 opencli）
+## 8. B 站数据获取策略（双 transport，默认 API 直连）
 
-本方案优先使用本地已安装的 `opencli` 工具获取 B 站数据。`opencli` 会管理 B 站登录态和 Chrome session，无需手动维护 Cookie。
+`sources.bilibili.transport` 二选一（2026-07-02 晚新增 api 模式并设为默认）：
+
+- **`api`（默认）**：httpx 直连 B站 Web API。实测确认 medialist 接口
+  （`x/v2/medialist/resource/list?type=1&biz_id=<mid>`）**零 cookie、零 WBI
+  签名**即返回单 UP 最新视频的全部所需字段（bvid/标题/封面/精确 unix 发布时
+  间/秒级时长/mid/播放数）；简介对新视频经同样零 cookie 的 view API 补齐。
+  无浏览器、无登录态维护，可在 Mac 或 r4s 无头运行；实测比 opencli 路径快
+  ~15 倍（3 UP：4s vs 59s）。注意：**B站请求必须 `trust_env=False` 直连**——
+  guard 导出的 HTTPS_PROXY 会把请求送到海外出口，正好触发 -352 风控（实测
+  `x/space/wbi/arc/search` 即使带 WBI 签名 + buvid 也 -352，必须登录态；
+  medialist 无此问题，这是选它的原因）。
+- **`opencli`（fallback）**：原 Chrome-bridge 路径，medialist 未文档化、将来
+  收紧时可一键切回。`opencli` 管理 B 站登录态和 Chrome session。
+
+两条路径共享 uid 白名单、SeenStore 去重、lookback 过滤、排序与 digest 上限；
+任一路径**全部 UP 失败会 raise 告警**（transport 挂掉不允许静默零推送）。
 
 可用命令：
 
@@ -383,3 +398,52 @@ key 形如 `bilibili:<bvid>`。
 ## 17. 结论
 
 建议在 ChatDaily 内新增 `sources.bilibili` 模块，第一阶段即采用 **uid 白名单模式**（Tier 1 共 23 个 UP 主，名单在运行时文件），每小时推送一次富媒体 + AI 摘要 digest 到 Telegram 专用 topic。该方案复用现有 infra（TelegramSender、SeenStore、guard 脚本、launchd），实现成本最低，且后续可按 digest 反馈逐步调整白名单。
+
+## 18. r4s 迁移评估（2026-07-02 实测）
+
+背景：每小时经 opencli 开关 Chrome 页面在 Mac 上不优雅。建议路径分两步：
+step 1 API 直连（已实现，§8），step 2 视稳定性迁 r4s。以下为 step 2 的实测评估。
+
+### 18.1 环境实测结果
+
+| 检查项 | r4s (FriendlyWrt, aarch64) | 结论 |
+|---|---|---|
+| Python | 3.11.14，pip3/opkg 可用，stdlib(ssl/sqlite3/urllib) ✓ | ✓ |
+| cron / curl | ✓ | ✓ |
+| 内存 / 磁盘 | 3.3G free / 根分区 668M free | ✓（磁盘紧但够） |
+| B站 API 直连 | 200，0.19s（国内家宽 IP，风控最友好） | ✓ |
+| Telegram 出口 | 直连不通（预期）；本机 clash :7890 监听中但**拒绝代理连接**（allow-lan/bind 配置限制，未擅自改动） | ✗ 待解 |
+| Gemini 出口 | 同上（generativelanguage 需代理） | ✗ 待解 |
+| 备选出口 | bwg 与 r4s 同 tailnet；bwg→api.telegram.org 直连 0.4s ✓ | 可作跳板 |
+
+（bwg 承担 B站抓取不可行：海外机房 IP 触发 -352 风控，实测 arc/search 即是此错误码。）
+
+### 18.2 Go / No-Go
+
+**条件性 Go**：唯一 blocker 是 r4s 的出海通道，二选一解决即可迁移：
+
+1. **修 clash 配置**（推荐，5 分钟）：`allow-lan: true` / `bind-address: '*'`
+   使 127.0.0.1:7890 可用——需用户自行修改路由器配置（守则：不擅自动用户代理配置）。
+2. **bwg 隧道**：r4s 上 `ssh -NL 7893:127.0.0.1:... bwg` 常驻（systemd/procd 守护）
+   或 bwg 起 socks 绑 tailscale0，TG/Gemini 流量经 tailnet 走 bwg 出口。
+
+### 18.3 迁移清单（出口解决后执行）
+
+- [ ] 摘要切换：`models.vision` 由 qwenproxy(localhost:3000) 改为 Gemini 多模态
+      （已实测可行：gemini-3.5-flash OpenAI 兼容端点 + base64 封面，5.6s/条，
+      需调大 max_tokens 或关 thinking 防截断）——去掉最后一个 Mac 本机依赖
+- [ ] r4s 部署：`pip3 install httpx pydantic pyyaml`（或打包 stdlib-only 精简版）；
+      同步 `~/chat-daily/{config.yaml,.env}`、`bilibili_seen.txt`、
+      `~/qwenproxy/.tg-notify-targets.json` 路由表
+- [ ] cron：`30 * * * *`（对齐现 launchd :30 节奏）；HTTPS_PROXY 指向选定出口，
+      B站请求已 trust_env=False 不受影响
+- [ ] 告警通道：notify_failure 的 osascript 分支在 r4s 无效，TG 告警分支已够用
+- [ ] 双跑一周：r4s cron 与 Mac launchd 并行（SeenStore 各自独立会重复推送——
+      **切换日 Mac 侧先 unload launchd**，seen 文件拷过去做种）
+- [ ] 观察 medialist 接口风控表现；若收紧，切回 Mac `transport: opencli` 过渡
+
+### 18.4 结论
+
+step 1（API 直连）已消除桌面依赖，Mac 上已无「开关网页」问题——**迁移紧迫性
+因此下降**，r4s 迁移的净收益只剩「Mac 关机/休眠时数字报不断更」。建议先让 api
+transport 在 Mac 稳定运行一周，确有需求再按 18.3 清单迁移。

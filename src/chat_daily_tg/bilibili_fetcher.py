@@ -1,18 +1,26 @@
-"""Fetch new videos from whitelisted Bilibili UPs via the local opencli CLI.
+"""Fetch new videos from whitelisted Bilibili UPs.
 
-Data path (deviation from the design doc's original feed-based plan): the
-`opencli bilibili feed` output carries only display names — no uid, no bvid
-field, no cover, no precise timestamp — so uid whitelisting cannot be applied
-to it. Instead each whitelisted UP is polled with `user-videos <uid>` (uid is
-known from the query itself), then every candidate bvid not yet in the
-SeenStore gets one `video <bvid>` detail call for cover / duration /
-description / precise publish time. 23 UPs × 4 runs/day is well within the
-low-frequency automation guardrail.
+Two transports, selected by `sources.bilibili.transport`:
 
-opencli depends on a local daemon + Chrome browser bridge, which may be absent
-under launchd (cold boot, Chrome quit) — probe_bridge() distinguishes that
-failure mode from a login expiry so the alert message tells the user the right
-fix.
+- "api" (default): direct Bilibili Web API over httpx. The medialist endpoint
+  (`x/v2/medialist/resource/list`, biz_id=<mid>) returns a UP's latest videos
+  with cover / precise unix pubtime / duration / stats and — verified
+  2026-07-02 — needs NO cookies and NO WBI signing (unlike `x/space/wbi/
+  arc/search`, which 风控-352s without a logged-in session). Description is
+  filled per NEW video from the equally cookie-free view API. No browser, no
+  login state, runs anywhere (Mac / r4s).
+- "opencli": the original local-Chrome-bridge path, kept as fallback should
+  the undocumented medialist endpoint ever tighten. Each whitelisted UP is
+  polled with `user-videos <uid>`, new bvids enriched via `video <bvid>`.
+  Depends on a local daemon + Chrome, which may be absent under launchd —
+  probe_bridge() distinguishes that from a login expiry.
+
+Both transports poll by uid (display names are mutable) and share dedup,
+lookback filtering, sorting, and the digest cap.
+
+IMPORTANT: API-transport requests are made with trust_env=False. The launchd
+guard exports HTTPS_PROXY for the Telegram push; letting Bilibili calls ride
+that proxy means an overseas exit IP — exactly what trips 风控.
 """
 from __future__ import annotations
 
@@ -24,6 +32,8 @@ import re
 import subprocess
 import time
 
+import httpx
+
 from chat_daily_tg.config import BilibiliSource
 from chat_daily_tg.raw_seen import SeenStore
 
@@ -33,12 +43,21 @@ _BVID_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
 _AUTHOR_MID_RE = re.compile(r"^(.*?)\s*\(mid:\s*(\d+)\)\s*$")
 
 
-class OpencliError(RuntimeError):
+class FetchError(RuntimeError):
+    """A transport-level fetch failure (also raised when EVERY whitelisted UP
+    fails in one run — a dead transport must alert, not silently push zero)."""
+
+
+class OpencliError(FetchError):
     """opencli subprocess failed after retries (timeout, non-zero exit, bad JSON)."""
 
 
 class BridgeUnavailableError(OpencliError):
     """opencli daemon / Chrome bridge is down — not a login problem."""
+
+
+class BiliApiError(FetchError):
+    """Bilibili Web API returned non-zero code (e.g. -352 风控) or bad payload."""
 
 
 @dataclass(frozen=True)
@@ -134,6 +153,131 @@ def _duration_human(s: str) -> str | None:
     return s.split("(")[0].strip() or None if s else None
 
 
+# ---------------------------------------------------------------------------
+# API transport (default): direct Bilibili Web API, no cookies / signing.
+
+_API_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    "Referer": "https://www.bilibili.com/",
+}
+_MEDIALIST_URL = "https://api.bilibili.com/x/v2/medialist/resource/list"
+_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
+# Pause between per-UP list calls: 23 UPs hourly is already low-frequency, the
+# spacing just avoids a burst profile (触发限流降频，不绕过).
+_API_CALL_SPACING_SECONDS = 1.0
+
+
+def _fmt_duration(seconds: int) -> str | None:
+    if seconds <= 0:
+        return None
+    m, s = divmod(seconds, 60)
+    if m >= 60:
+        h, m = divmod(m, 60)
+        return f"{h}h{m}m{s}s"
+    return f"{m}m{s}s"
+
+
+def _api_get(client: httpx.Client, url: str, params: dict) -> dict:
+    r = client.get(url, params=params)
+    r.raise_for_status()
+    d = r.json()
+    if d.get("code") != 0:
+        raise BiliApiError(f"bilibili api code={d.get('code')} msg={str(d.get('message'))[:80]}")
+    return d.get("data") or {}
+
+
+def _fetch_via_api(src: BilibiliSource, seen: SeenStore, *, now: datetime) -> list[BiliVideo]:
+    """One medialist call per whitelisted UP (precise pubtime → exact lookback
+    filtering, no day-granularity pass), then one view call per NEW video for
+    the description. A single UP failing only logs; ALL UPs failing raises."""
+    cutoff = now - timedelta(hours=src.fetch.lookback_hours)
+    blacklist_uids = {u.uid for u in src.fetch.blacklist}
+    ups = [u for u in src.fetch.whitelist if u.uid not in blacklist_uids]
+    videos: list[BiliVideo] = []
+    failures = 0
+    # trust_env=False: MUST NOT ride the guard's HTTPS_PROXY (overseas exit → 风控).
+    # HTTPTransport(retries=2) retries CONNECT-level blips so one transient network
+    # hiccup doesn't escalate into the all-fail alarm.
+    with httpx.Client(timeout=src.opencli.timeout_seconds, headers=_API_HEADERS,
+                      trust_env=False,
+                      transport=httpx.HTTPTransport(retries=2)) as client:
+        for i, up in enumerate(ups):
+            if i:
+                time.sleep(_API_CALL_SPACING_SECONDS)
+            try:
+                data = _api_get(client, _MEDIALIST_URL, params={
+                    "mobi_app": "web", "type": 1, "biz_id": up.uid, "otype": 2,
+                    "ps": src.fetch.per_up_limit, "direction": "false",
+                    "desc": "true", "sort_field": 1, "tid": 0, "with_current": "false",
+                })
+            except BiliApiError as e:
+                if "code=-352" in str(e):
+                    # 风控 is an IP-level verdict, not per-UP state — hammering the
+                    # remaining UPs would keep pressuring a flagged IP (降频不绕过).
+                    raise BiliApiError(f"-352 风控 on uid={up.uid}, aborting run: {e}") from e
+                log.warning("medialist failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+                failures += 1
+                continue
+            except Exception as e:
+                log.warning("medialist failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+                failures += 1
+                continue
+            for m in data.get("media_list") or []:
+                # Per-item isolation: one dirty entry (string pubtime, ms-scale
+                # timestamp, bad duration) must not kill the whole run.
+                try:
+                    video = _parse_media_item(m, up, seen, cutoff, client)
+                except Exception as e:
+                    log.warning("bad medialist item for uid=%s skipped: %s", up.uid, e)
+                    continue
+                if video is not None:
+                    videos.append(video)
+    if ups and failures == len(ups):
+        raise BiliApiError(f"all {len(ups)} UP medialist fetches failed — transport dead?")
+    return videos
+
+
+def _as_int(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_media_item(m: dict, up, seen: SeenStore, cutoff: datetime,
+                      client: httpx.Client) -> BiliVideo | None:
+    """One medialist entry → BiliVideo, or None if invalid/seen/outside window."""
+    bvid = str(m.get("bv_id") or "")
+    if not _BVID_RE.fullmatch(bvid):
+        return None
+    pubtime = _as_int(m.get("pubtime"))
+    pub = datetime.fromtimestamp(pubtime) if pubtime else None
+    if seen_key_for(bvid) in seen or (pub is not None and pub < cutoff):
+        return None
+    desc = ""
+    try:
+        time.sleep(_API_CALL_SPACING_SECONDS / 2)
+        view = _api_get(client, _VIEW_URL, params={"bvid": bvid})
+        desc = str(view.get("desc") or "")
+    except Exception as e:
+        log.warning("view failed for %s (desc omitted): %s", bvid, e)
+    return BiliVideo(
+        bvid=bvid,
+        title=str(m.get("title") or bvid),
+        author=str((m.get("upper") or {}).get("name") or up.name or ""),
+        uid=up.uid,
+        url=f"https://www.bilibili.com/video/{bvid}",
+        cover=str(m.get("cover") or "") or None,
+        duration=_fmt_duration(_as_int(m.get("duration")) or 0),
+        publish_time=pub,
+        description=desc,
+        # int-coerce: 隐藏播放量等场景上游会给字符串，脏值透传会在
+        # card_caption 的 f"{view:,}" 处炸掉整轮推送
+        view=_as_int((m.get("cnt_info") or {}).get("play")),
+    )
+
+
 def fetch_new_videos(src: BilibiliSource, seen: SeenStore,
                      *, now: datetime | None = None,
                      retry_max_attempts: int = 3,
@@ -141,11 +285,38 @@ def fetch_new_videos(src: BilibiliSource, seen: SeenStore,
     """Poll每个白名单 UP 的最新视频，去重后补详情，按发布时间倒序返回。
 
     A single UP failing (deleted account, transient error) only logs — the
-    other UPs' videos still ship. Candidates whose detail call fails are
-    dropped for this run and retried next run (they are only marked seen after
-    a successful send, by the caller).
+    other UPs' videos still ship; every UP failing raises FetchError so the
+    caller alerts instead of silently pushing nothing forever. Candidates
+    whose detail call fails are dropped for this run and retried next run
+    (they are only marked seen after a successful send, by the caller).
     """
     now = now or datetime.now()
+    if src.transport == "api":
+        videos = _fetch_via_api(src, seen, now=now)
+        return _finalize(videos, src.fetch.max_per_digest)
+    videos = _fetch_via_opencli(src, seen, now=now,
+                                retry_max_attempts=retry_max_attempts,
+                                retry_backoff_seconds=retry_backoff_seconds)
+    return _finalize(videos, src.fetch.max_per_digest)
+
+
+def _finalize(videos: list[BiliVideo], max_per_digest: int) -> list[BiliVideo]:
+    # In-run bvid dedup: 联合投稿 lists the same video under every co-author's
+    # space, which would otherwise push duplicate cards within one digest.
+    unique: dict[str, BiliVideo] = {}
+    for v in videos:
+        unique.setdefault(v.bvid, v)
+    videos = list(unique.values())
+    videos.sort(key=lambda v: v.publish_time or datetime.min, reverse=True)
+    if len(videos) > max_per_digest:
+        log.info("digest capped: %d -> %d videos", len(videos), max_per_digest)
+        videos = videos[:max_per_digest]
+    return videos
+
+
+def _fetch_via_opencli(src: BilibiliSource, seen: SeenStore, *, now: datetime,
+                       retry_max_attempts: int = 3,
+                       retry_backoff_seconds: list[int] | None = None) -> list[BiliVideo]:
     cutoff = now - timedelta(hours=src.fetch.lookback_hours)
     # user-videos `date` is day-granular; compare on dates to avoid dropping a
     # same-day video published before the cutoff's time-of-day.
@@ -155,15 +326,16 @@ def fetch_new_videos(src: BilibiliSource, seen: SeenStore,
                 retry_max_attempts=retry_max_attempts,
                 retry_backoff_seconds=retry_backoff_seconds)
 
+    ups = [u for u in src.fetch.whitelist if u.uid not in blacklist_uids]
+    failures = 0
     candidates: list[tuple[int, str]] = []  # (uid, bvid)
-    for up in src.fetch.whitelist:
-        if up.uid in blacklist_uids:
-            continue
+    for up in ups:
         try:
             rows = run_opencli(["user-videos", str(up.uid),
                                 "--limit", str(src.fetch.per_up_limit)], **opts)
         except OpencliError as e:
             log.warning("user-videos failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+            failures += 1
             continue
         for row in rows or []:
             m = _BVID_RE.search(str(row.get("url", "")))
@@ -178,6 +350,9 @@ def fetch_new_videos(src: BilibiliSource, seen: SeenStore,
             if d is not None and d.date() < cutoff_day:
                 continue
             candidates.append((up.uid, bvid))
+
+    if ups and failures == len(ups):
+        raise OpencliError(f"all {len(ups)} UP user-videos fetches failed — transport dead?")
 
     videos: list[BiliVideo] = []
     for uid, bvid in candidates:
@@ -210,8 +385,4 @@ def fetch_new_videos(src: BilibiliSource, seen: SeenStore,
             view=view,
         ))
 
-    videos.sort(key=lambda v: v.publish_time or datetime.min, reverse=True)
-    if len(videos) > src.fetch.max_per_digest:
-        log.info("digest capped: %d -> %d videos", len(videos), src.fetch.max_per_digest)
-        videos = videos[:src.fetch.max_per_digest]
     return videos

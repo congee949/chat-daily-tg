@@ -269,16 +269,18 @@ def run_bilibili(no_push: bool = False) -> int:
         if not src.enabled or not src.fetch.whitelist:
             log.info("bilibili source disabled or whitelist empty, nothing to do")
             return 0
-        try:
-            probe_bridge()
-        except BridgeUnavailableError as e:
-            # Common launchd cold-environment failure (Chrome/daemon not up) —
-            # distinct message from a login expiry. The 48h lookback catches up
-            # next run, so exit non-zero for visibility but nothing is lost.
-            log.error("opencli bridge unavailable: %s", e)
-            notify_failure("chat-daily-tg B站桥接不可用",
-                           f"opencli daemon/Chrome bridge 不在线，本轮 digest 跳过（下轮自动追回）。{e}")
-            return 1
+        if src.transport == "opencli":
+            # Chrome-bridge preflight — the api transport has no local deps to probe.
+            try:
+                probe_bridge()
+            except BridgeUnavailableError as e:
+                # Common launchd cold-environment failure (Chrome/daemon not up) —
+                # distinct message from a login expiry. The 48h lookback catches up
+                # next run, so exit non-zero for visibility but nothing is lost.
+                log.error("opencli bridge unavailable: %s", e)
+                notify_failure("chat-daily-tg B站桥接不可用",
+                               f"opencli daemon/Chrome bridge 不在线，本轮 digest 跳过（下轮自动追回）。{e}")
+                return 1
 
         seen = SeenStore(BILIBILI_SEEN_PATH)
         videos = fetch_new_videos(

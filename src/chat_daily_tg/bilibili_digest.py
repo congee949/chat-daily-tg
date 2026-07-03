@@ -58,12 +58,21 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
                         {"type": "image_url", "image_url": {"url": _image_data_url(cover_path)}},
                     ]}],
                     "max_tokens": 200,
+                    # gemini-3.5-flash 的内部思考按 max_tokens 计费：默认档会把
+                    # 预算吃到 finish=length，content 只剩截断碎渣（如") * **"）。
+                    # 一句话摘要无需思考，显式关闭。
+                    "reasoning_effort": "none",
                 }
                 headers = {"Authorization": f"Bearer {os.environ[vision.api_key_env]}"}
                 with httpx.Client(timeout=vision.timeout) as c:
                     r = c.post(f"{vision.endpoint}/chat/completions", json=payload, headers=headers)
                     r.raise_for_status()
-                    text = r.json()["choices"][0]["message"]["content"]
+                    choice = r.json()["choices"][0]
+                    if choice.get("finish_reason") == "length":
+                        # 截断产物必是碎渣——宁可无摘要行，不推垃圾。
+                        log.warning("summary truncated for %s, dropping", video.bvid)
+                        return None
+                    text = choice["message"]["content"]
             else:
                 from chat_daily_tg.llm_client import LLMClient
                 m = cfg.models.summary

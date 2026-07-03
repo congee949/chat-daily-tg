@@ -10,7 +10,7 @@ import sys
 
 from chat_daily_tg.archive import safe_filename, prepare_archive_day, cleanup_old_media
 from chat_daily_tg.config import load_config
-from chat_daily_tg.env import load_env_file
+from chat_daily_tg.env import load_env_file, scrub_socks_proxy_env
 from chat_daily_tg.llm_client import LLMClient
 from chat_daily_tg.logging_setup import configure_logging
 from chat_daily_tg.media import media_markdown, write_media_candidates
@@ -710,6 +710,10 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
 
 
 if __name__ == "__main__":
+    # launchd inherits Shadowrocket's ALL_PROXY=socks5://… (launchctl setenv);
+    # scrub before any httpx client is built or the whole pipeline dies at
+    # Client() construction (2026-07-03 outage, all three jobs).
+    scrub_socks_proxy_env()
     p = argparse.ArgumentParser()
     p.add_argument("--date", help="YYYY-MM-DD (default: yesterday)", default=None)
     p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)

@@ -136,7 +136,12 @@ def push_digest(videos: list[BiliVideo], *, sender: TelegramSender | None,
             cover_path = download_cover(video.cover, workdir / f"bili-{video.bvid}.jpg")
         summary = summarizer(video, cover_path) if summarizer else None
         caption = card_caption(video, summary)
-        button = ("▶️ 在 B 站观看", video.url) if digest.link_enabled else None
+        # 按钮走自有域名跳转页而非 video.url：TG 按钮只收 http(s)，跳转页
+        # 把 iOS 端交给 bilibili:// 唤起 PiliPlus，3s 未唤起自动回退 B 站网页。
+        button = (
+            ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{video.bvid}")
+            if digest.link_enabled else None
+        )
         try:
             if cover_path is not None:
                 try:

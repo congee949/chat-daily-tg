@@ -55,3 +55,15 @@ PY
   fi
   echo "$(date '+%F %T') ALERT: $msg" >> "$LOG"
 }
+
+# Heartbeat to task-monitor center (spec: fail-open, never affects the task).
+# Usage: guard_heartbeat <name> <rc>. --noproxy so the tailscale POST isn't
+# hijacked by the HTTPS_PROXY guard_setup_env exports.
+guard_heartbeat() {
+  local st err=""
+  [ "$2" -eq 0 ] && st=ok || st=fail
+  [ "$2" -ne 0 ] && [ -f "$LOG" ] && err=$(tail -c 200 "$LOG" 2>/dev/null)
+  curl -s --max-time 8 --connect-timeout 2 --noproxy '*' -X POST \
+    "${HB_CENTER:-http://100.87.113.14:8900}/hb/$1?status=${st}&exit=$2" \
+    --data-urlencode "error=${err}" >/dev/null 2>&1 || true
+}

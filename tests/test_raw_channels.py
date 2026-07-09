@@ -68,6 +68,26 @@ def test_build_card_public_has_link_and_escapes():
     assert "买 &lt;BTC&gt; &amp; 卖" in card.text_html  # content HTML-escaped
 
 
+def test_build_card_renders_inline_markdown_link():
+    # An author-typed Markdown link in the body must become a real clickable <a>,
+    # not the literal "[label](url)" Telegram would otherwise show (image-2 bug).
+    ch = RawChannel(id="-100123", name="示例频道A", username="sample_channel_a")
+    card = build_card(_row(content="我在构想 [Sneaker Web](https://sneakerweb.org/) 来做。"), ch)
+    assert card is not None
+    assert '<a href="https://sneakerweb.org/">Sneaker Web</a>' in card.text_html
+    assert "[Sneaker Web]" not in card.text_html  # literal markdown syntax gone
+
+
+def test_build_card_markdown_link_escapes_surrounding_html():
+    # Text around the link is still HTML-escaped in the same pass (no injection,
+    # no double-escaping of the anchor).
+    ch = RawChannel(id="-100123", name="示例频道A", username="sample_channel_a")
+    card = build_card(_row(content="<b> [X](https://e.com/?a=1&b=2) </b>"), ch)
+    assert card is not None
+    assert '<a href="https://e.com/?a=1&amp;b=2">X</a>' in card.text_html
+    assert "&lt;b&gt;" in card.text_html  # surrounding <b> escaped, not treated as markup
+
+
 def test_build_card_private_no_link():
     ch = RawChannel(id="-100123", name="示例私有频道A")  # no username
     card = build_card(_row(content="频道正文一段"), ch)

@@ -42,6 +42,27 @@ class Card:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://[^\s<>]+")
+# Inline Markdown link the channel author typed in the body: [label](https://…).
+# The body is sent under HTML parse mode, so plain escape_html leaves this syntax
+# literal — Telegram only auto-links the bare URL, showing "[label](url)" verbatim.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+
+def escape_body_html(text: str) -> str:
+    """Escape body text as Telegram HTML, converting inline Markdown links
+    [label](url) into real <a> anchors in the same pass so they render clickable
+    instead of literally. Text with no Markdown links is escaped exactly as
+    escape_html would, so non-link bodies are unchanged."""
+    parts: list[str] = []
+    pos = 0
+    for m in _MD_LINK_RE.finditer(text):
+        parts.append(escape_html(text[pos:m.start()]))
+        label = escape_html(m.group(1))
+        href = escape_html(m.group(2)).replace('"', "&quot;")
+        parts.append(f'<a href="{href}">{label}</a>')
+        pos = m.end()
+    parts.append(escape_html(text[pos:]))
+    return "".join(parts)
 
 # A Telegram album (media group) arrives as several messages that share a grouped_id,
 # but tg-cli's messages.db stores no raw_json, so grouped_id is unavailable here. We
@@ -132,7 +153,7 @@ def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
             return None  # private + media-only: nothing to render
         content_html = _MEDIA_PLACEHOLDER
     else:
-        content_html = escape_html(content)
+        content_html = escape_body_html(content)
 
     ts = parse_timestamp(row["timestamp"]).astimezone(LOCAL_TZ).strftime("%H:%M")
     header = f"📢 <b>{escape_html(channel.name)}</b> · {ts}"

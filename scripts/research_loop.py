@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from chat_daily_tg.config import load_config
-from chat_daily_tg.env import load_env_file
+from chat_daily_tg.env import load_env_file, scrub_socks_proxy_env
 from chat_daily_tg.llm_client import LLMClient
 from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR
 from chat_daily_tg.research_loop import ResearchSpec, append_result, run_research_once
@@ -21,6 +21,7 @@ from chat_daily_tg.tg_sender import TelegramSender
 
 
 def main() -> int:
+    scrub_socks_proxy_env()
     args = parse_args()
     cfg = None
     llm = None

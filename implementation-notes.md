@@ -285,3 +285,29 @@
 - **TG 图偏好**（用户要求）：`build_citation_block` 排序改为 `(platform=="Telegram", value_score)` 降序——TG 图（≥1280 原图质量）严格优先于微信图进入引用池；引用指令同步加"同等相关时优先 Telegram 来源"。
 - **修复后重跑 07-01 全链路真推成功**：`vision analyses included: 2 (citable: 2)`（wxgf+缩略图全被门槛挡掉，恰余两张电丸清晰大图）→ `TG push complete (single rich message, 2 inline image(s))`，单条图文混排，无回退。附带收益：vision 阶段 17min→3min（缩略图不再空耗视觉分析）。
 - 259 passed（新增 TG 偏好排序 1 例）。
+
+### 五修（同日，vision 切 CLIProxyAPI gemini-3.5-flash-low）
+用户嫌 vision 慢（qwenproxy ~50s/图），要求切到 CLIProxyAPI 的 3.5 flash。实测 `gemini-3.5-flash-low` 支持 OpenAI 格式 base64 图片输入，**8-11s/图（约 5 倍提速）**，读图质量良好。
+- **暴露分制漂移**：gemini 返回 `value_score=8.5`（0-10 制），不修会让 0.8 分数线形同虚设（垃圾图 3/10 也 >0.8）。双层修：`_vision_prompt` 明确"0.0-1.0 小数，不要 0-10 制"；解析层新增 `_normalize_score`（>1 视为 0-10 制除以 10，再 clamp [0,1]）——LLM 分制漂移是既往已知问题（qwen 也返过 2.5/3.0），这层边界归一化对任何后端都生效。
+- config.yaml vision 块切换（endpoint 8317 / model gemini-3.5-flash-low / CLIPROXY_API_KEY），修正后实测两张真实图 score=0.95/0.80，回到 0-1 制。
+- 260 passed（新增 `_normalize_score` 边界测试 1 例）。qwenproxy 保留未动，config 一行可切回。
+
+## 2026-07-03 — launchd 代理污染致三任务全挂（socks ALL_PROXY × 无 socksio）
+
+**根因**：7-2 ~21:00 Shadowrocket 经 `launchctl setenv` 把 `ALL_PROXY=socks5://127.0.0.1:1082` 写进 launchd 用户环境。venv 的 httpx 无 socksio extra，`httpx.Client()` **构造即抛 ImportError**（在 NO_PROXY 求值之前），日报致命（exit=1）、channels 22:00/06:00 推送 0 条、bilibili 23:31 0/3 卡片。guard 脚本本就精心导出 `HTTP(S)_PROXY/NO_PROXY`，唯独漏了清 launchd 继承的 `ALL_PROXY`。
+
+### Design Decisions
+- **修在 Python 入口而非 guard 脚本**：`env.py` 新增 `scrub_socks_proxy_env()`（只 pop `ALL_PROXY`/`all_proxy`，保留 http 代理变量），`run_daily.py` `__main__` 第一行调用。一处覆盖三个 launchd 任务 + 手动 shell 运行 + 全部子进程继承；guard 脚本方案只覆盖 launchd。
+- **不装 socksio**：装了会让流量真走 socks5，偏离已验证的 http 代理配置；且 7-2 前 launchd 环境根本没有 ALL_PROXY，scrub 是精确恢复已知可用状态。
+- **无条件 pop 而非按 scheme 判断**：本管线的预期代理配置从不含 ALL_PROXY，条件判断是多余复杂度。
+
+### 验证
+- 新增 `tests/test_env.py` 3 例（含回归测试：污染 ALL_PROXY 后 `httpx.Client()` 可构造）；全套 275 passed。
+- 进程级冒烟：`env ALL_PROXY=socks5://… run_daily.py --bilibili-only --no-push` exit=0（昨日同条件必崩）。
+- 数据无损确认:channels 水位线 write-after-send（失败不写 seen，msg 42314 在 22:00/06:00 重复重试为证），修复后 10:00 运行自动补推积压 8 条。
+
+### 附:修部署漂移（安装的 channels plist 是 6-29 前旧版）
+对抗审查顺带查出:`~/Library/LaunchAgents/com.chat-daily-tg.channels.plist` 仍是旧版——直接 `caffeinate .venv/bin/python run_daily.py --channels-only`,绕过了 6-29 引入的 guard wrapper(`run_channels_guarded.sh`:venv 预检 + 失败告警 + 代理导出,review #16)。本次 socks 故障它靠 scrub 已能自愈,但缺 venv 预检(.venv 被 uv prune 时会静默 exit 127)和失败告警。
+- **只外科式重装 channels 一个 label**,没跑整个 `install-launchd.sh`:后者会 unload/reload 正在跑 09:00 socks 验证的 agent 任务,还会把已迁 r4s、故意不加载的 bilibili 重新装回(install 脚本第 58 行已注释 bilibili,与 [[bilibili-digest-runs-on-r4s]] 一致)。
+- 用 install 脚本**同一段渲染逻辑**渲染 `launchd/com.chat-daily-tg.channels.plist` → 落 LaunchAgents → unload/load。plutil lint OK、与渲染模板逐字一致、ProgramArguments 指向 cdrun-bash + guard wrapper。
+- 验证:`--channels-only --no-push` 在污染 ALL_PROXY 下 exit=0,seen 水位线 md5 不变(积压 10+ 张卡片留给 10:00 真实补推,dry-run 不吃)。旧版 plist 备份挪出 LaunchAgents(避免 launchd 目录杂物)。

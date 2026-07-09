@@ -1,13 +1,18 @@
 from datetime import datetime
 import json
+import re
 import subprocess
 
 import pytest
+from pytest_httpx import HTTPXMock
 
 from chat_daily_tg.bilibili_fetcher import (
+    BiliApiError,
     BiliVideo,
     BridgeUnavailableError,
+    FetchError,
     OpencliError,
+    _fmt_duration,
     _parse_detail,
     _parse_publish_time,
     fetch_new_videos,
@@ -24,7 +29,7 @@ def _completed(stdout="", returncode=0, stderr=""):
                                        stdout=stdout, stderr=stderr)
 
 
-def _src(**fetch_overrides) -> BilibiliSource:
+def _src(transport="opencli", **fetch_overrides) -> BilibiliSource:
     fetch = {
         "whitelist": [{"uid": 111, "name": "UP甲"}, {"uid": 222, "name": "UP乙"}],
         "lookback_hours": 48,
@@ -32,7 +37,7 @@ def _src(**fetch_overrides) -> BilibiliSource:
         "max_per_digest": 30,
     }
     fetch.update(fetch_overrides)
-    return BilibiliSource(enabled=True, fetch=fetch)
+    return BilibiliSource(enabled=True, transport=transport, fetch=fetch)
 
 
 # --- run_opencli -------------------------------------------------------------
@@ -217,3 +222,155 @@ def test_fetch_blacklist_and_cap(monkeypatch, tmp_path):
     videos = fetch_new_videos(src, SeenStore(tmp_path / "s.txt"), now=NOW)
     assert len(videos) == 2  # capped, and uid 222 never fetched
     assert all(v.uid == 111 for v in videos)
+
+
+# --- api transport -----------------------------------------------------------
+
+NOW_TS = int(datetime(2026, 7, 2, 12, 0).timestamp())
+
+
+def _media_item(bvid, pub_offset_h=1, title="标题", play=1000):
+    return {"bv_id": bvid, "title": title, "cover": f"http://i0.hdslb.com/{bvid}.jpg",
+            "pubtime": NOW_TS - pub_offset_h * 3600, "duration": 593,
+            "upper": {"mid": 111, "name": "UP甲"}, "cnt_info": {"play": play}}
+
+
+def _mock_medialist(httpx_mock, uid, items):
+    httpx_mock.add_response(
+        url=re.compile(rf"https://api\.bilibili\.com/x/v2/medialist/resource/list\?.*biz_id={uid}.*"),
+        json={"code": 0, "message": "0", "data": {"media_list": items}})
+
+
+def _mock_view(httpx_mock, bvid, desc="简介文字"):
+    httpx_mock.add_response(
+        url=re.compile(rf"https://api\.bilibili\.com/x/web-interface/view\?bvid={bvid}.*"),
+        json={"code": 0, "data": {"bvid": bvid, "desc": desc}})
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr("chat_daily_tg.bilibili_fetcher.time.sleep", lambda s: None)
+
+
+def test_api_fetch_builds_videos_with_desc(httpx_mock: HTTPXMock, tmp_path):
+    _mock_medialist(httpx_mock, 111, [_media_item("BV1aaaaaaaaa"),
+                                      _media_item("BV1bbbbbbbbb", pub_offset_h=100)])  # outside 48h
+    _mock_medialist(httpx_mock, 222, [_media_item("BV2ccccccccc", pub_offset_h=2)])
+    _mock_view(httpx_mock, "BV1aaaaaaaaa", desc="视频简介A")
+    _mock_view(httpx_mock, "BV2ccccccccc", desc="视频简介C")
+    videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    assert [v.bvid for v in videos] == ["BV1aaaaaaaaa", "BV2ccccccccc"]  # newest first
+    v = videos[0]
+    assert v.description == "视频简介A" and v.duration == "9m53s" and v.view == 1000
+    assert v.author == "UP甲" and v.cover == "http://i0.hdslb.com/BV1aaaaaaaaa.jpg"
+
+
+def test_api_fetch_skips_seen_without_view_call(httpx_mock: HTTPXMock, tmp_path):
+    _mock_medialist(httpx_mock, 111, [_media_item("BV1seenseens")])
+    _mock_medialist(httpx_mock, 222, [])
+    seen = SeenStore(tmp_path / "s.txt")
+    seen.add(seen_key_for("BV1seenseens"))
+    assert fetch_new_videos(_src("api"), seen, now=NOW) == []
+    # no view request fired for a seen bvid
+    assert all("web-interface/view" not in str(r.url) for r in httpx_mock.get_requests())
+
+
+def test_api_fetch_single_up_failure_continues(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url=re.compile(r".*biz_id=111.*"), json={"code": -404, "message": "啥都木有"})
+    _mock_medialist(httpx_mock, 222, [_media_item("BV2ccccccccc")])
+    _mock_view(httpx_mock, "BV2ccccccccc")
+    videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    assert [v.bvid for v in videos] == ["BV2ccccccccc"]
+
+
+def test_api_fetch_all_ups_failing_raises(httpx_mock: HTTPXMock, tmp_path):
+    httpx_mock.add_response(
+        url=re.compile(r".*biz_id=111.*"), json={"code": -404, "message": "啥都木有"})
+    httpx_mock.add_response(
+        url=re.compile(r".*biz_id=222.*"), json={"code": -404, "message": "啥都木有"})
+    with pytest.raises(BiliApiError, match="all 2 UP"):
+        fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+
+
+def test_api_fetch_view_failure_only_drops_desc(httpx_mock: HTTPXMock, tmp_path):
+    _mock_medialist(httpx_mock, 111, [_media_item("BV1aaaaaaaaa")])
+    _mock_medialist(httpx_mock, 222, [])
+    httpx_mock.add_response(
+        url=re.compile(r".*web-interface/view.*"), json={"code": -404, "message": "啥都木有"})
+    videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    assert len(videos) == 1 and videos[0].description == ""
+
+
+def test_api_client_does_not_trust_proxy_env(monkeypatch, tmp_path):
+    captured = {}
+    import httpx as _httpx
+    real_client = _httpx.Client
+
+    def spy_client(*args, **kw):
+        captured.update(kw)
+        kw.setdefault("transport", _httpx.MockTransport(
+            lambda req: _httpx.Response(200, json={"code": 0, "data": {"media_list": []}})))
+        return real_client(*args, **kw)
+
+    monkeypatch.setattr("chat_daily_tg.bilibili_fetcher.httpx.Client", spy_client)
+    fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    assert captured.get("trust_env") is False  # bilibili 请求绝不能走 guard 的代理
+
+
+def test_fmt_duration():
+    assert _fmt_duration(593) == "9m53s"
+    assert _fmt_duration(3725) == "1h2m5s"
+    assert _fmt_duration(0) is None
+
+
+def test_opencli_all_ups_failing_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: _completed(returncode=1, stderr="boom"))
+    with pytest.raises(OpencliError, match="all 2 UP"):
+        fetch_new_videos(_src("opencli"), SeenStore(tmp_path / "s.txt"), now=NOW,
+                         retry_max_attempts=1)
+
+
+# --- adversarial-review fixes (2026-07-03) -----------------------------------
+
+@pytest.mark.httpx_mock(assert_all_responses_were_requested=False,
+                        can_send_already_matched_responses=True)
+def test_api_dirty_item_is_skipped_not_fatal(httpx_mock: HTTPXMock, tmp_path):
+    """单条脏数据（字符串 pubtime / 非法 duration / 字符串 play）只跳过该条。"""
+    dirty = {"bv_id": "BV1dirtydirt", "title": "脏", "pubtime": "not-a-ts",
+             "duration": "07:13", "upper": {"name": "UP甲"}, "cnt_info": {"play": "--"}}
+    good = _media_item("BV1goodgood1")
+    _mock_medialist(httpx_mock, 111, [dirty, good])
+    _mock_medialist(httpx_mock, 222, [])
+    _mock_view(httpx_mock, "BV1dirtydirt")
+    _mock_view(httpx_mock, "BV1goodgood1")
+    videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    bvids = [v.bvid for v in videos]
+    assert "BV1goodgood1" in bvids
+    # 脏条目：pubtime 无法解析 → pub=None 仍保留，但 play/duration 被收敛不崩溃
+    dirty_v = [v for v in videos if v.bvid == "BV1dirtydirt"]
+    if dirty_v:  # pubtime 不合法时条目仍可用（字段降级），关键是不抛异常
+        assert dirty_v[0].view is None and dirty_v[0].duration is None
+
+
+@pytest.mark.httpx_mock(assert_all_responses_were_requested=False)
+def test_api_352_aborts_run_immediately(httpx_mock: HTTPXMock, tmp_path):
+    """-352 是 IP 级风控判决：第一个 UP 命中后立即终止，不再请求其余 UP。"""
+    httpx_mock.add_response(
+        url=re.compile(r".*biz_id=111.*"), json={"code": -352, "message": "风控校验失败"})
+    with pytest.raises(BiliApiError, match="-352 风控"):
+        fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    # uid=222 的请求从未发出
+    assert all("biz_id=222" not in str(r.url) for r in httpx_mock.get_requests())
+
+
+@pytest.mark.httpx_mock(assert_all_responses_were_requested=False,
+                        can_send_already_matched_responses=True)
+def test_finalize_dedupes_co_published_bvid(httpx_mock: HTTPXMock, tmp_path):
+    """联合投稿：同一 bvid 出现在两个白名单 UP 的列表里，一轮 digest 只出一张卡。"""
+    _mock_medialist(httpx_mock, 111, [_media_item("BV1sharedvid")])
+    _mock_medialist(httpx_mock, 222, [_media_item("BV1sharedvid")])
+    _mock_view(httpx_mock, "BV1sharedvid")
+    videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
+    assert [v.bvid for v in videos] == ["BV1sharedvid"]

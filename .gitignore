@@ -24,3 +24,7 @@ venv/
 
 # Project-private bash copy (adhoc-signed launcher; rebuilt by scripts/install-launchd.sh)
 /bin/
+
+# Tooling / skill scratch output (not project source)
+/.omo/
+/x-to-markdown/

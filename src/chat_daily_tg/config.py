@@ -126,6 +126,9 @@ class BilibiliDigest(BaseModel):
 
 class BilibiliSource(BaseModel):
     enabled: bool = False
+    # "api": direct Bilibili Web API (no cookies/browser, works headless — Mac or r4s).
+    # "opencli": local Chrome-bridge fallback, needs daemon + logged-in session.
+    transport: Literal["api", "opencli"] = "api"
     opencli: BilibiliOpencli = Field(default_factory=BilibiliOpencli)
     fetch: BilibiliFetch = Field(default_factory=BilibiliFetch)
     digest: BilibiliDigest = Field(default_factory=BilibiliDigest)

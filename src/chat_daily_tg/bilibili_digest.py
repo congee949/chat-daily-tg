@@ -58,12 +58,21 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
                         {"type": "image_url", "image_url": {"url": _image_data_url(cover_path)}},
                     ]}],
                     "max_tokens": 200,
+                    # gemini-3.5-flash 的内部思考按 max_tokens 计费：默认档会把
+                    # 预算吃到 finish=length，content 只剩截断碎渣（如") * **"）。
+                    # 一句话摘要无需思考，显式关闭。
+                    "reasoning_effort": "none",
                 }
                 headers = {"Authorization": f"Bearer {os.environ[vision.api_key_env]}"}
                 with httpx.Client(timeout=vision.timeout) as c:
                     r = c.post(f"{vision.endpoint}/chat/completions", json=payload, headers=headers)
                     r.raise_for_status()
-                    text = r.json()["choices"][0]["message"]["content"]
+                    choice = r.json()["choices"][0]
+                    if choice.get("finish_reason") == "length":
+                        # 截断产物必是碎渣——宁可无摘要行，不推垃圾。
+                        log.warning("summary truncated for %s, dropping", video.bvid)
+                        return None
+                    text = choice["message"]["content"]
             else:
                 from chat_daily_tg.llm_client import LLMClient
                 m = cfg.models.summary
@@ -84,9 +93,14 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
 
 
 def download_cover(url: str, dest: Path) -> Path | None:
-    """Best-effort cover download; None on any failure (card falls back to text)."""
+    """Best-effort cover download; None on any failure (card falls back to text).
+
+    trust_env=False: hdslb.com is Bilibili CDN — same direct-connection invariant
+    as the fetcher (the guard's HTTPS_PROXY would route it via an overseas exit)."""
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+        with httpx.Client(timeout=30.0, follow_redirects=True, trust_env=False,
+                          headers={"User-Agent": "Mozilla/5.0",
+                                   "Referer": "https://www.bilibili.com/"}) as c:
             r = c.get(url)
             r.raise_for_status()
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -103,10 +117,6 @@ def card_caption(video: BiliVideo, summary: str | None) -> str:
     meta = [escape_html(video.author)]
     if video.duration:
         meta.append(escape_html(video.duration))
-    if video.publish_time:
-        meta.append(video.publish_time.strftime("%m-%d %H:%M"))
-    if video.view is not None:
-        meta.append(f"{video.view:,}播放")
     lines = [f"<b>{escape_html(video.title)}</b>", "👤 " + " · ".join(meta)]
     if summary:
         lines.append(f"📝 {escape_html(summary)}")
@@ -131,7 +141,12 @@ def push_digest(videos: list[BiliVideo], *, sender: TelegramSender | None,
             cover_path = download_cover(video.cover, workdir / f"bili-{video.bvid}.jpg")
         summary = summarizer(video, cover_path) if summarizer else None
         caption = card_caption(video, summary)
-        button = ("▶️ 在 B 站观看", video.url) if digest.link_enabled else None
+        # 按钮走自有域名跳转页而非 video.url：TG 按钮只收 http(s)，跳转页
+        # 把 iOS 端交给 bilibili:// 唤起 PiliPlus，3s 未唤起自动回退 B 站网页。
+        button = (
+            ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{video.bvid}")
+            if digest.link_enabled else None
+        )
         try:
             if cover_path is not None:
                 try:

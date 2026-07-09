@@ -58,3 +58,15 @@ def test_notify_failure_sends_telegram_when_flag_set(monkeypatch):
     with patch("chat_daily_tg.notifier.subprocess.run"):
         notifier.notify_failure("t", "m")
     assert called["tg"] is True
+
+
+def test_notify_macos_missing_osascript_is_silent(monkeypatch):
+    """Linux（r4s）上没有 osascript——告警链不能因此断掉。"""
+    import subprocess as sp
+    from chat_daily_tg.notifier import _notify_macos
+
+    def raise_fnf(*a, **kw):
+        raise FileNotFoundError("osascript")
+
+    monkeypatch.setattr(sp, "run", raise_fnf)
+    _notify_macos("t", "m")  # no raise

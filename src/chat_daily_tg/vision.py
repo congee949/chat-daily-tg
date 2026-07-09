@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import base64
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import httpx
 
 from chat_daily_tg.media import MediaCandidate
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -66,13 +69,43 @@ class VisionClient:
         return VisionAnalysis(
             candidate=candidate,
             type=str(parsed.get("type") or "unknown"),
-            value_score=float(parsed.get("value_score") or 0.0),
+            value_score=_normalize_score(parsed.get("value_score")),
             summary=str(parsed.get("summary") or ""),
             key_facts=[str(x) for x in parsed.get("key_facts") or []],
             risk_flags=[str(x) for x in parsed.get("risk_flags") or []],
-            should_include_in_daily=bool(parsed.get("should_include_in_daily")),
+            should_include_in_daily=_coerce_include_flag(parsed.get("should_include_in_daily")),
             reason=str(parsed.get("reason") or ""),
         )
+
+
+def _normalize_score(raw) -> float:
+    """Coerce value_score into [0, 1]. LLMs drift off the requested 0-1 scale
+    despite the prompt (qwen returned 2.5/3.0; gemini returned 8.5 on a 0-10
+    scale) — a score in (1, 10] is treated as a 0-10 rating and divided by 10.
+    Anything still outside [0, 1] afterwards (negative, >10, non-numeric) is
+    untrustworthy and coerced to 0.0 so it drops below the include-bar, rather
+    than clamped up to 1.0 which would promote a garbage rating into a top image."""
+    try:
+        score = float(raw or 0.0)
+    except (TypeError, ValueError):
+        log.warning("vision value_score not numeric (%r); treating as 0.0", raw)
+        return 0.0
+    if 1.0 < score <= 10.0:
+        score = score / 10.0
+    if not 0.0 <= score <= 1.0:
+        log.warning("vision value_score out of range (%r); treating as 0.0", raw)
+        return 0.0
+    return score
+
+
+def _coerce_include_flag(raw) -> bool:
+    """should_include_in_daily lets the model veto a high-scoring image out of the
+    digest. Only an explicit JSON boolean is trusted; a missing or non-bool value
+    falls back to True so the decision reduces to the score gate alone — the field
+    being absent must not silently start excluding images."""
+    if isinstance(raw, bool):
+        return raw
+    return True
 
 
 def _is_empty_vision(analysis: VisionAnalysis) -> bool:
@@ -115,7 +148,8 @@ def analyze_media_candidates(
         # Layer 3: OCR / empty image filter
         if _is_empty_vision(analysis):
             continue
-        if analysis.value_score >= min_include_score:
+        # Include-bar: high enough value AND the model didn't veto inclusion.
+        if analysis.value_score >= min_include_score and analysis.should_include_in_daily:
             analyses.append(analysis)
     return analyses
 
@@ -249,6 +283,8 @@ def _vision_prompt(candidate: MediaCandidate) -> str:
   "should_include_in_daily": false,
   "reason": "..."
 }}
+
+value_score 必须是 0.0 到 1.0 之间的小数（1.0 = 极高日报价值），不要使用 0-10 制。
 """
 
 

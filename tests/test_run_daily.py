@@ -717,3 +717,53 @@ def test_push_rich_digest_send_failure_still_deletes_kv(tmp_path):
 
     assert ok is False
     dele.assert_called_once()
+
+
+def test_coerce_enum_maps_llm_output_onto_closed_set():
+    import run_daily
+    cats = run_daily.PERMANENT_CATEGORIES
+    # valid value passes through
+    assert run_daily.coerce_enum("activity", cats, "misc", "permanent.category") == "activity"
+    # empty / missing → default (unchanged from the old `or default` behaviour)
+    assert run_daily.coerce_enum("", cats, "misc", "permanent.category") == "misc"
+    assert run_daily.coerce_enum(None, cats, "misc", "permanent.category") == "misc"
+    # out-of-enum → default
+    assert run_daily.coerce_enum("mystery_kind", cats, "misc", "permanent.category") == "misc"
+    # non-str / unhashable junk must not raise → default
+    assert run_daily.coerce_enum(["x"], cats, "misc", "permanent.category") == "misc"
+    # the other two enums keep their own defaults
+    assert run_daily.coerce_enum("nope", run_daily.PERMANENT_TYPES, "permanent", "permanent.type") == "permanent"
+    assert run_daily.coerce_enum("nope", run_daily.HOT_LEAD_CATEGORIES, "arbitrage", "hot_leads.category") == "arbitrage"
+
+
+def test_resolve_tg_target_reads_table_and_alerts_on_fallback(tmp_path, monkeypatch):
+    import json as _json
+    import run_daily
+    table = tmp_path / "targets.json"
+    table.write_text(_json.dumps({"chat_id": -100999, "topics": {"chat_daily": 17}}))
+    monkeypatch.setattr(run_daily, "TG_TARGETS", str(table))
+
+    # valid table + valid key → group chat + thread, no alert
+    with patch("run_daily.notify_failure") as notify:
+        assert run_daily.resolve_tg_target("chat_daily", "555") == ("-100999", 17)
+        notify.assert_not_called()
+
+    # unregistered key → DM fallback WITH an alert naming the key
+    with patch("run_daily.notify_failure") as notify:
+        assert run_daily.resolve_tg_target("mystery", "555") == ("555", None)
+        notify.assert_called_once()
+        assert "不在路由表" in notify.call_args[0][1]
+
+    # corrupt table → DM fallback WITH an alert
+    table.write_text("{ not valid json")
+    with patch("run_daily.notify_failure") as notify:
+        assert run_daily.resolve_tg_target("chat_daily", "555") == ("555", None)
+        notify.assert_called_once()
+        assert "不可读" in notify.call_args[0][1]
+
+    # missing file → DM fallback WITH an alert
+    monkeypatch.setattr(run_daily, "TG_TARGETS", str(tmp_path / "gone.json"))
+    with patch("run_daily.notify_failure") as notify:
+        assert run_daily.resolve_tg_target("chat_daily", "555") == ("555", None)
+        notify.assert_called_once()
+        assert "缺失" in notify.call_args[0][1]

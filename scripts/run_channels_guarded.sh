@@ -24,6 +24,7 @@ source "$PROJECT/scripts/guard_common.sh"
 
 if [ ! -x "$PY" ]; then
   guard_notify "venv python 缺失 ($PY)，频道转发未运行，请重建：cd $PROJECT && uv sync"
+  guard_heartbeat channels 1
   exit 1
 fi
 
@@ -34,4 +35,5 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   guard_notify "频道转发失败 exit=$rc，详见 $DATA_DIR/logs/channels-$(date +%F).log"
 fi
+guard_heartbeat channels "$rc"
 exit "$rc"

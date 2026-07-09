@@ -51,7 +51,8 @@ class FakeSender:
 def test_card_caption_escapes_html_and_includes_fields():
     cap = card_caption(_video(), "一句话摘要")
     assert "<b>标题 &lt;b&gt;带标签&lt;/b&gt;</b>" in cap
-    assert "UP甲" in cap and "8m4s" in cap and "07-02 08:00" in cap and "45,615播放" in cap
+    # meta line is now just UP主 · 时长 — publish time and view count were dropped
+    assert "UP甲" in cap and "8m4s" in cap and "07-02 08:00" not in cap and "45,615播放" not in cap
     assert "📝 一句话摘要" in cap
     # watch link ships as an inline button, never in the caption
     assert "<a href" not in cap and "🔗" not in cap
@@ -77,8 +78,8 @@ def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
     # order + watch button both live in the button URL now (caption carries no link)
     sent_buttons = [b for _, _, _, b in sender.photos]
     assert sent_buttons == [
-        ("▶️ 在 B 站观看", "https://www.bilibili.com/video/BV1oldest001"),
-        ("▶️ 在 B 站观看", "https://www.bilibili.com/video/BV1newest001"),
+        ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1oldest001"),
+        ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1newest001"),
     ]
     assert "bilibili:BV1newest001" in seen and "bilibili:BV1oldest001" in seen
 
@@ -93,7 +94,7 @@ def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path
     assert n == 1 and len(sender.cards) == 1
     text, link, button = sender.cards[0]
     assert link == "https://www.bilibili.com/video/BV1testtest1"
-    assert button == ("▶️ 在 B 站观看", "https://www.bilibili.com/video/BV1testtest1")
+    assert button == ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1testtest1")
     assert "bilibili:BV1testtest1" in seen
 
 

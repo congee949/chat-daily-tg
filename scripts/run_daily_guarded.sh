@@ -26,6 +26,7 @@ source "$PROJECT/scripts/guard_common.sh"
 # Pre-flight: the exact failure that ate 2026-06-12 — venv python vanished.
 if [ ! -x "$PY" ]; then
   guard_notify "venv python 缺失 ($PY)，今日日报未运行，请重建：cd $PROJECT && uv sync"
+  guard_heartbeat daily 1
   exit 1
 fi
 
@@ -47,4 +48,5 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   guard_notify "日报运行失败 exit=$rc，详见 $DATA_DIR/logs/$(date +%F).log"
 fi
+guard_heartbeat daily "$rc"
 exit "$rc"

@@ -11,6 +11,12 @@ guard_setup_env() {
   export HTTPS_PROXY="$PROXY" HTTP_PROXY="$PROXY"
   export NO_PROXY="127.0.0.1,localhost,::1"
   export no_proxy="$NO_PROXY"
+  # Drop any inherited ALL_PROXY (Shadowrocket / `launchctl setenv` often leaves a
+  # socks5:// value here). httpx.Client() eagerly builds a transport for EVERY proxy
+  # env var at construction, so a stray socks5 ALL_PROXY makes every client raise
+  # ImportError("'socksio' not installed") before a single request — the crash that
+  # took out the 2026-07-03 run even though HTTP(S)_PROXY above point at the http proxy.
+  unset ALL_PROXY all_proxy
   # Let notify_failure send Telegram alerts (it stays silent without this, so it
   # never fires in tests/ad-hoc runs).
   export CHAT_DAILY_TG_ALERTS=1
@@ -54,4 +60,16 @@ PY
     fi
   fi
   echo "$(date '+%F %T') ALERT: $msg" >> "$LOG"
+}
+
+# Heartbeat to task-monitor center (spec: fail-open, never affects the task).
+# Usage: guard_heartbeat <name> <rc>. --noproxy so the tailscale POST isn't
+# hijacked by the HTTPS_PROXY guard_setup_env exports.
+guard_heartbeat() {
+  local st err=""
+  [ "$2" -eq 0 ] && st=ok || st=fail
+  [ "$2" -ne 0 ] && [ -f "$LOG" ] && err=$(tail -c 200 "$LOG" 2>/dev/null)
+  curl -s --max-time 8 --connect-timeout 2 --noproxy '*' -X POST \
+    "${HB_CENTER:-http://100.87.113.14:8900}/hb/$1?status=${st}&exit=$2" \
+    --data-urlencode "error=${err}" >/dev/null 2>&1 || true
 }

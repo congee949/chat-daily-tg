@@ -49,22 +49,32 @@ TG_TARGETS = os.path.expanduser("~/qwenproxy/.tg-notify-targets.json")
 
 def resolve_tg_target(topic_key: str, dm_chat_id: str) -> tuple[str, int | None]:
     """Resolve (chat_id, message_thread_id) for a forum topic from the shared route
-    table. Falls back to the DM chat with no thread when the file/chat_id/topic id is
-    missing or 0 — i.e. 'rather deliver to DM than drop'. Mirrors
+    table. Falls back to the DM chat with no thread — 'rather deliver to DM than
+    drop' — but surfaces WHY it fell back via notify_failure, so a missing/corrupt
+    table or an unregistered topic key (previously swallowed by a bare except and
+    silently misrouted to DM) becomes visible. Mirrors
     ~/qwenproxy/session-expiry-notify.py::send_tg()."""
-    chat_id: str = dm_chat_id
-    thread_id: int | None = None
+    reason: str
     try:
         with open(TG_TARGETS) as f:
             t = json.load(f)
-        chat_id = t.get("chat_id", dm_chat_id) or dm_chat_id
+    except FileNotFoundError:
+        reason = f"路由表缺失 ({TG_TARGETS})"
+    except (json.JSONDecodeError, OSError) as e:
+        reason = f"路由表不可读 ({type(e).__name__})"
+    else:
+        chat_id = t.get("chat_id") or dm_chat_id
         tid = (t.get("topics", {}) or {}).get(topic_key)
-        thread_id = tid if tid else None  # 0/None/missing -> DM fallback (no thread)
-        if thread_id is None:
-            chat_id = dm_chat_id          # no topic -> go to DM, not group General
+        if tid:  # 0/None/missing all mean "no thread" -> fall through to DM
+            return str(chat_id), int(tid)
+        reason = f"topic key {topic_key!r} 不在路由表"
+
+    # Alerting must never break the push; notify_failure is itself best-effort.
+    try:
+        notify_failure("TG 路由回落 DM", f"{reason}；内容改发 DM (topic={topic_key})")
     except Exception:
-        chat_id, thread_id = dm_chat_id, None
-    return str(chat_id), thread_id
+        log.warning("route fallback alert failed for topic=%s", topic_key)
+    return dm_chat_id, None
 
 
 # Written to the archive dir after a fully successful pushed run. The launchd
@@ -82,6 +92,27 @@ def completion_marker(date_str: str):
     return prepare_archive_day(date_str) / COMPLETE_MARKER
 
 
+# Closed enums declared to the LLM in the opportunities fence (prompts.py). The
+# model occasionally emits a value outside the set; coerce it to a safe default
+# instead of letting an unknown category/type land in the DB unchecked.
+PERMANENT_CATEGORIES = {"invite_code", "bank_product", "activity", "misc"}
+PERMANENT_TYPES = {"permanent", "product", "activity"}
+HOT_LEAD_CATEGORIES = {"arbitrage", "bug", "personal_trick", "gray_zone"}
+
+
+def coerce_enum(value, allowed: set[str], default: str, field: str) -> str:
+    """Map an LLM-emitted enum onto its closed set: empty/missing -> default
+    (unchanged from the prior `or default` behaviour), a value already inside
+    `allowed` passes through, and anything else is coerced to `default` with a
+    warning naming the raw value (also covers non-str/unhashable junk)."""
+    if not value:
+        return default
+    if isinstance(value, str) and value in allowed:
+        return value
+    log.warning("opportunity %s got out-of-enum %r; coerced to %s", field, value, default)
+    return default
+
+
 def _persist_opportunities(out, date_str: str, hot_leads_dir) -> None:
     """Write the run's opportunities to the shared DB (idempotent upserts)."""
     from datetime import datetime as _dt
@@ -95,19 +126,24 @@ def _persist_opportunities(out, date_str: str, hot_leads_dir) -> None:
     now_iso = _dt.now().isoformat()
     candidates: list[PermanentEntry] = []
     for add in out.opportunities.get("permanent_additions", []):
-        title = add.get("title", "")
+        # The LLM may emit an explicit null for any field. `.get(key, default)` only
+        # substitutes the default for a MISSING key, so an explicit null passes through
+        # as None and trips "NOT NULL constraint failed" on the NOT NULL columns
+        # (source_sender/source_group/title/category/type/content). `or default`
+        # coerces null → default, matching the `.get(x) or ""` convention elsewhere.
+        title = add.get("title") or ""
         url = add.get("url")
-        category = add.get("category", "misc")
+        category = coerce_enum(add.get("category"), PERMANENT_CATEGORIES, "misc", "permanent.category")
         fp = compute_fingerprint(title, url, category)
         candidates.append(PermanentEntry(
             id=f"{date_str}-{fp[:8]}",
             captured_at=now_iso,
-            source_group=add.get("source_group", ""),
-            source_sender=add.get("source_sender", ""),
+            source_group=add.get("source_group") or "",
+            source_sender=add.get("source_sender") or "",
             category=category,
-            type=add.get("type", "permanent"),
+            type=coerce_enum(add.get("type"), PERMANENT_TYPES, "permanent", "permanent.type"),
             title=title,
-            content=add.get("content", ""),
+            content=add.get("content") or "",
             url=url,
             expires_at=add.get("expires_at"),
             notes=add.get("notes"),
@@ -120,11 +156,11 @@ def _persist_opportunities(out, date_str: str, hot_leads_dir) -> None:
         hot_leads_new.append(HotLead(
             id=f"{date_str}-hot-{i:03d}",
             captured_at=date_str,
-            title=add.get("title", ""),
-            summary=add.get("summary", ""),
-            category=add.get("category", "arbitrage"),
-            source_group=add.get("source_group", ""),
-            source_sender=add.get("source_sender", ""),
+            title=add.get("title") or "",
+            summary=add.get("summary") or "",
+            category=coerce_enum(add.get("category"), HOT_LEAD_CATEGORIES, "arbitrage", "hot_leads.category"),
+            source_group=add.get("source_group") or "",
+            source_sender=add.get("source_sender") or "",
             status="alive",
             risk_notes=add.get("risk_notes"),
         ))

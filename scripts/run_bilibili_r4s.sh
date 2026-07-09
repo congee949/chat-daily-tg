@@ -1,6 +1,6 @@
 #!/bin/sh
 # run_bilibili_r4s.sh — r4s (FriendlyWrt) cron wrapper for the hourly Bilibili
-# digest, the r4s counterpart of run_bilibili_guarded.sh (launchd/macOS).
+# digest. Sole scheduler for the digest (the Mac launchd path has been retired).
 #
 # Deploy: git archive → /root/chat-daily-tg (this script rides along).
 # Cron:   30 * * * * /bin/sh /root/chat-daily-tg/scripts/run_bilibili_r4s.sh

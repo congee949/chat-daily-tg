@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- LaunchDaemon (root), NOT a LaunchAgent: it calls `pmset disablesleep`,
+	     which requires root. Installed to /Library/LaunchDaemons. Keeps the
+	     channel forwarder's :00 slots covered by preventing clamshell sleep
+	     while on AC, and restores normal sleep on battery so a bagged laptop
+	     doesn't cook. See scripts/power_aware_disablesleep.sh. -->
+	<key>Label</key>
+	<string>com.chat-daily-tg.disablesleep</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/scripts/power_aware_disablesleep.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>StandardErrorPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/disablesleep.err</string>
+</dict>
+</plist>

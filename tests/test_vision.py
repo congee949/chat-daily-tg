@@ -238,3 +238,62 @@ def test_resolve_citations_drops_marker_when_local_path_missing():
     assert len(segments) == 1
     assert segments[0][1] is None
     assert "[IMG1]" not in segments[0][0]
+
+
+def test_normalize_score_rescales_and_rejects_off_scale_ratings():
+    from chat_daily_tg.vision import _normalize_score
+    assert _normalize_score(0.85) == 0.85          # in-range untouched
+    assert _normalize_score(8.5) == 0.85           # 0-10 scale → /10
+    assert _normalize_score(2.5) == 0.25           # qwen-style drift → /10
+    assert _normalize_score(10.0) == 1.0           # top of 0-10 scale → /10
+    assert _normalize_score(1.0) == 1.0
+    assert _normalize_score(0) == 0.0
+    assert _normalize_score(None) == 0.0
+    assert _normalize_score("bad") == 0.0           # non-numeric → 0.0
+    assert _normalize_score(-3) == 0.0              # negative → untrustworthy → 0.0
+    assert _normalize_score(15) == 0.0              # >10 (beyond rescale window) → 0.0
+
+
+def test_coerce_include_flag_trusts_only_explicit_bool():
+    from chat_daily_tg.vision import _coerce_include_flag
+    assert _coerce_include_flag(True) is True
+    assert _coerce_include_flag(False) is False     # explicit veto honoured
+    assert _coerce_include_flag(None) is True        # missing → include (score gate decides)
+    assert _coerce_include_flag("false") is True     # non-bool → not a trusted veto
+
+
+def _vision_response(value_score, *, include="MISSING"):
+    payload = {
+        "type": "risk_screenshot", "value_score": value_score, "summary": "风险",
+        "key_facts": ["封号"], "risk_flags": ["封号"], "reason": "有风险",
+    }
+    if include != "MISSING":
+        payload["should_include_in_daily"] = include
+    import json as _json
+    return {"choices": [{"message": {"content": _json.dumps(payload, ensure_ascii=False)}}]}
+
+
+def test_analyze_media_candidates_honours_should_include_veto(tmp_path, httpx_mock: HTTPXMock):
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    # High enough score, but the model vetoes inclusion → excluded.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9, include=False),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = analyze_media_candidates(client=client, candidates=[_candidate(str(image), score=0.8)])
+    assert out == []
+
+
+def test_analyze_media_candidates_includes_when_flag_missing(tmp_path, httpx_mock: HTTPXMock):
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    # No should_include_in_daily field → falls back to the score gate alone.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = analyze_media_candidates(client=client, candidates=[_candidate(str(image), score=0.8)])
+    assert len(out) == 1

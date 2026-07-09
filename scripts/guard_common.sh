@@ -11,6 +11,12 @@ guard_setup_env() {
   export HTTPS_PROXY="$PROXY" HTTP_PROXY="$PROXY"
   export NO_PROXY="127.0.0.1,localhost,::1"
   export no_proxy="$NO_PROXY"
+  # Drop any inherited ALL_PROXY (Shadowrocket / `launchctl setenv` often leaves a
+  # socks5:// value here). httpx.Client() eagerly builds a transport for EVERY proxy
+  # env var at construction, so a stray socks5 ALL_PROXY makes every client raise
+  # ImportError("'socksio' not installed") before a single request — the crash that
+  # took out the 2026-07-03 run even though HTTP(S)_PROXY above point at the http proxy.
+  unset ALL_PROXY all_proxy
   # Let notify_failure send Telegram alerts (it stays silent without this, so it
   # never fires in tests/ad-hoc runs).
   export CHAT_DAILY_TG_ALERTS=1

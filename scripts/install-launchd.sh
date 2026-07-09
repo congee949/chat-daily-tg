@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs the launchd agents — the daily report (com.chat-daily-tg.agent), the
-# 2-hourly channel forwarder (com.chat-daily-tg.channels), and the hourly
-# Bilibili digest (com.chat-daily-tg.bilibili). All plists call their guarded
-# wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
+# Installs the launchd agents — the daily report (com.chat-daily-tg.agent) and
+# the 2-hourly channel forwarder (com.chat-daily-tg.channels). All plists call
+# their guarded wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
 #
 # Secrets (DEEPSEEK_API_KEY / TG_BOT_TOKEN / TG_CHAT_ID / GOOGLE_API_KEY / VISION_API_KEY)
 # live in ~/chat-daily/.env and are loaded by run_daily at runtime — never baked into
@@ -52,10 +51,8 @@ PY
 
 install_label "com.chat-daily-tg.agent"
 install_label "com.chat-daily-tg.channels"
-# 2026-07-03: B站 digest 已迁移到 r4s cron（scripts/run_bilibili_r4s.sh，经
-# bwg tinyproxy 出口）。Mac 侧 plist 保留但不安装，防止双跑重复推送；
-# 需要切回 Mac 时取消下行注释并 unload r4s cron。
-# install_label "com.chat-daily-tg.bilibili"
+# B站 digest 只在 r4s cron 上跑（scripts/run_bilibili_r4s.sh，经 bwg tinyproxy
+# 出口）；Mac 侧 launchd 已彻底移除，此处不再安装（防双跑重复推送）。
 
 # grep with || true so missing match doesn't abort the script
 launchctl list | grep chat-daily-tg || true

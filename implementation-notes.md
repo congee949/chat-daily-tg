@@ -286,6 +286,12 @@
 - **修复后重跑 07-01 全链路真推成功**：`vision analyses included: 2 (citable: 2)`（wxgf+缩略图全被门槛挡掉，恰余两张电丸清晰大图）→ `TG push complete (single rich message, 2 inline image(s))`，单条图文混排，无回退。附带收益：vision 阶段 17min→3min（缩略图不再空耗视觉分析）。
 - 259 passed（新增 TG 偏好排序 1 例）。
 
+### 五修（同日，vision 切 CLIProxyAPI gemini-3.5-flash-low）
+用户嫌 vision 慢（qwenproxy ~50s/图），要求切到 CLIProxyAPI 的 3.5 flash。实测 `gemini-3.5-flash-low` 支持 OpenAI 格式 base64 图片输入，**8-11s/图（约 5 倍提速）**，读图质量良好。
+- **暴露分制漂移**：gemini 返回 `value_score=8.5`（0-10 制），不修会让 0.8 分数线形同虚设（垃圾图 3/10 也 >0.8）。双层修：`_vision_prompt` 明确"0.0-1.0 小数，不要 0-10 制"；解析层新增 `_normalize_score`（>1 视为 0-10 制除以 10，再 clamp [0,1]）——LLM 分制漂移是既往已知问题（qwen 也返过 2.5/3.0），这层边界归一化对任何后端都生效。
+- config.yaml vision 块切换（endpoint 8317 / model gemini-3.5-flash-low / CLIPROXY_API_KEY），修正后实测两张真实图 score=0.95/0.80，回到 0-1 制。
+- 260 passed（新增 `_normalize_score` 边界测试 1 例）。qwenproxy 保留未动，config 一行可切回。
+
 ## 2026-07-03 — launchd 代理污染致三任务全挂（socks ALL_PROXY × 无 socksio）
 
 **根因**：7-2 ~21:00 Shadowrocket 经 `launchctl setenv` 把 `ALL_PROXY=socks5://127.0.0.1:1082` 写进 launchd 用户环境。venv 的 httpx 无 socksio extra，`httpx.Client()` **构造即抛 ImportError**（在 NO_PROXY 求值之前），日报致命（exit=1）、channels 22:00/06:00 推送 0 条、bilibili 23:31 0/3 卡片。guard 脚本本就精心导出 `HTTP(S)_PROXY/NO_PROXY`，唯独漏了清 launchd 继承的 `ALL_PROXY`。

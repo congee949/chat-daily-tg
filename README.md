@@ -2,6 +2,12 @@
 
 每天自动导出微信和 Telegram 群消息，整理成统一日报推送到 Telegram，同时本地归档。
 
+## 日报示例
+
+推送到 Telegram 的富文本日报，按话题分区、`今日总览 / AI·工具 / 风险` 分节（示意图，内容脱敏）：
+
+<img src="daily-report-example.png" width="480" alt="每日日报推送示例">
+
 ## 架构
 
 ![chat-daily-tg 架构](chat-daily-architecture.png)

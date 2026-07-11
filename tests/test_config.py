@@ -138,3 +138,39 @@ telegram:
     assert cfg.models.embedding.model == "gemini-embedding-2"
     assert cfg.models.embedding.top_k == 6
     assert cfg.models.embedding.min_similarity == 0.4
+
+
+def test_resolve_model_alias_and_growth_judge_model(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["微信 A"]
+llm:
+  endpoint: "https://api.deepseek.com"
+  model: "deepseek-v4-pro"
+  api_key_env: "DEEPSEEK_API_KEY"
+grok:
+  endpoint: "http://127.0.0.1:8317/v1"
+  model: "grok-4.5"
+  api_key_env: "CLIPROXY_API_KEY"
+growth:
+  enabled: true
+  judge_model: "grok"
+  source:
+    id: "-1001162433032"
+    name: "电丸朱氏会社"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.growth.judge_model == "grok"
+    assert cfg.resolve_model_alias("grok").model == "grok-4.5"
+    # judge alias must not touch the summary/miner model
+    assert cfg.models.summary.model == "deepseek-v4-pro"
+    with pytest.raises(KeyError):
+        cfg.resolve_model_alias("nope")

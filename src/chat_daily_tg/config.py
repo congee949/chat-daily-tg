@@ -193,6 +193,8 @@ class Growth(BaseModel):
     chunk_chars: int = 60000         # transcript chunk budget per LLM call
     min_segment_msgs: int = 6
     max_segment_msgs: int = 300
+    judge_model: str | None = None   # top-level LLM alias (e.g. "grok") for the A/B
+                                     # judge; None = judge with the miner's model.
     weekly: GrowthWeekly = Field(default_factory=GrowthWeekly)
 
 
@@ -204,6 +206,7 @@ class Config(BaseModel):
     hot_leads: HotLeads = Field(default_factory=HotLeads)
     llm: LLM | None = None
     gemini: LLM | None = None
+    grok: LLM | None = None
     models: Models | None = None
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
@@ -242,11 +245,16 @@ class Config(BaseModel):
             raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, sources.telegram.raw_channels, or sources.bilibili")
         return self
 
-    def override_summary_model(self, model_name: str) -> None:
-        """Switch summary model by alias (e.g. 'gemini'). Raises KeyError if not found."""
+    def resolve_model_alias(self, model_name: str) -> LLM:
+        """Look up a top-level LLM alias (e.g. 'gemini', 'grok'). Raises KeyError if not found."""
         alt = getattr(self, model_name, None)
         if alt is None or not isinstance(alt, LLM):
             raise KeyError(f"unknown model alias: {model_name}")
+        return alt
+
+    def override_summary_model(self, model_name: str) -> None:
+        """Switch summary model by alias (e.g. 'gemini'). Raises KeyError if not found."""
+        alt = self.resolve_model_alias(model_name)
         self.models.summary = alt
         self.llm = alt
 

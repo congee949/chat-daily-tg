@@ -352,9 +352,7 @@ def run_bilibili(no_push: bool = False) -> int:
         return 1
 
 
-def _growth_llm(cfg):
-    """Same construction main()'s _run uses for the summary model."""
-    m = cfg.models.summary
+def _llm_from_block(cfg, m):
     return LLMClient(
         endpoint=m.endpoint, model=m.model, api_key=os.environ[m.api_key_env],
         max_tokens=m.max_tokens, timeout=m.timeout,
@@ -362,6 +360,11 @@ def _growth_llm(cfg):
         retry_backoff_seconds=cfg.retry.backoff_seconds,
         extra_body=m.extra_body,
     )
+
+
+def _growth_llm(cfg):
+    """Same construction main()'s _run uses for the summary model."""
+    return _llm_from_block(cfg, cfg.models.summary)
 
 
 def run_growth(no_push: bool = False, dm_test: bool = False,
@@ -393,6 +396,16 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
             log.info("growth mining disabled, nothing to do")
             return 0
         llm = _growth_llm(cfg)
+        # 异源 judge：B 卡作者与评审分属两厂（deepseek 写、grok 评），消除同源
+        # 自评偏好；别名/构造失败回落主模型，日卡永不因 judge 配置断供。
+        judge_llm = llm
+        if g.judge_model:
+            try:
+                judge_llm = _llm_from_block(cfg, cfg.resolve_model_alias(g.judge_model))
+                log.info("growth judge model: %s (%s)", g.judge_model, judge_llm.model)
+            except Exception as e:
+                log.warning("growth judge alias %r unavailable (%s), judging with main model",
+                            g.judge_model, e)
         today = date.today().isoformat()
         target_day = mine_date or yesterday_iso()
 
@@ -421,7 +434,7 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
                 card_b = ""
                 try:
                     card_b = build_card_b(llm, seg)
-                    verdict = judge(llm, card_a, card_b, rubric_text)
+                    verdict = judge(judge_llm, card_a, card_b, rubric_text)
                 except Exception as e:
                     # Style A is the zero-fabrication-risk deterministic card.
                     log.warning("card B/judge unavailable (%s), falling back to A", e)

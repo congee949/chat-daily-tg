@@ -62,7 +62,13 @@
 - **落款斜体化 + 去分隔线**：`<i>📍 日期 · 时段</i>`，引用块自带视觉分隔。
 - **INDEX.md 快查索引**（同日用户需求）：`growth/segments/INDEX.md` 每次挖到带切片段落后由 DB 全量重建（幂等），一行=日期 时段·主题·msg 区间·切片链接；卡片端零 msg 噪音、查询端一步直达。
 
-## Open Questions
+## Judge 异源化（2026-07-11，收尾 commit 后的独立增量）
+
+- **动机**：B 卡作者与 judge 同为 deepseek-v4-pro，LLM 自评存在自偏好倾向；首日判决 A 9.0:B 3.0 说明 rubric 压得住，但方法学上异源更干净。
+- **实现**：`Growth.judge_model`（别名，默认 None=同源现状，配置层可随时回退）+ `Config.grok` 别名字段 + `Config.resolve_model_alias()`（`override_summary_model` 重构复用）。`run_growth` 构造独立 `judge_llm`，仅 judge 换模型——挖掘与 B 卡仍走 `--model llm`，作者/评审分厂正是目的。
+- **通路**：grok-4.5 经本机 CLIProxyAPI（127.0.0.1:8317，xAI OAuth，SuperGrok 订阅零边际成本）；实测微型 judge 任务 4s 裸 JSON。代理依赖非新增脆弱类（models.summary 的 gemini 已依赖同一进程）。
+- **失败面**：别名解析/客户端构造失败 → log.warning 回落主模型；judge 调用失败 → 既有 try/except 回落 A 卡。日卡永不因 judge 断供。
+- **不做**：weekly 的 rubric 合并与内容分析仍用主模型（质量要求低于择优判决，不值得引第二依赖）。
 
 - 电丸群若未来改名/迁移，`cfg.growth.source` 需手动更新（chat_id 变化会让 mined_days/segments 的 key 断代，历史仍可查）。
 - 跨午夜对话被日界切断（与日报同行为）；如实际命中率高再考虑 ±2h 重叠窗。

@@ -24,6 +24,14 @@ LOG_DIR = DATA_DIR / "logs"
 # Bilibili digest dedup (raw_seen.SeenStore, keys "bilibili:<bvid>").
 BILIBILI_SEEN_PATH = DATA_DIR / "bilibili_seen.txt"
 
+# Growth mining (个人成长 topic) artifacts.
+GROWTH_DIR = DATA_DIR / "growth"
+GROWTH_SEGMENTS_DIR = GROWTH_DIR / "segments"
+GROWTH_RUBRIC = GROWTH_DIR / "rubric.md"
+GROWTH_RUBRIC_HISTORY = GROWTH_DIR / "rubric-history"
+GROWTH_OFFSET_PATH = GROWTH_DIR / "getupdates-offset.txt"
+GROWTH_FEEDBACK_INBOX = GROWTH_DIR / "feedback-inbox.jsonl"
+
 
 def migrate_legacy_config_if_needed(path: Path = CONFIG_PATH) -> None:
     """Copy the old wx-daily config on first chat-daily run, without deleting old data."""
@@ -49,3 +57,9 @@ def hot_leads_day_file(date_str: str) -> Path:
 
 def log_file_for(date_str: str) -> Path:
     return LOG_DIR / f"{date_str}.log"
+
+
+def growth_slice_file(date_str: str, start_msg_id: int) -> Path:
+    """`date_str` is YYYY-MM-DD → returns growth/segments/YYYY/MM/DD-<start_id>.md."""
+    y, m, d = date_str.split("-")
+    return GROWTH_SEGMENTS_DIR / y / m / f"{d}-{start_msg_id}.md"

@@ -51,6 +51,8 @@ PY
 
 install_label "com.chat-daily-tg.agent"
 install_label "com.chat-daily-tg.channels"
+install_label "com.chat-daily-tg.growth"
+install_label "com.chat-daily-tg.growth-weekly"
 # B站 digest 只在 r4s cron 上跑（scripts/run_bilibili_r4s.sh，经 bwg tinyproxy
 # 出口）；Mac 侧 launchd 已彻底移除，此处不再安装（防双跑重复推送）。
 

@@ -169,6 +169,33 @@ class ImgRelay(BaseModel):
     ttl_seconds: int = 300
 
 
+class GrowthSourceChat(BaseModel):
+    id: str                          # config form, e.g. '-1001162433032'
+    name: str
+    limit: int = 4000                # peak observed day is ~2100 msgs; headroom on top
+
+
+class GrowthWeekly(BaseModel):
+    weekday: int = 5                 # Python date.weekday(): 5 = Saturday
+
+
+class Growth(BaseModel):
+    """成长内容挖掘：从单个群挖「个人成长」向对话段落，精华卡片发 growth topic。
+
+    Mining is day-granular (Beijing calendar day). Cards carry verbatim quotes
+    that MUST survive the miner's trust-boundary check against messages.db."""
+    enabled: bool = False
+    source: GrowthSourceChat | None = None
+    topic: str = "growth"            # forum-topic key in ~/qwenproxy/.tg-notify-targets.json
+    backfill_start: str = "2026-04-27"
+    daily_quota: int = 1             # max cards pushed per day
+    min_score: float = 6.0           # segments scoring below this are stored as rejected
+    chunk_chars: int = 60000         # transcript chunk budget per LLM call
+    min_segment_msgs: int = 6
+    max_segment_msgs: int = 300
+    weekly: GrowthWeekly = Field(default_factory=GrowthWeekly)
+
+
 class Config(BaseModel):
     groups: list[str] | None = None
     sources: Sources = Field(default_factory=Sources)
@@ -183,6 +210,7 @@ class Config(BaseModel):
     sanitize: Sanitize = Field(default_factory=Sanitize)
     archive: Archive = Field(default_factory=Archive)
     img_relay: ImgRelay = Field(default_factory=ImgRelay)
+    growth: Growth = Field(default_factory=Growth)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("groups")

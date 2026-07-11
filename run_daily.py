@@ -352,6 +352,256 @@ def run_bilibili(no_push: bool = False) -> int:
         return 1
 
 
+def _growth_llm(cfg):
+    """Same construction main()'s _run uses for the summary model."""
+    m = cfg.models.summary
+    return LLMClient(
+        endpoint=m.endpoint, model=m.model, api_key=os.environ[m.api_key_env],
+        max_tokens=m.max_tokens, timeout=m.timeout,
+        retry_max_attempts=cfg.retry.max_attempts,
+        retry_backoff_seconds=cfg.retry.backoff_seconds,
+        extra_body=m.extra_body,
+    )
+
+
+def run_growth(no_push: bool = False, dm_test: bool = False,
+               model_alias: str | None = None, mine_date: str | None = None) -> int:
+    """Daily growth mining + one-card push (--growth-only), or mine-only for a
+    given date (--growth-mine-day). Idempotent: day-level mined marker + daily
+    send quota make the 09:30/15:30/21:30 catch-up schedule near-free reruns.
+    --dm-test previews the winner card in the DM with ZERO state writes (no
+    quota, no mark_sent, no ab log) so the real send still picks the same
+    segment; --no-push prints both cards instead of sending, also stateless."""
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"growth-{tag}"))
+    try:
+        from chat_daily_tg import growth_store
+        from chat_daily_tg.growth_cards import build_card_a, build_card_b, judge
+        from chat_daily_tg.growth_miner import GrowthMiningError, mine_day
+        from chat_daily_tg.growth_weekly import poll_dm_feedback
+        from chat_daily_tg.paths import (
+            DB_PATH, GROWTH_FEEDBACK_INBOX, GROWTH_OFFSET_PATH, GROWTH_RUBRIC,
+        )
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        if model_alias:
+            cfg.override_summary_model(model_alias)
+            log.info("growth model overridden to: %s (%s)", model_alias, cfg.models.summary.model)
+        g = cfg.growth
+        if not g.enabled or g.source is None:
+            log.info("growth mining disabled, nothing to do")
+            return 0
+        llm = _growth_llm(cfg)
+        today = date.today().isoformat()
+        target_day = mine_date or yesterday_iso()
+
+        try:
+            inserted, found = mine_day(llm, cfg, target_day, sync=(mine_date is None))
+            log.info("growth mine %s: %d candidates, %d queued", target_day, found, len(inserted))
+        except GrowthMiningError as e:
+            # Good chunks' segments are already queued; the day stays unmarked and
+            # is re-mined by the next catch-up run. Don't block today's card.
+            log.error("growth mining partial failure: %s", e)
+            notify_failure("chat-daily-tg 成长挖掘部分失败", f"{target_day}: {e}")
+
+        if mine_date is not None:
+            return 0  # --growth-mine-day: mine only
+
+        stateless = no_push or dm_test
+        if not stateless and growth_store.sent_count_on(DB_PATH, today) >= g.daily_quota:
+            log.info("growth daily quota (%d) reached, no push", g.daily_quota)
+        else:
+            seg = growth_store.pick_next(DB_PATH, prefer_date=target_day)
+            if seg is None:
+                log.info("growth queue empty, nothing to push today")
+            else:
+                rubric_text, rubric_version = growth_store.ensure_rubric(GROWTH_RUBRIC)
+                card_a = build_card_a(seg)
+                card_b = ""
+                try:
+                    card_b = build_card_b(llm, seg)
+                    verdict = judge(llm, card_a, card_b, rubric_text)
+                except Exception as e:
+                    # Style A is the zero-fabrication-risk deterministic card.
+                    log.warning("card B/judge unavailable (%s), falling back to A", e)
+                    verdict = {"winner": "A", "score_a": None, "score_b": None,
+                               "reason": f"B/judge failed: {type(e).__name__}"}
+                winner = verdict.get("winner", "A")
+                winner_card = card_b if winner == "B" and card_b else card_a
+                if no_push:
+                    print(f"=== segment {seg.id} (score {seg.score}) ===")
+                    print("--- Card A ---\n" + card_a)
+                    print("--- Card B ---\n" + (card_b or "(generation failed)"))
+                    print(f"--- verdict: {verdict}")
+                else:
+                    dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+                    if dm_test:
+                        chat_id, thread_id = dm_chat_id, None
+                    else:
+                        chat_id, thread_id = resolve_tg_target(g.topic, dm_chat_id)
+                        growth_store.log_ab(
+                            DB_PATH, seg.id, rubric_version, winner,
+                            verdict.get("score_a"), verdict.get("score_b"),
+                            str(verdict.get("reason", ""))[:200], card_a, card_b)
+                    sender = TelegramSender(
+                        bot_token=os.environ[cfg.telegram.bot_token_env],
+                        chat_id=chat_id, message_thread_id=thread_id,
+                        retry_max_attempts=cfg.retry.max_attempts,
+                        retry_backoff_seconds=cfg.retry.backoff_seconds,
+                    )
+                    # 电丸群消息一天一清，t.me 深链 24h 内必成死链——不放跳转按钮，
+                    # 原文回查一律走本地切片（slice_path）。
+                    sender.send_card(winner_card)
+                    if not dm_test:  # write-after-send: crash retries the same segment
+                        growth_store.mark_sent(DB_PATH, seg.id, style=winner)
+                    log.info("✓ growth card %s style %s → %s/thread=%s (dm_test=%s)",
+                             seg.id, winner, chat_id, thread_id, dm_test)
+
+        # getUpdates only retains ~24h, so the DAILY job harvests DM feedback into
+        # the durable inbox; the Saturday job consumes it. Failure never breaks the push.
+        if not stateless:
+            try:
+                n = poll_dm_feedback(
+                    os.environ[cfg.telegram.bot_token_env],
+                    os.environ[cfg.telegram.chat_id_env],
+                    offset_path=GROWTH_OFFSET_PATH, inbox_path=GROWTH_FEEDBACK_INBOX)
+                if n:
+                    log.info("growth feedback collected: %d", n)
+            except Exception as e:
+                log.warning("growth feedback poll failed: %s", e)
+        return 0
+    except Exception as e:
+        log.exception("growth daily failed: %s", e)
+        notify_failure("chat-daily-tg 成长挖掘失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
+def run_growth_backfill(model_alias: str | None = None) -> int:
+    """One-off history backfill (--growth-backfill): mine every day from
+    cfg.growth.backfill_start through yesterday into the queue. Day-level
+    resume via growth_mined_days; single-day failures are logged and skipped,
+    summarized at the end. Sending stays with the daily quota job."""
+    import time as _time
+
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"growth-backfill-{tag}"))
+    try:
+        from chat_daily_tg import growth_store
+        from chat_daily_tg.growth_miner import GrowthMiningError, _store_chat_id, mine_day
+        from chat_daily_tg.paths import DB_PATH
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        if model_alias:
+            cfg.override_summary_model(model_alias)
+        g = cfg.growth
+        if not g.enabled or g.source is None:
+            log.info("growth mining disabled, nothing to do")
+            return 0
+        llm = _growth_llm(cfg)
+        chat_id = _store_chat_id(g.source.id)
+        day = date.fromisoformat(g.backfill_start)
+        # Stop at the day BEFORE yesterday: yesterday belongs exclusively to the
+        # daily job, so a backfill running alongside it can never race the same
+        # day's mined-marker + overlap-dedup window.
+        end = date.today() - timedelta(days=2)
+        total_inserted = total_found = 0
+        failed: list[str] = []
+        while day <= end:
+            ds = day.isoformat()
+            day += timedelta(days=1)
+            if growth_store.day_already_mined(DB_PATH, chat_id, ds):
+                continue
+            try:
+                inserted, found = mine_day(llm, cfg, ds, sync=False)
+                total_inserted += len(inserted)
+                total_found += found
+                log.info("backfill %s: %d candidates, %d queued", ds, found, len(inserted))
+            except GrowthMiningError as e:
+                failed.append(ds)
+                log.error("backfill %s failed: %s", ds, e)
+            _time.sleep(1)  # gentle pacing between LLM days
+        log.info("✓ growth backfill done: %d queued (%d candidates), %d days failed",
+                 total_inserted, total_found, len(failed))
+        if failed:
+            notify_failure("chat-daily-tg 成长回填部分失败",
+                           f"{len(failed)} 天失败（重跑自动续）: {', '.join(failed[:10])}")
+            return 1
+        return 0
+    except Exception as e:
+        log.exception("growth backfill failed: %s", e)
+        notify_failure("chat-daily-tg 成长回填失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
+def run_growth_weekly(no_push: bool = False, model_alias: str | None = None) -> int:
+    """Saturday DM report (--growth-weekly): final feedback poll, fold feedback
+    into the versioned rubric, then send the A/B + queue + content-drift report
+    to the DM. Schedule is enforced by the launchd plist (Weekday=6), not here,
+    so manual runs work any day."""
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"growth-weekly-{tag}"))
+    try:
+        from chat_daily_tg.growth_miner import _store_chat_id
+        from chat_daily_tg.growth_weekly import (
+            build_weekly_report, consume_inbox, merge_rubric, poll_dm_feedback,
+        )
+        from chat_daily_tg.paths import (
+            DB_PATH, GROWTH_FEEDBACK_INBOX, GROWTH_OFFSET_PATH, GROWTH_RUBRIC,
+            GROWTH_RUBRIC_HISTORY,
+        )
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        if model_alias:
+            cfg.override_summary_model(model_alias)
+        g = cfg.growth
+        if not g.enabled or g.source is None:
+            log.info("growth mining disabled, nothing to do")
+            return 0
+        llm = _growth_llm(cfg)
+        bot_token = os.environ[cfg.telegram.bot_token_env]
+        dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+
+        try:  # catch the last <24h of feedback before consuming the inbox
+            poll_dm_feedback(bot_token, dm_chat_id,
+                             offset_path=GROWTH_OFFSET_PATH, inbox_path=GROWTH_FEEDBACK_INBOX)
+        except Exception as e:
+            log.warning("weekly feedback poll failed: %s", e)
+        feedback = consume_inbox(GROWTH_FEEDBACK_INBOX)
+        texts = [f["text"] for f in feedback]
+        try:
+            _, version, changed = merge_rubric(llm, GROWTH_RUBRIC, GROWTH_RUBRIC_HISTORY, texts)
+        except Exception:
+            # consume_inbox already rotated the inbox away; put the drained
+            # entries back so next week's run retries the merge instead of
+            # silently dropping this week's feedback.
+            if feedback:
+                with open(GROWTH_FEEDBACK_INBOX, "a", encoding="utf-8") as fh:
+                    for entry in feedback:
+                        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            raise
+        if changed:
+            log.info("rubric updated to %s from %d feedback item(s)", version, len(texts))
+
+        report = build_weekly_report(DB_PATH, _store_chat_id(g.source.id), llm, version, changed)
+        if no_push:
+            print(report)
+        else:
+            TelegramSender(
+                bot_token=bot_token, chat_id=dm_chat_id,
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+            ).send(report, parse_mode="HTML")
+        log.info("✓ growth weekly report done (rubric %s, changed=%s)", version, changed)
+        return 0
+    except Exception as e:
+        log.exception("growth weekly failed: %s", e)
+        notify_failure("chat-daily-tg 成长周报失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
 _TIME_RE = re.compile(r"\d{2}:\d{2}")
 
 
@@ -760,10 +1010,27 @@ if __name__ == "__main__":
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     p.add_argument("--bilibili-only", action="store_true",
                    help="Run only the hourly Bilibili subscription digest (no summary)")
+    p.add_argument("--growth-only", action="store_true",
+                   help="Run only the daily growth mining + card push")
+    p.add_argument("--growth-mine-day", metavar="YYYY-MM-DD", default=None,
+                   help="Mine one specific day into the growth queue, no push (debug)")
+    p.add_argument("--growth-backfill", action="store_true",
+                   help="Backfill growth mining from cfg.growth.backfill_start (queue only)")
+    p.add_argument("--growth-weekly", action="store_true",
+                   help="Send the weekly growth A/B report to the DM")
+    p.add_argument("--dm-test", action="store_true",
+                   help="With --growth-only: send the winner card to the DM, zero state writes")
     args = p.parse_args()
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))
     if args.bilibili_only:
         sys.exit(run_bilibili(no_push=args.no_push))
+    if args.growth_only or args.growth_mine_day:
+        sys.exit(run_growth(no_push=args.no_push, dm_test=args.dm_test,
+                            model_alias=args.model, mine_date=args.growth_mine_day))
+    if args.growth_backfill:
+        sys.exit(run_growth_backfill(model_alias=args.model))
+    if args.growth_weekly:
+        sys.exit(run_growth_weekly(no_push=args.no_push, model_alias=args.model))
     sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push,
                   skip_if_done=args.skip_if_done))

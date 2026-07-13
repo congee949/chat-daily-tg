@@ -56,6 +56,14 @@ def test_parse_reduces_markdown_links_to_label():
     assert "http" not in card.resources[0]
 
 
+def test_parse_strips_img_citation_markers():
+    # [IMGn] only means something to resolve_citations in the text push; on the
+    # PNG card it would render as a literal bracket token.
+    md = "### 🧠 AI / 工具\n- **主题**：结论 [IMG1]（电丸）\n- 次要 [IMG2]。"
+    card = parse_concise_to_card(md, "2026-04-17")
+    assert card.ai_tools == ["主题：结论（电丸）", "次要。"]
+
+
 def test_parse_drops_detail_section():
     card = parse_concise_to_card(SAMPLE, "2026-04-17")
     # 🧾 详情 (local path) must not leak into any card field

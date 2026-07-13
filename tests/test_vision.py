@@ -217,13 +217,133 @@ def test_resolve_citations_strips_unknown_id_without_breaking_segment():
 
     segments = resolve_citations(text, id_map)
 
-    # [IMG9] isn't in id_map so it's stripped with no split point; the merged
-    # text up to the next VALID marker [IMG1] pairs with that marker's image.
+    # [IMG9] isn't in id_map so it's stripped with no split point (its padding
+    # space eaten too); the merged text up to the next VALID marker [IMG1]
+    # pairs with that marker's image.
     assert len(segments) == 2
-    assert segments[0][0] == "前面  后面 "
+    assert segments[0][0] == "前面 后面 "
     assert segments[0][1].candidate.local_path == "/x/1.jpg"
     assert segments[1][0] == " 尾巴"
     assert segments[1][1] is None
+
+
+def test_resolve_citations_dedupes_repeated_id_preferring_section_over_overview():
+    # 2026-07-12 regression: [IMG1] cited under BOTH 今日总览 and AI/工具 inlined
+    # the same article screenshot twice. The kept occurrence must be the
+    # section one; the overview marker is stripped without splitting there.
+    id_map = {1: _analysis("/x/1.jpg")}
+    text = (
+        "### 🌅 今日总览\n- 巨头反目：苹果起诉 OpenAI [IMG1]。\n\n"
+        "### 🧠 AI / 工具\n- **苹果起诉 OpenAI**：详情 [IMG1]（电丸）\n\n"
+        "### ⚠️ 风险\n- 无"
+    )
+
+    segments = resolve_citations(text, id_map)
+
+    images = [img for _, img in segments if img]
+    assert len(images) == 1
+    assert "今日总览" in segments[0][0] and "AI / 工具" in segments[0][0]
+    full_text = "".join(t for t, _ in segments)
+    assert "[IMG" not in full_text
+    assert "风险" in full_text  # text after the kept marker survives
+
+
+def test_resolve_citations_duplicate_markers_do_not_consume_image_budget():
+    # 2026-07-10 regression class: more markers than unique ids hit the
+    # max_images cut and the repeated id crowded a unique image out (real case
+    # was 5 markers / 4 ids; fixture uses 4 / 3). Dedup runs BEFORE the cut.
+    id_map = {i: _analysis(f"/x/{i}.jpg") for i in range(1, 4)}
+    text = "甲 [IMG1] 乙 [IMG1] 丙 [IMG2] 丁 [IMG3] 尾"
+
+    segments = resolve_citations(text, id_map, max_images=3)
+
+    images = [img for _, img in segments if img]
+    assert [i.candidate.local_path for i in images] == [
+        "/x/1.jpg", "/x/2.jpg", "/x/3.jpg",
+    ]
+    full_text = "".join(t for t, _ in segments)
+    assert "[IMG" not in full_text
+
+
+def test_resolve_citations_moves_marker_past_closing_punctuation():
+    # "…破裂 [IMG1]。" must not orphan the "。" onto the chunk after the image.
+    id_map = {1: _analysis("/x/1.jpg"), 2: _analysis("/x/2.jpg")}
+    text = "- 结论 [IMG1]。\n\n### 💰 钱 / 活动\n- 主题 [IMG2]（电丸）\n- 其他"
+
+    segments = resolve_citations(text, id_map)
+
+    assert segments[0][0] == "- 结论。"
+    assert segments[0][1].candidate.local_path == "/x/1.jpg"
+    assert segments[1][0].endswith("- 主题（电丸）")
+    assert segments[1][1].candidate.local_path == "/x/2.jpg"
+    assert segments[2][0] == "\n- 其他"
+
+
+def test_resolve_citations_dedup_prefers_any_section_over_overview():
+    # Not only AI/工具: a 钱/活动 occurrence must also beat the overview one.
+    id_map = {1: _analysis("/x/1.jpg")}
+    text = (
+        "### 🌅 今日总览\n- 总览提到活动 [IMG1]\n\n"
+        "### 💰 钱 / 活动\n- 活动详情 [IMG1]\n\n"
+        "### ⚠️ 风险\n- 无"
+    )
+
+    segments = resolve_citations(text, id_map)
+
+    images = [img for _, img in segments if img]
+    assert len(images) == 1
+    # The split happens at the 钱/活动 bullet, so the overview text and the
+    # section bullet share the first chunk (kept marker retains its padding).
+    assert segments[0][0].rstrip().endswith("- 活动详情")
+    assert "总览提到活动" in segments[0][0]
+    assert "[IMG" not in "".join(t for t, _ in segments)
+
+
+def test_resolve_citations_moves_marker_past_halfwidth_tail():
+    id_map = {1: _analysis("/x/1.jpg")}
+    text = "- point [IMG1] (source).\nnext"
+
+    segments = resolve_citations(text, id_map)
+
+    # The swap eats the marker's own padding (right call for the dominant
+    # full-width case), so the tail reattaches without the original space.
+    assert segments[0][0] == "- point(source)."
+    assert segments[0][1] is not None
+    assert segments[1][0] == "\nnext"
+
+
+def test_strip_citation_markers_removes_all_markers_and_padding():
+    from chat_daily_tg.vision import strip_citation_markers
+
+    assert strip_citation_markers("面临破裂 [IMG1]。后续") == "面临破裂。后续"
+    assert strip_citation_markers("无标记文本") == "无标记文本"
+
+
+def test_build_citation_block_dedupes_same_file():
+    # The same local file analyzed twice must get ONE id — two ids for one image
+    # would sidestep resolve_citations' per-id dedup and inline the photo twice.
+    a = _analysis("/x/same.jpg", value_score=0.9)
+    b = _analysis("/x/same.jpg", value_score=0.85)
+    c = _analysis("/x/other.jpg", value_score=0.8)
+
+    _, id_map = build_citation_block([a, b, c])
+
+    paths = [item.candidate.local_path for item in id_map.values()]
+    assert sorted(paths) == ["/x/other.jpg", "/x/same.jpg"]
+
+
+def test_build_citation_block_same_file_keeps_highest_score():
+    # First-seen must not shadow a later, higher-scoring analysis of the same
+    # file — the collapse must never demote the image in the ranking.
+    low = _analysis("/x/same.jpg", value_score=0.5)
+    high = _analysis("/x/same.jpg", value_score=0.99)
+    other = _analysis("/x/other.jpg", value_score=0.8)
+
+    _, id_map = build_citation_block([low, high, other])
+
+    same = next(i for i in id_map.values() if i.candidate.local_path == "/x/same.jpg")
+    assert same.value_score == 0.99
+    assert id_map[1].candidate.local_path == "/x/same.jpg"  # ranked by kept score
 
 
 def test_resolve_citations_no_markers_returns_single_segment():

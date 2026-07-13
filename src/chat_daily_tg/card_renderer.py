@@ -79,10 +79,14 @@ class CardData:
 
 
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+# [IMGn] citation markers only mean something to resolve_citations in the text
+# push — on the PNG card they would render as literal bracket tokens.
+_IMG_MARKER_RE = re.compile(r"[ \t]*\[IMG\d+\]")
 
 
 def _clean_item(line: str) -> str:
-    """Strip a leading bullet, **bold** markers, and reduce [label](url) to label.
+    """Strip a leading bullet, **bold** markers, [IMGn] citation markers, and
+    reduce [label](url) to label.
 
     The card is a glanceable teaser; clickable URLs still live in the full text
     message sent right after, so showing just the label keeps the card uncluttered.
@@ -91,6 +95,7 @@ def _clean_item(line: str) -> str:
     if line.startswith("- "):
         line = line[2:].strip()
     line = line.replace("**", "")
+    line = _IMG_MARKER_RE.sub("", line)
     line = _MD_LINK_RE.sub(r"\1", line)
     return line
 

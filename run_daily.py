@@ -907,6 +907,12 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             log.warning("fact risk report generated: %s", archive_dir / "fact-risk-report.md")
 
     concise_processed = post_process_concise(out.concise_md, cfg.source_abbreviations)
+    if not citation_map:
+        # No citable images today → resolve_citations never runs, so any [IMGn]
+        # the LLM emitted anyway must be stripped here or it reaches the reader
+        # as a literal bracket token.
+        from chat_daily_tg.vision import strip_citation_markers
+        concise_processed = strip_citation_markers(concise_processed)
 
     # Guard against empty or near-empty output after repair
     if len(concise_processed.strip()) < 100:
@@ -951,8 +957,24 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
         )
-        image_sent = False
-        if cfg.telegram.send_image:
+        # Per-stage sent markers: COMPLETE_MARKER is only written after the WHOLE
+        # push, so a failure between a delivered stage and that marker made the
+        # same-day catch-up re-send the already-delivered card/digest. The rich
+        # and card sends have no chunk-level resume (unlike .text-push-state.json),
+        # so day-level "this stage already delivered" is the right idempotency
+        # granularity — a catch-up rerun regenerates DIFFERENT text, and the day's
+        # digest must still go out at most once.
+        card_marker = archive_dir / ".card-sent"
+        digest_marker = archive_dir / ".digest-sent"
+        image_sent = card_marker.exists()
+        if image_sent:
+            log.info("card already sent for %s, skipping (catch-up)", date_str)
+        elif cfg.telegram.send_image and digest_marker.exists():
+            # A prior run delivered the digest but its card failed — a catch-up
+            # card would now arrive AFTER the text, inverting the card-first
+            # contract. The card is a glanceable add-on; drop the late one.
+            log.info("digest already sent for %s, skipping late card (catch-up)", date_str)
+        elif cfg.telegram.send_image:
             # Render a glanceable PNG card and send it BEFORE the text. Any failure
             # (render/Chrome/sendPhoto) only logs and falls through to the text push.
             try:
@@ -965,10 +987,16 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                     caption = card_caption(card) if cfg.telegram.image_caption else ""
                     tg.send_photo(png, caption=caption)
                     image_sent = True
+                    card_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
                     log.info("TG card image sent")
             except Exception as e:
                 log.warning("card image push failed, falling back to text: %s", e)
-        if image_sent and cfg.telegram.image_only:
+        if digest_marker.exists():
+            log.info("digest already sent for %s, skipping (catch-up)", date_str)
+        elif image_sent and cfg.telegram.send_image and cfg.telegram.image_only:
+            # send_image gates the skip too: if the operator turned the card off
+            # after a day's card already went out, they want the text after all —
+            # a stale .card-sent must not turn the day into a silent no-op.
             # Image-only mode: the card was delivered, so skip the full text message.
             # (Text still sends below if the image failed — image_sent would be False.)
             log.info("image_only mode: skipping text push")
@@ -982,11 +1010,13 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             segments = resolve_citations(concise_processed, citation_map) if citation_map else []
             cited_list = [analysis for _, analysis in segments if analysis]
             if cited_list and cfg.img_relay.enabled and _push_rich_digest(tg, cfg, out.concise_md, citation_map):
+                digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
                 log.info("TG push complete (single rich message, %d inline image(s))", len(cited_list))
             else:
                 full_text = "".join(chunk for chunk, _ in segments) if segments else concise_processed
                 tg.send(full_text, parse_mode="HTML",
                         state_path=archive_dir / ".text-push-state.json")
+                digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
                 sent = 0
                 for cited in cited_list:
                     try:

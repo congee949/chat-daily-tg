@@ -648,6 +648,218 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 
 
 
+def test_run_daily_catchup_rerun_does_not_resend_delivered_digest(tmp_path, monkeypatch):
+    """A failure AFTER the digest send but BEFORE .run-complete used to make the
+    same-day catch-up re-push the whole report (per-stage .digest-sent marker)."""
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+
+    (tmp_path / "config.yaml").write_text(
+        """
+sources:
+  wechat:
+    groups: [G1]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+
+    llm_content = (
+        "```markdown concise\n"
+        "### 🌅 今日总览\n"
+        "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发。\n"
+        "- 第二条测试 bullet 增加长度。\n"
+        "\n"
+        "### 💰 钱 / 活动\n"
+        "- **测试主题**：测试内容足够长，超过一百字符限制。\n"
+        "```\n\n"
+        "```markdown detailed\nDetailed\n```\n\n"
+        "```json opportunities\n"
+        '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+        "```"
+    )
+    verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1",
+            message_count=1,
+            content="# group\n\n### 2026-04-17 10:00\n\n**A**: hi\n",
+            media_candidates=[],
+        )
+        # Two full runs → four LLM calls (draft + verify each).
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+            (llm_content, {"total_tokens": 10}),
+            (verified_content, {"total_tokens": 8}),
+        ]
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_instance = tg_client_cls.return_value.__enter__.return_value
+        tg_client_instance.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        assert run_daily.main(date_str="2026-04-17") == 0
+        assert len(tg_client_instance.post.call_args_list) == 1
+
+        archive = tmp_path / "archive" / "2026" / "04" / "17"
+        assert (archive / ".digest-sent").exists()
+        # Simulate a crash after the send but before the completion marker:
+        # the catch-up re-invokes WITHOUT --skip-if-done and regenerates the
+        # summary, but the delivered digest must not be pushed a second time.
+        (archive / ".run-complete").unlink()
+        assert run_daily.main(date_str="2026-04-17") == 0
+        assert len(tg_client_instance.post.call_args_list) == 1
+
+
+def _daily_paths_and_config(tmp_path, monkeypatch, config_body: str):
+    import chat_daily_tg.paths as paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setattr(paths, "DB_PATH", tmp_path / "chat-daily.db")
+    monkeypatch.setattr(paths, "PERMANENT_JSONL", tmp_path / "permanent.jsonl")
+    monkeypatch.setattr(paths, "PERMANENT_MD", tmp_path / "permanent.md")
+    monkeypatch.setattr(paths, "REPEAT_TOPICS_JSONL", tmp_path / "repeat_topics.jsonl")
+    monkeypatch.setattr(paths, "HOT_LEADS_DIR", tmp_path / "hot-leads")
+    monkeypatch.setattr(paths, "HOT_LEADS_LATEST", tmp_path / "hot-leads" / "latest.md")
+    (tmp_path / "config.yaml").write_text(config_body, encoding="utf-8")
+    monkeypatch.setenv("K", "fake")
+    monkeypatch.setenv("TT", "fake")
+    monkeypatch.setenv("TC", "123")
+
+
+_PLAIN_CONCISE = (
+    "```markdown concise\n"
+    "### 🌅 今日总览\n"
+    "- 测试总览内容，确保长度超过一百字符以避免空内容保护触发。\n"
+    "- 第二条测试 bullet 增加长度。\n"
+    "\n"
+    "### 💰 钱 / 活动\n"
+    "- **测试主题**：测试内容足够长，超过一百字符限制。\n"
+    "```\n\n"
+    "```markdown detailed\nDetailed\n```\n\n"
+    "```json opportunities\n"
+    '{"permanent_additions":[],"hot_leads_additions":[],"death_signals":[],"topic_mentions":[]}\n'
+    "```"
+)
+
+
+def test_run_daily_digest_marker_suppresses_late_card(tmp_path, monkeypatch):
+    """Card failed in run A but the digest went out; the catch-up must NOT send
+    a card after the text (order inversion) nor re-send the digest."""
+    _daily_paths_and_config(tmp_path, monkeypatch, """
+sources:
+  wechat:
+    groups: [G1]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+telegram: {bot_token_env: "TT", chat_id_env: "TC", send_image: true}
+""")
+    verified = _PLAIN_CONCISE + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    # Simulate run A's outcome: digest delivered, card not.
+    archive = tmp_path / "archive" / "2026" / "04" / "17"
+    archive.mkdir(parents=True)
+    (archive / ".digest-sent").write_text("t", encoding="utf-8")
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.card_renderer.render_card_png") as mock_render, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1", message_count=1,
+            content="# group\n\n### 2026-04-17 10:00\n\n**A**: hi\n",
+            media_candidates=[],
+        )
+        mock_chat.side_effect = [
+            (_PLAIN_CONCISE, {"total_tokens": 10}),
+            (verified, {"total_tokens": 8}),
+        ]
+        tg_client_instance = tg_client_cls.return_value.__enter__.return_value
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        assert run_daily.main(date_str="2026-04-17") == 0
+
+    mock_render.assert_not_called()  # late card suppressed before rendering
+    tg_client_instance.post.assert_not_called()  # …and nothing re-sent
+    assert (archive / ".run-complete").exists()
+
+
+def test_run_daily_strips_marker_when_no_citable_images(tmp_path, monkeypatch):
+    """Vision produced no citable images (empty citation_map) but the LLM emitted
+    [IMG1] anyway — the literal token must not reach the pushed text."""
+    _daily_paths_and_config(tmp_path, monkeypatch, """
+sources:
+  wechat:
+    groups: [G1]
+models:
+  summary: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
+  vision:
+    enabled: true
+    endpoint: "http://vision"
+    model: "vision"
+    api_key_env: "VK"
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""")
+    monkeypatch.setenv("VK", "fake")
+    llm_content = _PLAIN_CONCISE.replace("超过一百字符限制。", "超过一百字符限制 [IMG1]。")
+    verified = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
+
+    with patch("run_daily.export_group") as mock_export_group, \
+         patch("run_daily.analyze_media_candidates", return_value=[]), \
+         patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
+         patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
+        mock_export_group.return_value = MagicMock(
+            group_name="G1", message_count=1,
+            content="# group\n\n### 2026-04-17 10:00\n\n**A**: hi\n",
+            media_candidates=[],
+        )
+        mock_chat.side_effect = [
+            (llm_content, {"total_tokens": 10}),
+            (verified, {"total_tokens": 8}),
+        ]
+        tg_resp = MagicMock()
+        tg_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        tg_resp.raise_for_status = MagicMock()
+        tg_client_instance = tg_client_cls.return_value.__enter__.return_value
+        tg_client_instance.post.return_value = tg_resp
+
+        import run_daily
+        monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
+        monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        assert run_daily.main(date_str="2026-04-17") == 0
+
+    post_calls = tg_client_instance.post.call_args_list
+    assert [c for c in post_calls if c.args[0].endswith("/sendPhoto")] == []
+    message_calls = [c for c in post_calls if c.args[0].endswith("/sendMessage")]
+    assert len(message_calls) == 1
+    text = message_calls[0].kwargs["data"]["text"]
+    assert "[IMG" not in text
+    assert "测试主题" in text
+
+
 def _rich_cfg_and_map(tmp_img_path: str):
     from chat_daily_tg.config import ImgRelay
     from chat_daily_tg.media import MediaCandidate

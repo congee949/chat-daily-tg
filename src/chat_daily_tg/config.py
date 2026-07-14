@@ -39,9 +39,19 @@ class ImageModel(OptionalModel):
     mode: Literal["off", "auto", "always"] = "off"
 
 
+class VisionModel(OptionalModel):
+    """Image-selection thresholds live here, not as code defaults: both past
+    tunings (0.65→0.8 include bar 2026-07-02, fallback floor 2026-07-14) were
+    library-source edits, and vision-audit.jsonl exists precisely so these can
+    be recalibrated from history without a deploy (PR #8 review X2)."""
+    min_prefilter_score: float = 0.45
+    min_include_score: float = 0.8
+    fallback_min_score: float = 0.65
+
+
 class Models(BaseModel):
     summary: LLM
-    vision: OptionalModel | None = None
+    vision: VisionModel | None = None
     image: ImageModel | None = None
     embedding: EmbeddingModel | None = None
 

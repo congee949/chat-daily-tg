@@ -106,7 +106,7 @@ def test_analyze_media_candidates_filters_low_score_missing_path_and_thumbnails(
     assert "风险" in vision_markdown(out)
 
 
-def test_analyze_media_candidates_excludes_below_08_value_score(tmp_path, httpx_mock: HTTPXMock):
+def test_analyze_media_candidates_excludes_below_fallback_floor(tmp_path, httpx_mock: HTTPXMock):
     image = tmp_path / "a.jpg"
     _real_image(image)
     httpx_mock.add_response(
@@ -115,7 +115,7 @@ def test_analyze_media_candidates_excludes_below_08_value_score(tmp_path, httpx_
         json={
             "choices": [{
                 "message": {
-                    "content": '{"type":"price_screenshot","value_score":0.7,"summary":"价格","key_facts":["满减"],"risk_flags":[],"should_include_in_daily":true,"reason":"一般"}'
+                    "content": '{"type":"price_screenshot","value_score":0.6,"summary":"价格","key_facts":["满减"],"risk_flags":[],"should_include_in_daily":true,"reason":"一般"}'
                 }
             }]
         },
@@ -124,7 +124,8 @@ def test_analyze_media_candidates_excludes_below_08_value_score(tmp_path, httpx_
 
     out = analyze_media_candidates(client=client, candidates=[_candidate(str(image), score=0.8)])
 
-    assert out == []  # 0.7 < the 0.8 include bar
+    # 0.6 misses BOTH the 0.8 include bar and the 0.65 zero-image fallback floor.
+    assert out == []
 
 
 def test_build_citation_block_ranks_and_caps_by_value_score():
@@ -371,7 +372,8 @@ def test_normalize_score_rescales_and_rejects_off_scale_ratings():
     assert _normalize_score(None) == 0.0
     assert _normalize_score("bad") == 0.0           # non-numeric → 0.0
     assert _normalize_score(-3) == 0.0              # negative → untrustworthy → 0.0
-    assert _normalize_score(15) == 0.0              # >10 (beyond rescale window) → 0.0
+    assert _normalize_score(15) == 0.15             # (10, 100] → percent scale → /100
+    assert _normalize_score(101) == 0.0             # beyond every rescale window → 0.0
 
 
 def test_coerce_include_flag_trusts_only_explicit_bool():
@@ -417,3 +419,347 @@ def test_analyze_media_candidates_includes_when_flag_missing(tmp_path, httpx_moc
     client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
     out = analyze_media_candidates(client=client, candidates=[_candidate(str(image), score=0.8)])
     assert len(out) == 1
+
+
+def test_vision_client_retries_429_then_succeeds(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        status_code=429,
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = client.analyze(_candidate(str(image)))
+    assert out.value_score == 0.9
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_vision_client_does_not_retry_client_errors(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    import httpx
+    import pytest
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    # 400 (bad payload) won't heal on retry — must raise after ONE request.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        status_code=400,
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    with pytest.raises(httpx.HTTPStatusError):
+        client.analyze(_candidate(str(image)))
+    assert len(httpx_mock.get_requests()) == 1
+
+
+def test_vision_client_gives_up_after_exhausting_retries(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    import httpx
+    import pytest
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    for _ in range(3):
+        httpx_mock.add_response(
+            url="https://vision.example/v1/chat/completions", method="POST",
+            status_code=429,
+        )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    with pytest.raises(httpx.HTTPStatusError):
+        client.analyze(_candidate(str(image)))
+    assert len(httpx_mock.get_requests()) == 3
+
+
+def test_analyze_media_candidates_reports_api_failures_in_stats(tmp_path, httpx_mock: HTTPXMock, monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    for _ in range(3):  # one analyze() = up to 3 HTTP attempts with retry
+        httpx_mock.add_response(
+            url="https://vision.example/v1/chat/completions", method="POST",
+            status_code=500,
+        )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    with caplog.at_level(logging.WARNING, logger="chat_daily_tg.vision"):
+        out = analyze_media_candidates(
+            client=client, candidates=[_candidate(str(image), score=0.8)],
+            stats_out=stats)
+    assert out == []
+    assert stats["attempted"] == 1
+    assert stats["api_failed"] == 1
+    assert stats["included"] == 0
+    # The failure must leave a trace — this exact silence hid the 2026-07-14 gap.
+    assert any("vision analyze failed" in r.message for r in caplog.records)
+    # Total API failure is a pipeline outage, not a low-value day → ERROR level.
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+def test_analyze_media_candidates_stats_distinguish_below_bar_from_failure(tmp_path, httpx_mock: HTTPXMock):
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.5),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client, candidates=[_candidate(str(image), score=0.8)],
+        stats_out=stats)
+    assert out == []
+    assert stats == {"skipped_prefilter": 0, "skipped_invalid": 0,
+                     "attempted": 1, "api_failed": 0, "aborted_early": 0,
+                     "filtered_empty": 0, "below_bar": 1, "model_veto": 0,
+                     "fallback_included": 0, "included": 0}
+
+
+def test_analyze_media_candidates_fallback_promotes_best_below_bar(tmp_path, httpx_mock: HTTPXMock):
+    img_a = tmp_path / "a.jpg"
+    _real_image(img_a)
+    img_b = tmp_path / "b.jpg"
+    _real_image(img_b)
+    # Nothing clears 0.8; 0.7 beats 0.66 → exactly the single best is promoted.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.66),
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.7),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    audit: list = []
+    out = analyze_media_candidates(
+        client=client,
+        candidates=[_candidate(str(img_a), score=0.8), _candidate(str(img_b), score=0.8)],
+        stats_out=stats, audit_out=audit)
+    assert len(out) == 1
+    assert out[0].value_score == 0.7
+    assert stats["fallback_included"] == 1
+    assert stats["included"] == 1
+    assert stats["below_bar"] == 1  # the 0.66 stays below-bar
+    assert sorted(row["decision"] for row in audit) == ["below-bar", "fallback-included"]
+
+
+def test_analyze_media_candidates_no_fallback_when_bar_cleared(tmp_path, httpx_mock: HTTPXMock):
+    img_a = tmp_path / "a.jpg"
+    _real_image(img_a)
+    img_b = tmp_path / "b.jpg"
+    _real_image(img_b)
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.7),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client,
+        candidates=[_candidate(str(img_a), score=0.8), _candidate(str(img_b), score=0.8)],
+        stats_out=stats)
+    assert len(out) == 1
+    assert out[0].value_score == 0.9
+    assert stats["fallback_included"] == 0
+
+
+def test_analyze_media_candidates_fallback_never_overrides_veto_or_low_score(tmp_path, httpx_mock: HTTPXMock):
+    img_a = tmp_path / "a.jpg"
+    _real_image(img_a)
+    img_b = tmp_path / "b.jpg"
+    _real_image(img_b)
+    # 0.9 but vetoed; 0.5 below the 0.65 fallback floor → still an imageless day.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9, include=False),
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.5),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client,
+        candidates=[_candidate(str(img_a), score=0.8), _candidate(str(img_b), score=0.8)],
+        stats_out=stats)
+    assert out == []
+    assert stats["fallback_included"] == 0
+
+
+def test_analyze_media_candidates_counts_model_veto_separately(tmp_path, httpx_mock: HTTPXMock):
+    image = tmp_path / "a.jpg"
+    _real_image(image)
+    # High score but explicit veto → model_veto, NOT below_bar: the breakdown
+    # must answer "score too low or model said no?" without a replay.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9, include=False),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client, candidates=[_candidate(str(image), score=0.8)],
+        stats_out=stats)
+    assert out == []
+    assert stats["model_veto"] == 1
+    assert stats["below_bar"] == 0
+
+
+def test_analyze_media_candidates_audit_out_records_every_attempt(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    ok_img = tmp_path / "a.jpg"
+    _real_image(ok_img)
+    fail_img = tmp_path / "b.jpg"
+    _real_image(fail_img)
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.5),
+    )
+    for _ in range(3):
+        httpx_mock.add_response(
+            url="https://vision.example/v1/chat/completions", method="POST",
+            status_code=500,
+        )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    audit: list = []
+    analyze_media_candidates(
+        client=client,
+        candidates=[_candidate(str(ok_img), score=0.8), _candidate(str(fail_img), score=0.8)],
+        audit_out=audit)
+    assert [row["decision"] for row in audit] == ["below-bar", "api_failed"]
+    assert audit[0]["value_score"] == 0.5
+    assert "error" in audit[1]
+
+
+def test_normalize_score_rescales_percent_scale():
+    from chat_daily_tg.vision import _normalize_score
+    assert _normalize_score(85) == 0.85     # percent drift → /100, not zeroed
+    assert _normalize_score(8.5) == 0.85    # 0-10 drift → /10
+    assert _normalize_score(0.85) == 0.85
+    assert _normalize_score(101) == 0.0     # still-garbage stays untrusted
+
+
+def test_vision_client_retries_soft_200_error_page(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    # 200 with an HTML error page (documented CLIProxy soft failure, llm_client
+    # review #10) must retry like a 5xx, not die on attempt 1.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        status_code=200, text="<html>Bad gateway</html>",
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = client.analyze(_candidate(str(image)))
+    assert out.value_score == 0.9
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_vision_client_retries_200_without_choices(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json={"error": "overloaded"},
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = client.analyze(_candidate(str(image)))
+    assert out.value_score == 0.9
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_normalize_score_rejects_boolean():
+    from chat_daily_tg.vision import _normalize_score
+    # float(True) == 1.0 would be a perfect score from a non-numeric value.
+    assert _normalize_score(True) == 0.0
+    assert _normalize_score(False) == 0.0
+
+
+def test_circuit_breaker_stops_after_consecutive_failures(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    import chat_daily_tg.vision as vision_mod
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [])
+    monkeypatch.setattr(vision_mod, "_CIRCUIT_BREAKER_FAILURES", 2)
+    images = []
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        p = tmp_path / name
+        _real_image(p)
+        images.append(p)
+    # Only 2 HTTP failures should ever be issued: breaker trips, c/d skipped.
+    for _ in range(2):
+        httpx_mock.add_response(
+            url="https://vision.example/v1/chat/completions", method="POST",
+            status_code=400,
+        )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client, candidates=[_candidate(str(p), score=0.8) for p in images],
+        stats_out=stats)
+    assert out == []
+    assert stats["api_failed"] == 2
+    assert stats["aborted_early"] == 2  # c and d never attempted
+    assert stats["attempted"] == 2
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_vision_zero_image_failure_verdicts():
+    from chat_daily_tg.vision import vision_zero_image_failure
+
+    def stats(**kw):
+        base = {"skipped_prefilter": 0, "skipped_invalid": 0, "attempted": 0,
+                "api_failed": 0, "aborted_early": 0, "filtered_empty": 0,
+                "below_bar": 0, "model_veto": 0, "fallback_included": 0,
+                "included": 0}
+        base.update(kw)
+        return base
+
+    # Healthy days — including a legitimately imageless one — are None.
+    assert vision_zero_image_failure(stats(attempted=22, below_bar=22)) is None
+    assert vision_zero_image_failure(stats(attempted=5, included=1, below_bar=4)) is None
+    # Total failure.
+    assert vision_zero_image_failure(stats(attempted=3, api_failed=3))
+    # Partial failure with zero ORGANIC inclusions — a fallback-promoted
+    # leftover must not mask a mostly-failed day (review C1).
+    masked = stats(attempted=22, api_failed=21, included=1, fallback_included=1)
+    assert vision_zero_image_failure(masked)
+    # Partial failure but a real image cleared the bar → healthy enough.
+    assert vision_zero_image_failure(
+        stats(attempted=22, api_failed=3, included=1, below_bar=18)) is None
+    # Circuit breaker tripped.
+    assert vision_zero_image_failure(stats(attempted=5, api_failed=5, aborted_early=17))
+    # Bulk validity-gate death with nothing attempted (review C3).
+    assert vision_zero_image_failure(stats(skipped_invalid=13))
+    assert vision_zero_image_failure(stats(skipped_invalid=2)) is None  # noise level
+
+
+def test_write_vision_audit_truncates_and_survives_surrogates(tmp_path):
+    import json as _json
+    from chat_daily_tg.vision import write_vision_audit
+    path = tmp_path / "vision-audit.jsonl"
+    # A lone surrogate smuggled through response.json() must not raise (it
+    # killed the whole vision stage when written naively — review A2).
+    rows = [{"decision": "below-bar", "summary": "x \ud800 y"}]
+    write_vision_audit(path, rows)
+    assert path.exists()
+    assert "below-bar" in path.read_text(encoding="utf-8", errors="replace")
+    # An empty run TRUNCATES the stale file instead of leaving it (review A1).
+    write_vision_audit(path, [])
+    assert path.read_text(encoding="utf-8") == ""

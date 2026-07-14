@@ -33,6 +33,13 @@ class VisionAnalysis:
 
 
 class VisionClient:
+    # Morning runs share the CLIProxy endpoint with the summary/embedding calls
+    # (embedding took five straight 429s on 2026-07-14); a one-shot vision call
+    # dies on the first 429 and the image silently drops out of the day's pool.
+    # Backoff is deliberately shorter than cfg.retry's [5,15,60] — this runs per
+    # image (~35/day), so the big-LLM schedule would add a worst case of ~45 min.
+    RETRYABLE_BACKOFF = [2.0, 5.0]
+
     def __init__(self, *, endpoint: str, model: str, api_key: str, timeout: float = 120.0):
         self.endpoint = endpoint
         self.model = model
@@ -60,11 +67,7 @@ class VisionClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(f"{self.endpoint}/chat/completions", json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        content = self._post_with_retry(payload, headers)
         parsed = _parse_json_object(content)
         return VisionAnalysis(
             candidate=candidate,
@@ -77,14 +80,46 @@ class VisionClient:
             reason=str(parsed.get("reason") or ""),
         )
 
+    def _post_with_retry(self, payload: dict, headers: dict) -> str:
+        """Return the message content; retry 429/5xx, transport errors, AND soft
+        failures — a 200 whose body is a proxy error page (JSONDecodeError) or
+        JSON without choices (KeyError/IndexError). CLIProxy has served exactly
+        that to the summary path (llm_client review finding #10); the content
+        extraction lives inside the loop so those get the same retries. Other
+        4xx (bad payload, auth) won't heal on retry and raise immediately."""
+        import time
+        attempts = len(self.RETRYABLE_BACKOFF) + 1
+        with httpx.Client(timeout=self.timeout) as client:
+            for attempt in range(attempts):
+                try:
+                    response = client.post(
+                        f"{self.endpoint}/chat/completions", json=payload, headers=headers)
+                    response.raise_for_status()
+                    return response.json()["choices"][0]["message"]["content"]
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    if not (status == 429 or status >= 500) or attempt == attempts - 1:
+                        raise
+                except (httpx.HTTPError, ValueError, KeyError, IndexError):
+                    if attempt == attempts - 1:
+                        raise
+                time.sleep(self.RETRYABLE_BACKOFF[attempt])
+        raise RuntimeError("unreachable")  # pragma: no cover
+
 
 def _normalize_score(raw) -> float:
     """Coerce value_score into [0, 1]. LLMs drift off the requested 0-1 scale
     despite the prompt (qwen returned 2.5/3.0; gemini returned 8.5 on a 0-10
-    scale) — a score in (1, 10] is treated as a 0-10 rating and divided by 10.
-    Anything still outside [0, 1] afterwards (negative, >10, non-numeric) is
-    untrustworthy and coerced to 0.0 so it drops below the include-bar, rather
-    than clamped up to 1.0 which would promote a garbage rating into a top image."""
+    scale; percent-scale like 85 is rescaled by /100). Anything still outside
+    [0, 1] afterwards (negative, >100, non-numeric — including JSON booleans,
+    which float() would silently turn into 0.0/1.0) is untrustworthy and
+    coerced to 0.0 so it drops below the include-bar, rather than clamped up
+    to 1.0 which would promote a garbage rating into a top image."""
+    if isinstance(raw, bool):
+        # float(True) == 1.0 — a perfect score from a non-numeric value would
+        # sail over the include bar (PR #8 review S1).
+        log.warning("vision value_score not numeric (%r); treating as 0.0", raw)
+        return 0.0
     try:
         score = float(raw or 0.0)
     except (TypeError, ValueError):
@@ -92,6 +127,13 @@ def _normalize_score(raw) -> float:
         return 0.0
     if 1.0 < score <= 10.0:
         score = score / 10.0
+    elif 10.0 < score <= 100.0:
+        # Percent-scale drift (e.g. 85) — rescale like the 0-10 case rather
+        # than zeroing a possibly-great image. WARN because an integer in this
+        # band can also be hallucination residue (a count, "85折"), and the
+        # rescale silently turns it into a top score.
+        log.warning("vision value_score percent-scale drift (%r → %.2f)", raw, score / 100.0)
+        score = score / 100.0
     if not 0.0 <= score <= 1.0:
         log.warning("vision value_score out of range (%r); treating as 0.0", raw)
         return 0.0
@@ -126,13 +168,42 @@ def analyze_media_candidates(
     candidates: list[MediaCandidate],
     min_prefilter_score: float = 0.45,
     min_include_score: float = 0.8,
+    fallback_min_score: float = 0.65,
+    stats_out: dict | None = None,
+    audit_out: list | None = None,
 ) -> list[VisionAnalysis]:
     """min_include_score=0.8: only clearly high-value images reach the digest
-    (raised from 0.65 — user feedback 2026-07-02)."""
+    (raised from 0.65 — user feedback 2026-07-02).
+
+    Zero-image fallback (user decision 2026-07-14): under the strict 0.8 bar
+    roughly half of all days ship an imageless digest. When NOTHING clears the
+    bar, the single best analysis at or above fallback_min_score that the model
+    didn't veto is promoted, so most mornings keep one section-anchored image
+    without reopening the door to the low-value noise the 0.8 bar exists for.
+
+    A zero-image digest has two very different causes — "nothing scored above
+    the bar today" vs "the vision endpoint was down" — and the archive alone
+    can't tell them apart (2026-07-14: 94 candidates, 0 included, and the only
+    trace was an empty vision.jsonl). Every gate decision is therefore logged
+    per image, a breakdown is logged at the end, and the counters are exposed
+    via stats_out so the caller can alert on total API failure. audit_out (when
+    given) collects one dict per ATTEMPTED image — score, type, veto flag and
+    gate decision, including api_failed rows — so the 0.8 bar and the model's
+    veto rate stay auditable from the archive, not just from log retention."""
     from chat_daily_tg.media import _is_valid_image_file
     analyses: list[VisionAnalysis] = []
-    for candidate in candidates:
+    stats = {"skipped_prefilter": 0, "skipped_invalid": 0, "attempted": 0,
+             "api_failed": 0, "aborted_early": 0, "filtered_empty": 0,
+             "below_bar": 0, "model_veto": 0, "fallback_included": 0,
+             "included": 0}
+    fallback_best: VisionAnalysis | None = None
+    fallback_audit_row: dict | None = None
+    consecutive_failures = 0
+    remaining = list(candidates)
+    while remaining:
+        candidate = remaining.pop(0)
         if candidate.score < min_prefilter_score or not candidate.local_path:
+            stats["skipped_prefilter"] += 1
             continue
         # Thumbnail/quality gate: WeChat's local cache often holds only a
         # 96x210 thumbnail (wx extract can't get more unless the original was
@@ -140,18 +211,128 @@ def analyze_media_candidates(
         # digest, so require real-image size AND resolution here.
         ok, _reason = _is_valid_image_file(candidate.local_path)
         if not ok:
+            stats["skipped_invalid"] += 1
             continue
+        stats["attempted"] += 1
         try:
             analysis = client.analyze(candidate)
-        except Exception:
+        except Exception as e:
+            stats["api_failed"] += 1
+            consecutive_failures += 1
+            log.warning("vision analyze failed for %s: %s: %s",
+                        candidate.local_path, type(e).__name__, e)
+            if audit_out is not None:
+                audit_out.append({"decision": "api_failed",
+                                  "error": f"{type(e).__name__}: {e}",
+                                  "local_path": candidate.local_path})
+            # Circuit breaker: with per-call retries, N straight images failing
+            # means 3N consecutive HTTP failures — the endpoint is down, and a
+            # hang-shaped outage costs 3×timeout per image (PR #8 review R2).
+            # Cut the stage short instead of grinding hours through a dead API.
+            if consecutive_failures >= _CIRCUIT_BREAKER_FAILURES:
+                stats["aborted_early"] = len(remaining)
+                log.error("vision stage: %d consecutive API failures — endpoint "
+                          "looks dead, skipping the %d remaining candidate(s)",
+                          consecutive_failures, len(remaining))
+                break
             continue
+        consecutive_failures = 0
         # Layer 3: OCR / empty image filter
         if _is_empty_vision(analysis):
-            continue
+            stats["filtered_empty"] += 1
+            decision = "empty-filter"
         # Include-bar: high enough value AND the model didn't veto inclusion.
-        if analysis.value_score >= min_include_score and analysis.should_include_in_daily:
+        elif analysis.value_score >= min_include_score and analysis.should_include_in_daily:
+            stats["included"] += 1
+            decision = "included"
             analyses.append(analysis)
+        elif analysis.should_include_in_daily:
+            stats["below_bar"] += 1
+            decision = "below-bar"
+        else:
+            stats["model_veto"] += 1
+            decision = "model-veto"
+        log.info("vision scored %.2f (%s) → %s: %s",
+                 analysis.value_score, analysis.type, decision, candidate.local_path)
+        row = {"decision": decision, **analysis.to_json()}
+        if audit_out is not None:
+            audit_out.append(row)
+        if decision == "below-bar" and analysis.value_score >= fallback_min_score and \
+                (fallback_best is None or analysis.value_score > fallback_best.value_score):
+            fallback_best = analysis
+            fallback_audit_row = row
+    if not analyses and fallback_best is not None:
+        analyses.append(fallback_best)
+        stats["below_bar"] -= 1
+        stats["fallback_included"] = 1
+        stats["included"] += 1
+        if fallback_audit_row is not None:
+            fallback_audit_row["decision"] = "fallback-included"
+        log.info("vision fallback: nothing cleared the %.2f bar, promoting the "
+                 "best %.2f-scored image: %s", min_include_score,
+                 fallback_best.value_score, fallback_best.candidate.local_path)
+    log.info("vision breakdown: attempted=%d included=%d (fallback=%d) below_bar=%d "
+             "model_veto=%d filtered_empty=%d api_failed=%d aborted_early=%d "
+             "skipped_prefilter=%d skipped_invalid=%d",
+             stats["attempted"], stats["included"], stats["fallback_included"],
+             stats["below_bar"], stats["model_veto"], stats["filtered_empty"],
+             stats["api_failed"], stats["aborted_early"],
+             stats["skipped_prefilter"], stats["skipped_invalid"])
+    failure = vision_zero_image_failure(stats)
+    if failure:
+        log.error("vision stage compromised: %s", failure)
+    if stats_out is not None:
+        stats_out.update(stats)
     return analyses
+
+
+_CIRCUIT_BREAKER_FAILURES = 5
+
+# attempted==0 alerts only when this many images died at the validity gate —
+# a couple of wx thumbnails is normal noise; dozens means the extraction
+# pipeline itself is broken (PR #8 review C3).
+_INVALID_ALERT_THRESHOLD = 10
+
+
+def vision_zero_image_failure(stats: dict) -> str | None:
+    """Single health verdict shared by the in-module ERROR log and run_daily's
+    TG alert — two predicates diverged within one PR before this existed
+    (PR #8 review C4). Non-None means the day's image selection was compromised
+    by the PIPELINE (as opposed to a legitimately low-value day):
+
+    - every attempted call failed, or the circuit breaker tripped;
+    - some calls failed and nothing cleared the bar organically (a
+      fallback-promoted leftover must not mask a mostly-failed day — C1);
+    - nothing was attempted because images died at the validity gate in bulk
+      (broken extraction, not low value — C3)."""
+    attempted = stats.get("attempted", 0)
+    api_failed = stats.get("api_failed", 0)
+    organic = stats.get("included", 0) - stats.get("fallback_included", 0)
+    if attempted and api_failed == attempted:
+        return f"全部 {attempted} 次 vision 调用失败"
+    if stats.get("aborted_early"):
+        return (f"连续失败触发熔断，跳过 {stats['aborted_early']} 张候选图"
+                f"（{api_failed}/{attempted} 失败）")
+    if api_failed and organic <= 0:
+        return f"{api_failed}/{attempted} 次调用失败且无图原生过线（保底不计）"
+    if not attempted and stats.get("skipped_invalid", 0) >= _INVALID_ALERT_THRESHOLD:
+        return (f"0 张图进入分析，{stats['skipped_invalid']} 张死于有效性门槛"
+                "——疑似媒体提取管线故障")
+    return None
+
+
+def write_vision_audit(path: Path, rows: list[dict]) -> None:
+    """Persist the day's full decision trail. ALWAYS writes (an empty run
+    truncates the file): archive day-dirs are reused across re-runs, and a
+    stale audit surviving next to a freshly rewritten vision.jsonl poisons
+    the exact post-mortems this file exists for (PR #8 review A1). Encoding
+    errors must never cost the day its images, so unencodable characters
+    (e.g. a lone surrogate a model smuggled through response.json) are
+    escaped rather than raised (review A2)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", errors="backslashreplace") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def vision_markdown(analyses: list[VisionAnalysis]) -> str:
@@ -367,15 +548,17 @@ def _vision_prompt(candidate: MediaCandidate) -> str:
 输出字段：
 {{
   "type": "activity_poster|price_screenshot|risk_screenshot|tutorial|chat_screenshot|meme|unknown",
-  "value_score": 0.0,
+  "value_score": 0.85,
   "summary": "...",
   "key_facts": ["..."],
   "risk_flags": ["..."],
-  "should_include_in_daily": false,
+  "should_include_in_daily": true,
   "reason": "..."
 }}
 
 value_score 必须是 0.0 到 1.0 之间的小数（1.0 = 极高日报价值），不要使用 0-10 制。
+value_score 和 should_include_in_daily 都不要照抄上面的示例值，按图片本身判断：
+确有日报价值 should_include_in_daily 为 true，仅当明确无价值（表情包、无信息、纯闲聊）才为 false。
 """
 
 

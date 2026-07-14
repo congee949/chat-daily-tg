@@ -30,9 +30,28 @@
 ## Tradeoffs
 
 - per-image INFO 日志每天多 ~22 行——换来"为什么没图"一行可答，值得。
-- 未把落选分析写入 vision.jsonl（保持"仅 included"语义不变）：分数留痕改由日志承担；若未来要做 0.8 阈值校准，再考虑单独的 audit 文件。
+- vision.jsonl 保持"仅 included"语义不变；落选分析的留痕由本次新增的 `vision-audit.jsonl` 承担（见 Design Decisions 的 grok P1-2 项——本段早先写"audit 文件留待未来"，与后文矛盾，评审 sweep 抓出后已更正）。
 
 ## Open Questions
 
 - **0.8 入选线是否保留**：~~待用户拍板~~ → **已决策（2026-07-14，用户选 b）**：0.8 线不动，零图天自适应保底——从 ≥0.65、未被模型否决的落选图中提升最高分一张（`fallback_min_score=0.65`）。被否决（model-veto）和 empty-filter 的图不参与保底。07-13 归档全量重放验证：22 attempted / 0 过线 → 保底提升 0.75 分 AI 教程截图，breakdown=`included=1 (fallback=1) below_bar=2 model_veto=7 filtered_empty=12 api_failed=0`。
-- 留待后续（已挂后台任务卡片）：TG 高产群按时间 cap 20 改按价值截断；`.digest-sent` 早于 trailing photos 写入的"有字无图"缺口。
+- 留待后续（已挂后台任务卡片，用户已在独立会话启动）：TG 高产群按时间 cap 20 改按价值截断；`.digest-sent` 早于 trailing photos 写入的"有字无图"缺口。
+
+## Review Fixes（PR #8 xhigh 审核后追加，2026-07-14）
+
+多智能体审核（10 finder × 5 verifier × 1 sweep）报 15 条 findings，已修：
+
+- **C1 保底压制告警**：健康判定改看"原生入选"（included − fallback_included），保底图不再掩盖大面积失败。
+- **C2 阶段级异常静默**：外层 except 补 notify_failure。
+- **C4 双口径分叉**：新增 `vision_zero_image_failure(stats)` 单一判定，ERROR 日志与 TG 告警共用。
+- **C3 全跳过静默**：attempted=0 且 ≥10 张死于有效性门槛时判定为提取管线故障（阈值 `_INVALID_ALERT_THRESHOLD`）。
+- **A1/A2 audit 文件**：抽为 `write_vision_audit`——无条件写入（空则截断旧文件）、`errors="backslashreplace"` 防代理字符炸档、移到 vision.jsonl 之后并独立 try（写失败绝不吞掉当日图片）。
+- **R1 软 200 不重试**：choices 提取移入 `_post_with_retry`，except 拓宽为 (HTTPError, ValueError, KeyError, IndexError)，对齐 llm_client review #10 的教训。
+- **R2 挂死 ×3**：连续 5 张图全失败即熔断（`_CIRCUIT_BREAKER_FAILURES`），跳过余量并计入 `aborted_early`。
+- **S1 float(True)=1.0**：`_normalize_score` 入口 isinstance(bool) 拦截归零。
+- **S4/sweep 百分制静默**：docstring 更正为 >100 归零，rescale 时打 WARNING。
+- **X2 阈值进配置**：新增 `VisionModel` 配置类（min_prefilter_score/min_include_score/fallback_min_score），run_daily 显式传参，代码默认值保留。
+- **sweep 引用脱节**：citation_map 非空但 LLM 零引用时打 WARNING，防"统计说有图、日报实际无图"的误归因。
+- **sweep prompt 示例自相矛盾**：示例改为自洽（0.85+true）并明示两个字段都勿照抄。
+
+**未修留档**（P2，含理由）：audit 双 schema（消费方按 decision 分支即可，暂无 in-repo 消费者）；stats snake_case 与 decision 连字符双词汇表（改动波及测试与已落盘归档，收益低）；weekly_media_rules_review 混计保底行（等 audit 数据积累后随校准一起做）；RETRYABLE_BACKOFF tuple 化、dict 解包次序、永久性传输错误重试（均为无实害加固）。

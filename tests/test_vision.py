@@ -513,9 +513,9 @@ def test_analyze_media_candidates_stats_distinguish_below_bar_from_failure(tmp_p
         stats_out=stats)
     assert out == []
     assert stats == {"skipped_prefilter": 0, "skipped_invalid": 0,
-                     "attempted": 1, "api_failed": 0, "filtered_empty": 0,
-                     "below_bar": 1, "model_veto": 0, "fallback_included": 0,
-                     "included": 0}
+                     "attempted": 1, "api_failed": 0, "aborted_early": 0,
+                     "filtered_empty": 0, "below_bar": 1, "model_veto": 0,
+                     "fallback_included": 0, "included": 0}
 
 
 def test_analyze_media_candidates_fallback_promotes_best_below_bar(tmp_path, httpx_mock: HTTPXMock):
@@ -646,3 +646,120 @@ def test_normalize_score_rescales_percent_scale():
     assert _normalize_score(8.5) == 0.85    # 0-10 drift → /10
     assert _normalize_score(0.85) == 0.85
     assert _normalize_score(101) == 0.0     # still-garbage stays untrusted
+
+
+def test_vision_client_retries_soft_200_error_page(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    # 200 with an HTML error page (documented CLIProxy soft failure, llm_client
+    # review #10) must retry like a 5xx, not die on attempt 1.
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        status_code=200, text="<html>Bad gateway</html>",
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = client.analyze(_candidate(str(image)))
+    assert out.value_score == 0.9
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_vision_client_retries_200_without_choices(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [0.0, 0.0])
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json={"error": "overloaded"},
+    )
+    httpx_mock.add_response(
+        url="https://vision.example/v1/chat/completions", method="POST",
+        json=_vision_response(0.9),
+    )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    out = client.analyze(_candidate(str(image)))
+    assert out.value_score == 0.9
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_normalize_score_rejects_boolean():
+    from chat_daily_tg.vision import _normalize_score
+    # float(True) == 1.0 would be a perfect score from a non-numeric value.
+    assert _normalize_score(True) == 0.0
+    assert _normalize_score(False) == 0.0
+
+
+def test_circuit_breaker_stops_after_consecutive_failures(tmp_path, httpx_mock: HTTPXMock, monkeypatch):
+    import chat_daily_tg.vision as vision_mod
+    monkeypatch.setattr(VisionClient, "RETRYABLE_BACKOFF", [])
+    monkeypatch.setattr(vision_mod, "_CIRCUIT_BREAKER_FAILURES", 2)
+    images = []
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        p = tmp_path / name
+        _real_image(p)
+        images.append(p)
+    # Only 2 HTTP failures should ever be issued: breaker trips, c/d skipped.
+    for _ in range(2):
+        httpx_mock.add_response(
+            url="https://vision.example/v1/chat/completions", method="POST",
+            status_code=400,
+        )
+    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    stats: dict = {}
+    out = analyze_media_candidates(
+        client=client, candidates=[_candidate(str(p), score=0.8) for p in images],
+        stats_out=stats)
+    assert out == []
+    assert stats["api_failed"] == 2
+    assert stats["aborted_early"] == 2  # c and d never attempted
+    assert stats["attempted"] == 2
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_vision_zero_image_failure_verdicts():
+    from chat_daily_tg.vision import vision_zero_image_failure
+
+    def stats(**kw):
+        base = {"skipped_prefilter": 0, "skipped_invalid": 0, "attempted": 0,
+                "api_failed": 0, "aborted_early": 0, "filtered_empty": 0,
+                "below_bar": 0, "model_veto": 0, "fallback_included": 0,
+                "included": 0}
+        base.update(kw)
+        return base
+
+    # Healthy days — including a legitimately imageless one — are None.
+    assert vision_zero_image_failure(stats(attempted=22, below_bar=22)) is None
+    assert vision_zero_image_failure(stats(attempted=5, included=1, below_bar=4)) is None
+    # Total failure.
+    assert vision_zero_image_failure(stats(attempted=3, api_failed=3))
+    # Partial failure with zero ORGANIC inclusions — a fallback-promoted
+    # leftover must not mask a mostly-failed day (review C1).
+    masked = stats(attempted=22, api_failed=21, included=1, fallback_included=1)
+    assert vision_zero_image_failure(masked)
+    # Partial failure but a real image cleared the bar → healthy enough.
+    assert vision_zero_image_failure(
+        stats(attempted=22, api_failed=3, included=1, below_bar=18)) is None
+    # Circuit breaker tripped.
+    assert vision_zero_image_failure(stats(attempted=5, api_failed=5, aborted_early=17))
+    # Bulk validity-gate death with nothing attempted (review C3).
+    assert vision_zero_image_failure(stats(skipped_invalid=13))
+    assert vision_zero_image_failure(stats(skipped_invalid=2)) is None  # noise level
+
+
+def test_write_vision_audit_truncates_and_survives_surrogates(tmp_path):
+    import json as _json
+    from chat_daily_tg.vision import write_vision_audit
+    path = tmp_path / "vision-audit.jsonl"
+    # A lone surrogate smuggled through response.json() must not raise (it
+    # killed the whole vision stage when written naively — review A2).
+    rows = [{"decision": "below-bar", "summary": "x \ud800 y"}]
+    write_vision_audit(path, rows)
+    assert path.exists()
+    assert "below-bar" in path.read_text(encoding="utf-8", errors="replace")
+    # An empty run TRUNCATES the stale file instead of leaving it (review A1).
+    write_vision_audit(path, [])
+    assert path.read_text(encoding="utf-8") == ""

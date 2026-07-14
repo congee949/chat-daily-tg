@@ -20,7 +20,8 @@ from chat_daily_tg.summarizer import run_summary
 from chat_daily_tg.tg_sender import TelegramSender
 from chat_daily_tg.vision import (
     VisionClient, analyze_media_candidates, build_citation_block, resolve_citations,
-    vision_markdown, write_vision_analyses,
+    vision_markdown, vision_zero_image_failure, write_vision_analyses,
+    write_vision_audit,
 )
 from chat_daily_tg.wx_exporter import export_group
 from chat_daily_tg.telegram_exporter import export_chat
@@ -796,31 +797,27 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             vision_audit: list[dict] = []
             analyses = analyze_media_candidates(
                 client=vision_client, candidates=media_candidates,
-                stats_out=vision_stats, audit_out=vision_audit)
-            if vision_audit:
-                # Full per-image trail (score/type/veto/decision, incl. failures):
-                # vision.jsonl only holds INCLUDED analyses, so without this a
-                # zero-image day is unauditable and the 0.8 bar can't be tuned
-                # against history.
-                with open(archive_dir / "vision-audit.jsonl", "w", encoding="utf-8") as f:
-                    for row in vision_audit:
-                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            if vision_stats.get("attempted") and vision_stats.get("api_failed") \
-                    and not vision_stats.get("included"):
+                stats_out=vision_stats, audit_out=vision_audit,
+                min_prefilter_score=cfg.models.vision.min_prefilter_score,
+                min_include_score=cfg.models.vision.min_include_score,
+                fallback_min_score=cfg.models.vision.fallback_min_score)
+            failure = vision_zero_image_failure(vision_stats)
+            if failure:
                 # Distinguish "no high-value images today" (normal, roughly half
-                # of days under the 0.8 bar) from "vision calls are failing" —
-                # the latter must not silently strip images from a good day.
-                # Partial failure counts too: 10 failed + 12 below-bar reads the
-                # same as a clean zero to the reader (grok review P1-1).
-                total = vision_stats["attempted"]
-                failed = vision_stats["api_failed"]
-                kind = "全部" if failed == total else f"{failed}/{total} 次"
+                # of days under the 0.8 bar) from a compromised pipeline — the
+                # verdict predicate is shared with vision.py's ERROR log so the
+                # TG alert and the log can never disagree (PR #8 review C4).
                 notify_failure(
-                    "chat-daily-tg 图片分析失败且当天零图",
-                    f"{date_str}: vision 阶段 {kind}调用失败，且无任何图片入选，"
-                    f"日报将无图（报告仍照常推送）。breakdown: {vision_stats}。"
-                    f"日志: {log_file_for(date_str)}")
+                    "chat-daily-tg 图片管线受损",
+                    f"{date_str}: {failure}，日报可能无图（报告仍照常推送）。"
+                    f"breakdown: {vision_stats}。日志: {log_file_for(date_str)}")
             write_vision_analyses(archive_dir / "vision.jsonl", analyses)
+            try:
+                # AFTER vision.jsonl: the audit trail is diagnostics — a failure
+                # writing it must never discard the day's images (review A2).
+                write_vision_audit(archive_dir / "vision-audit.jsonl", vision_audit)
+            except Exception as e:
+                log.warning("vision audit write failed (non-fatal): %s", e)
             vision_md = vision_markdown(analyses)
             (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")
             if vision_md.strip():
@@ -830,7 +827,15 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 groups_with_content.append(("可引用图片列表", citation_md))
             log.info("vision analyses included: %d (citable: %d)", len(analyses), len(citation_map))
         except Exception as e:
+            # A stage-level failure (missing api_key_env, client construction,
+            # a raise before the per-image loop) produces the same imageless
+            # digest as a low-value day — it must page, not just log, or the
+            # 2026-07-14 silent-zero signature survives (PR #8 review C2).
             log.warning("vision analysis skipped: %s", e)
+            notify_failure(
+                "chat-daily-tg 图片阶段异常跳过",
+                f"{date_str}: vision 阶段整体失败（{type(e).__name__}: {e}），"
+                f"日报将无图（报告仍照常推送）。日志: {log_file_for(date_str)}")
 
     summary_model = cfg.models.summary
     api_key = os.environ[summary_model.api_key_env]
@@ -1036,6 +1041,13 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
             # digest (caption cap is 1024 visible chars; user decision 2026-07-02).
             segments = resolve_citations(concise_processed, citation_map) if citation_map else []
             cited_list = [analysis for _, analysis in segments if analysis]
+            if citation_map and not cited_list:
+                # Images were included/promoted but the summary LLM emitted no
+                # [IMGn] marker — the digest ships imageless while stats and
+                # vision.jsonl claim otherwise. Leave the true attribution in
+                # the log or this misattribution recurs (PR #8 review, sweep).
+                log.warning("vision included %d citable image(s) but the digest "
+                            "cites none — LLM declined to cite", len(citation_map))
             if cited_list and cfg.img_relay.enabled and _push_rich_digest(tg, cfg, out.concise_md, citation_map):
                 digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
                 log.info("TG push complete (single rich message, %d inline image(s))", len(cited_list))

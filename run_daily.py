@@ -792,7 +792,34 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 api_key=vision_api_key,
                 timeout=cfg.models.vision.timeout,
             )
-            analyses = analyze_media_candidates(client=vision_client, candidates=media_candidates)
+            vision_stats: dict[str, int] = {}
+            vision_audit: list[dict] = []
+            analyses = analyze_media_candidates(
+                client=vision_client, candidates=media_candidates,
+                stats_out=vision_stats, audit_out=vision_audit)
+            if vision_audit:
+                # Full per-image trail (score/type/veto/decision, incl. failures):
+                # vision.jsonl only holds INCLUDED analyses, so without this a
+                # zero-image day is unauditable and the 0.8 bar can't be tuned
+                # against history.
+                with open(archive_dir / "vision-audit.jsonl", "w", encoding="utf-8") as f:
+                    for row in vision_audit:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if vision_stats.get("attempted") and vision_stats.get("api_failed") \
+                    and not vision_stats.get("included"):
+                # Distinguish "no high-value images today" (normal, roughly half
+                # of days under the 0.8 bar) from "vision calls are failing" —
+                # the latter must not silently strip images from a good day.
+                # Partial failure counts too: 10 failed + 12 below-bar reads the
+                # same as a clean zero to the reader (grok review P1-1).
+                total = vision_stats["attempted"]
+                failed = vision_stats["api_failed"]
+                kind = "全部" if failed == total else f"{failed}/{total} 次"
+                notify_failure(
+                    "chat-daily-tg 图片分析失败且当天零图",
+                    f"{date_str}: vision 阶段 {kind}调用失败，且无任何图片入选，"
+                    f"日报将无图（报告仍照常推送）。breakdown: {vision_stats}。"
+                    f"日志: {log_file_for(date_str)}")
             write_vision_analyses(archive_dir / "vision.jsonl", analyses)
             vision_md = vision_markdown(analyses)
             (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")

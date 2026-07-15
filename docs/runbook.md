@@ -27,6 +27,22 @@
 
 B站的 label 在 `install-launchd.sh` 里**故意注释掉**（已迁 r4s）。跑 installer 不会把它装回，但不要手动加。
 
+### LaunchDaemon（root 级，install-launchd.sh 装不了）
+
+`com.chat-daily-tg.disablesleep` 装在 **`/Library/LaunchDaemons/`**（不是 `~/Library/LaunchAgents/`），以 root 每 60s 调一次 `scripts/power_aware_disablesleep.sh`。
+
+它按电源动态开关 `pmset disablesleep`：**插电 = 1**（合盖不睡，8 个调度点全覆盖），**拔电 = 0**（恢复正常睡眠，带出门装包里不过热、不空耗电）。`pmset disablesleep` 是全局开关、不分电源档，所以只能这样动态切；脚本只在目标值与当前值不同时才写，避免每分钟无谓调用。
+
+**它需要 sudo，所以不在 `install-launchd.sh` 里**——`launchd/com.chat-daily-tg.disablesleep.plist` 是模板（含 `REPLACE_WITH_PROJECT_DIR` / `REPLACE_WITH_DATA_DIR` 占位符），手工渲染后放进 `/Library/LaunchDaemons/` 并 `sudo launchctl load`。
+
+确认它在工作：
+
+```bash
+ls /Library/LaunchDaemons/com.chat-daily-tg.disablesleep.plist
+pmset -g | grep SleepDisabled     # 插电时应为 1，拔电时为 0
+log show --predicate 'process == "logger"' --last 1h | grep cd-disablesleep
+```
+
 ## 日志
 
 | 文件 | 内容 |
@@ -82,11 +98,19 @@ plutil -p ~/Library/LaunchAgents/com.chat-daily-tg.channels.plist | grep -A5 Pro
 
 ### 日报没发，日志显示 `RemoteProtocolError`
 
-**根因**：MacBook 合盖电池睡眠。请求发出后进程入睡，DarkWake 醒来时代理 TCP 已被对端断开。
+**根因**：MacBook 合盖睡眠。请求发出后进程入睡，DarkWake 醒来时代理 TCP 已被对端断开。
 
-**现状**：`caffeinate -is` 防 idle/AC 睡眠但**防不了电池合盖**；兜底是 9:00/13:00 两个 catch-up + `--skip-if-done`。重试网已扩为 `(HTTPStatusError, TransportError)` 涵盖 ProtocolError。
+**三层防护，各管一段**：
+
+1. `caffeinate -is`（wrapper 内）——防 idle/AC 睡眠，**防不了合盖**。
+2. `com.chat-daily-tg.disablesleep` LaunchDaemon（见下）——**插电时**合盖也不睡。
+3. 9:00 / 13:00 两个 catch-up + `--skip-if-done`——兜住前两层都没盖住的情况。
+
+**剩余盲区只有「电池 + 合盖」**：此时系统强制睡眠，任务跳过，靠 catch-up 在下次唤醒时补。重试网已扩为 `(HTTPStatusError, TransportError)` 涵盖 ProtocolError。
 
 **替代唤醒方案均已否决**（别再提）：`pmset repeat wakeorpoweron` 需 root 写系统级持久状态且 dark wake 撑不住 20+ 分钟的 run；`caffeinate -u` 会点亮屏幕，6:30 无人值守不可接受；Power Nap 的 dark-wake 窗口由系统支配、无法按 job 控制——这次故障恰恰就是在这种窗口里跑出来的。
+
+被采纳的是 `pmset disablesleep`，但它是全局开关、不分电源档，直接开会让电池合盖也禁睡（装包里过热）。所以做成了上面那个按电源动态切换的 LaunchDaemon。
 
 ### B站全部 UP 抓取失败 / -352
 

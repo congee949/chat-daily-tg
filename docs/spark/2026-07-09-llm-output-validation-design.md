@@ -3,7 +3,7 @@
 日期：2026-07-09
 状态：已确认，待实现
 范围：仅 chat-daily-tg 仓库
-来源：对比 LYiHub/labs-ArchiveAssistant 后借鉴其"prompt 闭集声明 + 解析侧校验 + 非法值回落默认"成对纪律；本仓库 implementation-notes.md:182 已记录 value_score 不稳与 should_include_in_daily 死字段问题。
+来源：对比 LYiHub/labs-ArchiveAssistant 后借鉴其"prompt 闭集声明 + 解析侧校验 + 非法值回落默认"成对纪律；本仓库 `docs/notes/implementation-notes.md`（2026-06-11 条目）已记录 value_score 不稳与 should_include_in_daily 死字段问题。
 
 ## 问题
 

@@ -1,4 +1,9 @@
-"""Entry point for chat-daily-tg. Run once per day at 08:00 local time."""
+"""Entry point for chat-daily-tg.
+
+Serves all four pipelines; flags pick one (see --help). Scheduling lives in the launchd
+plists, not here — the daily summary runs 06:30 with 09:00/13:00 catch-ups. The `schedule`
+block in config.yaml is dead: nothing reads it.
+"""
 from __future__ import annotations
 import argparse
 from datetime import date, timedelta

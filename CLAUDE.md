@@ -36,7 +36,7 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 
 ### 部署
 
-- **`install-launchd.sh` 里 bilibili label 是故意注释掉的**（脚本 56 行），因为 B站 digest 已迁 r4s cron。**不要把它装回 Mac**，会造成双跑。
+- **`install-launchd.sh` 故意不装 bilibili label**（B站 digest 已迁 r4s cron，脚本内有注释说明）。它装且只装 4 个：agent / channels / growth / growth-weekly。**不要把 bilibili 加回 Mac**，会造成双跑重复推送。
 - **r4s cron 必须自带 flock。** cron 没有 launchd 的同 label 防重入，慢轮次会与下一轮重叠。`run_bilibili_r4s.sh` 在脚本内部持锁（`/tmp/chat-daily-bilibili.lock`），不在 crontab 行上。
 - **r4s 是 musl 环境，命名时区会静默回退 UTC。** cron 内必须用 POSIX 形式 `TZ=CST-8`，写 `Asia/Shanghai` 会产生 8 小时偏差。
 

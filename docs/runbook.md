@@ -25,7 +25,7 @@
 
 **永远经 guard wrapper 跑，不要让 plist 直调 python。** wrapper 负责 venv 预检（`.venv` 被 uv prune 时会静默 `exit 127`）、导出 http 代理、清 `ALL_PROXY`、开 `CHAT_DAILY_TG_ALERTS=1` 让告警能发出去、以及失败时 osascript + TG 双通道告警。2026-07-03 就发现过 channels 的 plist 是旧版、绕过了 wrapper。
 
-B站的 label 在 `install-launchd.sh` 里**故意注释掉**（已迁 r4s）。跑 installer 不会把它装回，但不要手动加。
+`install-launchd.sh` 只装上表这 4 个，**不装** B站的 label（已迁 r4s，脚本内有注释说明）。跑 installer 不会把它带回来，但也不要手动加。
 
 ### LaunchDaemon（root 级，install-launchd.sh 装不了）
 

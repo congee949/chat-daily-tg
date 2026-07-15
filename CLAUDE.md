@@ -123,5 +123,4 @@ pytest -v                                # 全量测试
 | TG 统一路由表设计 | `docs/spark/2026-07-09-unified-tg-route-table-design.md` |
 | LLM 输出信任边界校验设计 | `docs/spark/2026-07-09-llm-output-validation-design.md` |
 | B站订阅 digest 设计（含 §18.4 回滚路径） | `docs/spark/2026-07-02-bilibili-subscriptions-design.md` |
-| 2026-06-29 对抗式审查报告 | `adversarial-review-2026-06-29.md` |
-| 历次实现决策与取舍（**已冻结的历史归档**，不反映现状） | `docs/notes/`（7 份，见其 `README.md`） |
+| 历次实现决策、取舍与审查报告（**已冻结的历史归档**，不反映现状） | `docs/notes/`（见其 `README.md`） |

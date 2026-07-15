@@ -19,6 +19,7 @@
 | 文件 | 时间 | 主题 |
 |---|---|---|
 | `implementation-notes.md` | 2026-06-02 ~ 07-03 | 主线累积：图片输出、频道原文卡片、私有频道媒体、2 小时增量转发、晨跑失败根因、vision 接入与后端迁移、相册折叠、微信图片下载、富消息内嵌图、launchd 代理污染 |
+| `adversarial-review-2026-06-29.md` | 2026-06-29 | 深度对抗式审查报告：58 agents / 45 条存活发现（P0×4 / P1×19 / P2×22）。下面那份 review-fixes 是它的修复记录 |
 | `implementation-notes-review-fixes.md` | 2026-06-29 | 对抗式审查修复：SQLite 迁移、LLM 解析分层降级、编排幂等、告警 |
 | `implementation-notes-bilibili.md` | 2026-07-02 ~ 07-03 | B站订阅 digest：双 transport、风控止损、迁移 r4s |
 | `implementation-notes-route-table.md` | 2026-07-09 | TG 统一路由表 + LLM 输出校验 |

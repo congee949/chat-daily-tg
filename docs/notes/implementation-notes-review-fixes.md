@@ -1,6 +1,6 @@
 # Implementation Notes — 对抗式审查修复 (2026-06-29)
 
-承接仓库根的 `adversarial-review-2026-06-29.md`。范围：P0 + P1 全部（用户确认）。数据层：直接迁 SQLite（用户确认）。
+承接同目录的 [`adversarial-review-2026-06-29.md`](adversarial-review-2026-06-29.md)。范围：P0 + P1 全部（用户确认）。数据层：直接迁 SQLite（用户确认）。
 
 ## Design Decisions
 

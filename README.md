@@ -30,7 +30,7 @@
 | 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合 |
 | Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，注入 verifier |
 | 图片理解（可选） | 开启后用多模态模型分析聊天中的图片，高分图并入日报 |
-| 富消息内嵌图 | 日报正文与配图合成**单条** Telegram 富消息（Bot API 10.x `sendRichMessage`）；图片经 Cloudflare KV 短时中转，发后即删。任一环失败自动回落「全文一条 + 尾图独立一条」 |
+| 富消息内嵌图 | 日报正文、健康图与引用配图合成**单条** Telegram 富消息（Bot API 10.2 `sendRichMessage`）；媒体随请求直接上传，无需公网图片中转。任一环失败自动回落「健康图 + 全文 + 引用尾图」 |
 | Telegram 推送 | 通过 Bot API 推到路由表指定的话题 |
 | 本地归档 | 每天的原始导出、详细总结、核验记录、图片分析存到 `~/chat-daily/archive/` |
 | 重复话题降权 | 近 7 天重复话题自动降权，避免旧闻反复出现 |
@@ -164,7 +164,7 @@ wx export "<群名>" --since 2026-06-10 --until 2026-06-11 --limit 10   # 验证
 | `CF_KV_API_TOKEN` | No | Cloudflare KV 图片中转（开启 `img_relay` 时需要）；建议用最小权限 token（仅 Account / Workers KV Storage / Edit） | Cloudflare dashboard |
 | `VISION_API_KEY` | No | 旧 vision 后端（qwenproxy）的 key，当前配置未使用 | 自行准备 OpenAI 兼容接口 |
 
-必需性取决于开了哪些管线：只跑纯文本日报需要 `TG_BOT_TOKEN`、`TG_CHAT_ID` 和 `VIBEKEY_API_KEY`；开启图片理解还需 `CLIPROXY_API_KEY`；成长挖掘另需 `DEEPSEEK_API_KEY`；富消息内嵌图另需 `CF_KV_API_TOKEN`。
+必需性取决于开了哪些管线：只跑纯文本日报需要 `TG_BOT_TOKEN`、`TG_CHAT_ID` 和 `VIBEKEY_API_KEY`；开启图片理解还需 `CLIPROXY_API_KEY`；成长挖掘另需 `DEEPSEEK_API_KEY`。Bot API 10.2 富消息媒体直接上传，不再需要 `CF_KV_API_TOKEN`。
 
 ### config.yaml
 
@@ -310,7 +310,7 @@ uv run --extra dev pytest -q
 | VibeKey | OpenAI 兼容日报摘要与核验 API（`gpt-5.6-sol`） |
 | CLIProxyAPI | 本机模型代理（`127.0.0.1:8317`），vision / judge 共用 |
 | [DeepSeek API](https://api-docs.deepseek.com/) | `llm` 别名，成长挖掘 |
-| Cloudflare Workers + KV | 富消息内嵌图的短时中转（发后即删） |
+| Cloudflare Workers + KV | 旧版富消息图片中转；Bot API 10.2 路径已不再需要 |
 | [BotFather](https://t.me/BotFather) | 创建 Telegram bot |
 | [userinfobot](https://t.me/userinfobot) | 获取 Telegram chat_id |
 | headless Chrome | PNG 卡片渲染与架构图重渲 |

@@ -44,6 +44,31 @@ class ActivityDay:
     hrv_ms: float | None
 
 
+@dataclass(frozen=True)
+class WorkoutSummary:
+    name: str
+    start: datetime | None
+    end: datetime | None
+    duration_min: float
+    active_kcal: float | None
+    distance_km: float | None
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    report_day: date
+    briefing_day: date
+    activity: ActivityDay
+    sleep: SleepEpisode | None
+    sleep_label: str
+    wake_sleep: SleepEpisode | None
+    workouts: tuple[WorkoutSummary, ...]
+    medians: dict[str, float | None]
+    baseline_samples: dict[str, int]
+    baseline_days: int
+    min_baseline_samples: int
+
+
 def _apple_datetime(value: object, tz: ZoneInfo) -> datetime | None:
     try:
         return (APPLE_EPOCH + timedelta(seconds=float(value))).astimezone(tz)
@@ -287,6 +312,47 @@ def _fmt_workouts(workouts: list[dict]) -> str:
     return "；".join(parts)
 
 
+def _summarize_workouts(reader: HealthExportReader, day: date) -> tuple[WorkoutSummary, ...]:
+    out: list[WorkoutSummary] = []
+    tz = getattr(reader, "tz", timezone.utc)
+    for workout in reader.workouts(day):
+        try:
+            duration = float(workout.get("duration") or 0) / 60
+        except (TypeError, ValueError):
+            duration = 0
+        try:
+            energy_kj = float(workout.get("activeEnergy") or 0)
+        except (TypeError, ValueError):
+            energy_kj = 0
+        try:
+            distance = float(workout.get("totalDistance") or 0)
+        except (TypeError, ValueError):
+            distance = 0
+        out.append(WorkoutSummary(
+            name=str(workout.get("name") or "Workout"),
+            start=_apple_datetime(workout.get("start"), tz),
+            end=_apple_datetime(workout.get("end"), tz),
+            duration_min=duration,
+            active_kcal=energy_kj / 4.184 if energy_kj > 0 else None,
+            distance_km=distance if distance > 0 else None,
+        ))
+    return tuple(out)
+
+
+def _fmt_workout_summaries(workouts: tuple[WorkoutSummary, ...]) -> str:
+    if not workouts:
+        return "未记录 Apple Watch 体能训练"
+    parts: list[str] = []
+    for workout in workouts[:4]:
+        segment = f"{workout.name} {workout.duration_min:.0f} 分钟"
+        if workout.active_kcal is not None:
+            segment += f" / {workout.active_kcal:.0f} kcal"
+        if workout.distance_km is not None:
+            segment += f" / {workout.distance_km:.2f} km"
+        parts.append(segment)
+    return "；".join(parts)
+
+
 def _activity_assessment(activity: ActivityDay, medians: dict[str, float | None]) -> str:
     ratios: list[float] = []
     for value, key in ((activity.active_kcal, "active"),
@@ -323,25 +389,32 @@ def _recovery_assessment(activity: ActivityDay, sleep: SleepEpisode | None,
     return "恢复信号有分歧，结合主观疲劳再决定训练强度"
 
 
-def build_health_briefing(report_day: date, cfg: HealthBriefing, timezone_name: str) -> str:
-    """Build the preface. `report_day` is yesterday; briefing day is the next day."""
+def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: str) -> HealthReport | None:
+    """Read health data once and return a reusable text/chart/rich-message model."""
     if not cfg.enabled:
-        return ""
+        return None
     reader = HealthExportReader(cfg.export_dir, timezone_name)
     briefing_day = report_day + timedelta(days=1)
     activity = reader.activity_day(report_day)
-    sleep = reader.sleep_ending(briefing_day)
+    wake_sleep = reader.sleep_ending(briefing_day)
+    report_sleep = reader.sleep_ending(report_day)
+    # AutoSync commonly publishes the previous completed night before the current
+    # morning. Keep the briefing useful without pretending stale data is current.
+    sleep = wake_sleep or report_sleep
+    sleep_label = "昨夜睡眠" if wake_sleep else "最近完整睡眠（截至昨日早晨）"
 
     baselines: dict[str, list[float]] = {
-        "active": [], "exercise": [], "steps": [], "rhr": [], "hrv": [],
-        "sleep": [], "wake": [],
+        "active": [], "exercise": [], "stand": [], "steps": [], "distance": [],
+        "rhr": [], "hrv": [], "sleep": [], "wake": [],
     }
     for offset in range(cfg.baseline_days, 0, -1):
         day = report_day - timedelta(days=offset)
         prior = reader.activity_day(day)
         for key, value in (
             ("active", prior.active_kcal), ("exercise", prior.exercise_min),
-            ("steps", prior.steps), ("rhr", prior.resting_hr), ("hrv", prior.hrv_ms),
+            ("stand", prior.stand_hours), ("steps", prior.steps),
+            ("distance", prior.distance_km), ("rhr", prior.resting_hr),
+            ("hrv", prior.hrv_ms),
         ):
             if value is not None and value > 0:
                 baselines[key].append(value)
@@ -352,11 +425,33 @@ def build_health_briefing(report_day: date, cfg: HealthBriefing, timezone_name: 
 
     minimum = cfg.min_baseline_samples
     median = {key: _median(values, minimum) for key, values in baselines.items()}
+    return HealthReport(
+        report_day=report_day,
+        briefing_day=briefing_day,
+        activity=activity,
+        sleep=sleep,
+        sleep_label=sleep_label,
+        wake_sleep=wake_sleep,
+        workouts=_summarize_workouts(reader, report_day),
+        medians=median,
+        baseline_samples={key: len(values) for key, values in baselines.items()},
+        baseline_days=cfg.baseline_days,
+        min_baseline_samples=minimum,
+    )
+
+
+def format_health_briefing(report: HealthReport) -> str:
+    """Format the classic Markdown fallback from a structured health report."""
+    activity = report.activity
+    sleep = report.sleep
+    median = report.medians
+    briefing_day = report.briefing_day
     progress, bar = _progress(briefing_day)
     lines = [f"### 🌤️ 个人晨报 · {briefing_day.isoformat()}"]
-    if sleep:
+    if report.wake_sleep:
         lines.append(
-            f"- 起床：{sleep.end:%H:%M}（依据最后睡眠阶段推定{_clock_delta(sleep.end, median['wake'])}）"
+            f"- 起床：{report.wake_sleep.end:%H:%M}"
+            f"（依据最后睡眠阶段推定{_clock_delta(report.wake_sleep.end, median['wake'])}）"
         )
     else:
         lines.append("- 起床：今晨睡眠数据尚未同步，暂不判断")
@@ -377,12 +472,13 @@ def build_health_briefing(report_day: date, cfg: HealthBriefing, timezone_name: 
     activity_judgment = _activity_assessment(activity, median)
     if activity_judgment:
         lines.append(f"- 活动判断：{activity_judgment}")
-    lines.append(f"- 训练：{_fmt_workouts(reader.workouts(report_day))}")
+    lines.append(f"- 训练：{_fmt_workout_summaries(report.workouts)}")
 
     if sleep:
         sleep_delta = _pct_delta(sleep.asleep_hours, median["sleep"])
         lines.append(
-            f"- 睡眠：{sleep.start:%H:%M}–{sleep.end:%H:%M}，实睡 {sleep.asleep_hours:.1f} 小时{sleep_delta}；"
+            f"- {report.sleep_label}：{sleep.start:%H:%M}–{sleep.end:%H:%M}，"
+            f"实睡 {sleep.asleep_hours:.1f} 小时{sleep_delta}；"
             f"深睡 {sleep.deep_hours:.1f}h / REM {sleep.rem_hours:.1f}h / 清醒 {sleep.awake_hours:.1f}h"
         )
     recovery: list[str] = []
@@ -395,5 +491,14 @@ def build_health_briefing(report_day: date, cfg: HealthBriefing, timezone_name: 
     recovery_judgment = _recovery_assessment(activity, sleep, median)
     if recovery_judgment:
         lines.append(f"- 恢复判断：{recovery_judgment}")
-    lines.append(f"- 基线：过去 {cfg.baseline_days} 天中至少 {minimum} 个有效日的中位数")
+    lines.append(
+        f"- 基线：过去 {report.baseline_days} 天中至少 "
+        f"{report.min_baseline_samples} 个有效日的中位数"
+    )
     return "\n".join(lines)
+
+
+def build_health_briefing(report_day: date, cfg: HealthBriefing, timezone_name: str) -> str:
+    """Build the classic preface. `report_day` is yesterday."""
+    report = build_health_report(report_day, cfg, timezone_name)
+    return format_health_briefing(report) if report else ""

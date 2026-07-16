@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
 import re
 import httpx
 import logging
@@ -311,25 +312,68 @@ class TelegramSender:
             msg_ids.append(self._post_json(url, payload))
         return msg_ids
 
-    def send_rich_message(self, *, markdown: str) -> int:
+    def send_rich_message(
+        self,
+        *,
+        markdown: str,
+        media: list[tuple[str, str, str]] | None = None,
+    ) -> int:
         """Send a Bot API rich message (sendRichMessage): one message that mixes
-        text blocks and media blocks (images referenced by public https URL).
+        text blocks and media blocks.
+
+        `media` contains `(id, local_path, kind)` entries. Bot API 10.2 maps each
+        id to a `tg://photo?id=...` / video / audio reference and uploads the file
+        in the same multipart request, so callers don't need a public relay URL.
 
         A 400 raises IMMEDIATELY (bad markdown / unfetchable image URL is
         deterministic — the caller falls back to the classic text+photo push);
         429 waits per retry_after; transport errors retry with backoff."""
         url = f"https://api.telegram.org/bot{self.bot_token}/sendRichMessage"
-        payload: dict = {"chat_id": self.chat_id,
-                         "rich_message": {"markdown": markdown}}
-        if self.message_thread_id is not None:
-            payload["message_thread_id"] = self.message_thread_id
+        media = media or []
+        rich_message: dict = {"markdown": markdown}
+        if media:
+            rich_message["media"] = [
+                {
+                    "id": media_id,
+                    "media": {
+                        "type": kind,
+                        "media": f"attach://rich_media_{index}",
+                    },
+                }
+                for index, (media_id, _path, kind) in enumerate(media)
+            ]
         last_exc: Exception | None = None
         attempts = 0
         rl_hits = 0
         while attempts < self.retry_max_attempts:
             try:
                 with httpx.Client(timeout=self.timeout) as c:
-                    r = c.post(url, json=payload)
+                    if media:
+                        handles = []
+                        try:
+                            files = {}
+                            for index, (_media_id, path, _kind) in enumerate(media):
+                                fh = open(path, "rb")
+                                handles.append(fh)
+                                files[f"rich_media_{index}"] = (Path(path).name, fh)
+                            data: dict = {
+                                "chat_id": self.chat_id,
+                                "rich_message": json.dumps(rich_message, ensure_ascii=False),
+                            }
+                            if self.message_thread_id is not None:
+                                data["message_thread_id"] = self.message_thread_id
+                            r = c.post(url, data=data, files=files)
+                        finally:
+                            for fh in handles:
+                                fh.close()
+                    else:
+                        payload: dict = {
+                            "chat_id": self.chat_id,
+                            "rich_message": rich_message,
+                        }
+                        if self.message_thread_id is not None:
+                            payload["message_thread_id"] = self.message_thread_id
+                        r = c.post(url, json=payload)
                     if r.status_code == 429:
                         rl_hits += 1
                         if rl_hits >= self.retry_max_attempts:
@@ -343,7 +387,7 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
+            except (httpx.TimeoutException, httpx.ConnectError, OSError) as e:
                 last_exc = e
                 attempts += 1
                 log.warning("tg sendRichMessage transport failed (attempt %d/%d): %s",

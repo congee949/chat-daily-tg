@@ -195,6 +195,84 @@ def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
     return Card(text_html=text_html, link=preview_link)
 
 
+def _dedup_skip(content_plain: str, ch: RawChannel, ids: list[int],
+                seen: SeenStore, content_store) -> bool:
+    """L1 content-dedup gate. True = suppress this card (already journaled and
+    marked seen). Any internal failure returns False — dedup must never block
+    delivery (投递优先于完美)."""
+    if content_store is None or not ch.dedup:
+        return False
+    try:
+        from chat_daily_tg.content_seen import check_duplicate
+        d = check_duplicate(content_plain, store=content_store)
+        if not d.skip:
+            return False
+        log.info("skip content-dup (%s msg %s): %s hit ← %s msg %s @ %s",
+                 ch.name, ids[0], d.reason,
+                 d.detail.get("matched_channel", "?"),
+                 d.detail.get("matched_msg_id", "?"),
+                 d.detail.get("matched_sent_at", "?"))
+        try:
+            from chat_daily_tg import dedup_journal
+            dedup_journal.record({
+                "layer": "L1", "action": "skip", "reason": d.reason,
+                "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+                "text_head": content_plain[:120], **d.detail,
+            })
+        except Exception:
+            pass  # journaling failure never blocks the (already logged) decision
+        # Same terminal semantics as excluded_ids: advance the high-water mark.
+        for mid in ids:
+            seen.add(SeenStore.key(ch.id, mid))
+        return True
+    except Exception as e:
+        log.warning("content dedup check failed (%s msg %s), delivering: %s",
+                    ch.name, ids[0], e)
+        return False
+
+
+def _dedup_register(content_plain: str, ch: RawChannel, ids: list[int],
+                    content_store) -> None:
+    """Write-after-send fingerprint registration (same crash semantics as SeenStore:
+    a crash between send and register re-delivers rather than drops)."""
+    if content_store is None or not ch.dedup:
+        return
+    try:
+        from chat_daily_tg.content_seen import fingerprints_for
+        content_store.register(fingerprints_for(content_plain), ch.id, ids[0], ch.name)
+    except Exception as e:
+        log.warning("content dedup register failed (%s msg %s): %s", ch.name, ids[0], e)
+
+
+def resend_raw_card(*, channel: RawChannel, msg_id: int, db_path: str | Path,
+                    sender: TelegramSender, seen_path: str | Path) -> bool:
+    """--resend escape hatch: rebuild and send ONE card, bypassing SeenStore, the
+    high-water mark and every dedup layer. The recovery path for a wrong
+    suppression (the journal/archive tell you the chat_id:msg_id to resend).
+    Public-channel text path only — private media posts need a manual re-dump."""
+    import sqlite3 as _sq
+    from chat_daily_tg.telegram_exporter import canonical_chat_ids
+    ids = sorted(canonical_chat_ids(channel.id))
+    marks = ",".join("?" for _ in ids)
+    conn = _sq.connect(f"file:{Path(db_path).expanduser()}?mode=ro", uri=True)
+    conn.row_factory = _sq.Row
+    row = conn.execute(
+        f"SELECT * FROM messages WHERE chat_id IN ({marks}) AND msg_id=?",
+        [*ids, msg_id],
+    ).fetchone()
+    if row is None:
+        log.error("resend: msg %s not found in messages.db for %s", msg_id, channel.name)
+        return False
+    card = build_card(row, channel)
+    if card is None:
+        log.error("resend: msg %s renders to no card (media-only private post?)", msg_id)
+        return False
+    sender.send_card(card.text_html, link=card.link)
+    SeenStore(seen_path).add(SeenStore.key(channel.id, msg_id))
+    log.info("resend: %s msg %s re-delivered", channel.name, msg_id)
+    return True
+
+
 def push_raw_channel_cards(
     *,
     channels: list[RawChannel],
@@ -208,6 +286,8 @@ def push_raw_channel_cards(
     delay_seconds: float = 1.0,
     no_push: bool = False,
     incremental: bool = False,
+    content_store=None,   # content_seen.ContentSeenStore | None (L1 dedup)
+    topic_gate=None,      # topic_dedup.TopicDedupGate | None (L2 dedup)
 ) -> int:
     """Export each raw channel's window and push every message as a card.
 
@@ -234,6 +314,7 @@ def push_raw_channel_cards(
                     out_dir=archive_dir / f"rawmedia-{_safe(ch.name)}",
                     sender=sender, limit=ch.limit, seen=seen, min_id=hwm,
                     delay_seconds=delay_seconds, no_push=no_push,
+                    content_store=content_store, topic_gate=topic_gate,
                 )
             except Exception as e:
                 private_failed += 1
@@ -258,7 +339,10 @@ def push_raw_channel_cards(
         # Fold album items into one card each, then build per-group so one malformed row
         # (e.g. bad timestamp) skips itself instead of aborting the whole channel. Each
         # card carries every member msg_id so all of them get marked seen on send.
-        cards: list[tuple[list[int], Card]] = []
+        # content_plain (promo-stripped body, no header) rides along for the dedup
+        # layers — fingerprinting the rendered HTML would bake the per-channel header
+        # into the identity and defeat cross-channel matching.
+        cards: list[tuple[list[int], Card, str]] = []
         excluded_ids: list[int] = []
         for group in _group_albums(rows):
             head = group[0]
@@ -272,15 +356,18 @@ def push_raw_channel_cards(
                 log.warning("raw card build skipped (%s msg %s): %s", ch.name, head["msg_id"], e)
                 continue
             if c is not None:
-                cards.append((ids, c))
+                content_plain = strip_promo_lines((head["content"] or "").strip(), ch.strip_patterns)
+                cards.append((ids, c, content_plain))
         log.info("raw channel %s: %d msgs → %d cards (%d filtered)",
                  ch.name, len(rows), len(cards), len(excluded_ids))
 
         # Archive verbatim cards for auditability (always, even with --no-push).
+        # Written BEFORE the send loop, so a dedup-suppressed card still leaves its
+        # full text here — the recovery/audit trail for a wrong suppression.
         archive_path = archive_dir / f"rawcard-{_safe(ch.name)}.md"
         archive_path.write_text(
             "\n\n---\n\n".join(
-                (c.text_html + (f"\n\n[原文] {c.link}" if c.link else "")) for _, c in cards
+                (c.text_html + (f"\n\n[原文] {c.link}" if c.link else "")) for _, c, _ in cards
             )
             or "(无消息)",
             encoding="utf-8",
@@ -295,11 +382,48 @@ def push_raw_channel_cards(
         for mid in excluded_ids:
             seen.add(SeenStore.key(ch.id, mid))
 
-        for ids, c in cards:
+        if topic_gate is not None and ch.dedup and cards:
+            try:  # one embed batch per channel; failure → gate goes offline, all deliver.
+                # Only unseen cards — a catch-up re-run must not re-embed what it
+                # is about to skip on the seen check anyway.
+                unseen = [cp for card_ids, _, cp in cards
+                          if SeenStore.key(ch.id, card_ids[0]) not in seen]
+                if unseen:
+                    topic_gate.prepare(unseen)
+            except Exception as e:
+                log.warning("topic gate prepare failed (%s): %s", ch.name, e)
+
+        for ids, c, content_plain in cards:
             if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card
                 continue
+
+            if _dedup_skip(content_plain, ch, ids, seen, content_store):
+                continue
+
+            text_html = c.text_html
+            l2_verdict = None
+            if topic_gate is not None and ch.dedup:
+                try:
+                    l2_verdict = topic_gate.assess(content_plain)
+                    if l2_verdict.action == "skip":
+                        # Same terminal semantics as excluded_ids: record every member
+                        # so the high-water mark advances. The gate journals itself.
+                        log.info("skip topic-dup (%s msg %s): sim=%.2f vs msg %s",
+                                 ch.name, ids[0], l2_verdict.similarity,
+                                 l2_verdict.matched_msg_id)
+                        for mid in ids:
+                            seen.add(SeenStore.key(ch.id, mid))
+                        continue
+                    if l2_verdict.action == "annotate" and l2_verdict.matched_msg_id:
+                        head_part, sep, body = text_html.partition("\n\n")
+                        ann = topic_gate.annotation_html(l2_verdict.matched_msg_id)
+                        text_html = f"{head_part}\n{ann}{sep}{body}" if sep else f"{text_html}\n{ann}"
+                except Exception as e:
+                    log.warning("topic gate assess failed (%s msg %s): %s", ch.name, ids[0], e)
+                    l2_verdict = None
+
             try:
-                sender.send_card(c.text_html, link=c.link)
+                sent_ids = sender.send_card(text_html, link=c.link)
             except Exception as e:
                 log.warning("raw card push failed (%s): %s", ch.name, e)
                 continue
@@ -307,6 +431,17 @@ def push_raw_channel_cards(
             # item, or the incremental high-water mark stalls at the head id.
             for mid in ids:
                 seen.add(SeenStore.key(ch.id, mid))
+            _dedup_register(content_plain, ch, ids, content_store)
+            if topic_gate is not None and ch.dedup:
+                try:
+                    topic_gate.index.register_sent(
+                        sent_ids, content_plain, "chatdaily_raw",
+                        thread_id=getattr(sender, "message_thread_id", None),
+                        vector=(l2_verdict.vector if l2_verdict is not None else None),
+                    )
+                except Exception as e:
+                    log.warning("delivered-index register failed (%s msg %s): %s",
+                                ch.name, ids[0], e)
             total += 1
             if delay_seconds > 0:
                 time.sleep(delay_seconds)

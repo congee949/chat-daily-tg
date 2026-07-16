@@ -11,6 +11,7 @@ from datetime import date, timedelta
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import sys
 
@@ -208,6 +209,63 @@ def _append_evidence_context(detailed_md: str, evidence_context: str) -> str:
     return f"{detailed_md.rstrip()}\n\n## Embedding 检索证据\n\n{evidence_context.strip()}\n"
 
 
+def _build_dedup_gates(cfg, *, no_push: bool):
+    """Construct the L1 content store and L2 topic gate for one channels run.
+    Every failure degrades to None (= that layer off for the run, delivery
+    proceeds) — dedup must never be the reason a card doesn't go out."""
+    content_store = None
+    topic_gate = None
+    if no_push:
+        return None, None
+    dedup = cfg.sources.telegram.dedup
+    if dedup.content.enabled:
+        try:
+            from chat_daily_tg.content_seen import ContentSeenStore
+            from chat_daily_tg.paths import CONTENT_SEEN_DB
+            content_store = ContentSeenStore(
+                CONTENT_SEEN_DB, window_days=dedup.content.window_days)
+        except Exception as e:
+            log.warning("content dedup store unavailable (layer off this run): %s", e)
+    if dedup.topic.enabled:
+        try:
+            from chat_daily_tg.evidence_index import GeminiEmbedder
+            from chat_daily_tg.llm_client import LLMClient
+            from chat_daily_tg.paths import DELIVERED_INDEX_DB
+            from chat_daily_tg.topic_dedup import (
+                DeliveredIndex, SameEventJudge, TopicDedupGate,
+            )
+            t = dedup.topic
+            em = cfg.models.embedding if cfg.models else None
+            if not (em and em.enabled):
+                raise RuntimeError("models.embedding disabled — L2 needs it")
+            embedder = GeminiEmbedder(
+                endpoint=em.endpoint, model=em.model,
+                api_key=os.environ[em.api_key_env],
+                timeout=em.timeout, output_dimensionality=em.dimension,
+            )
+            index = DeliveredIndex(DELIVERED_INDEX_DB, window_days=t.index_window_days)
+            index.ingest_new(
+                Path(cfg.sources.telegram.db_path).expanduser(),
+                t.forum_chat_id, sync_limit=t.sync_limit,
+            )
+            index.backfill_embeddings(embedder)
+            alias = cfg.resolve_model_alias(t.judge_model_alias)
+            judge = SameEventJudge(
+                LLMClient(alias), model=t.judge_model,
+                timeout=t.judge_timeout_seconds,
+            )
+            topic_gate = TopicDedupGate(
+                index, embedder, judge, mode=t.mode,
+                candidate_min_sim=t.candidate_min_sim, strong_sim=t.strong_sim,
+                retrieval_window_hours=t.retrieval_window_hours,
+                exclude_producers=frozenset(t.exclude_producers),
+                max_judge_calls_per_run=t.max_judge_calls_per_run,
+            )
+        except Exception as e:
+            log.warning("topic dedup gate unavailable (layer off this run): %s", e)
+    return content_store, topic_gate
+
+
 def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, incremental: bool) -> None:
     """Verbatim channel-card stage, fully isolated — any failure only logs/notifies.
     Runs as a standalone 2-hourly forwarder (incremental=True): each channel fetches
@@ -229,6 +287,9 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
         dm_chat_id = os.environ[cfg.telegram.chat_id_env]
         bot_token = os.environ[cfg.telegram.bot_token_env]
         seen_path = DATA_DIR / "raw_channel_seen.txt"
+        # One store/gate pair per run (the L2 judge budget is global across
+        # channels); construction failure = that layer off, delivery proceeds.
+        content_store, topic_gate = _build_dedup_gates(cfg, no_push=no_push)
         groups: "OrderedDict[str, list]" = OrderedDict()
         for ch in channels:
             groups.setdefault(ch.topic or "channels_news", []).append(ch)
@@ -258,6 +319,8 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
                 delay_seconds=cfg.sources.telegram.raw_card_delay_seconds,
                 no_push=no_push,
                 incremental=incremental,
+                content_store=content_store,
+                topic_gate=topic_gate,
             )
             total += n
             log.info("raw channel cards pushed: %d -> topic=%s %s", n, topic_key, target)
@@ -286,6 +349,44 @@ def run_channels(no_push: bool = False) -> int:
     except Exception as e:
         log.exception("channels forwarder failed: %s", e)
         notify_failure("chat-daily-tg 频道转发失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
+def run_resend(spec: str) -> int:
+    """--resend CHAT_ID:MSG_ID — rebuild and deliver one channel card, bypassing
+    SeenStore, the high-water mark and every dedup layer. The recovery hatch for
+    a wrong suppression: the dedup journal / rawcard archive carry the ids."""
+    configure_logging(log_file_for(f"resend-{date.today().isoformat()}"))
+    try:
+        chat_id, _, msg_id_s = spec.partition(":")
+        msg_id = int(msg_id_s)
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        channel = next(
+            (c for c in cfg.sources.telegram.raw_channels if c.id == chat_id), None)
+        if channel is None:
+            log.error("resend: chat_id %s is not a configured raw channel", chat_id)
+            return 1
+        from chat_daily_tg.paths import DATA_DIR as _dd
+        from chat_daily_tg.raw_channels import resend_raw_card
+        from chat_daily_tg.tg_sender import TelegramSender
+        dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+        tg_chat_id, thread_id = resolve_tg_target(
+            channel.topic or "channels_news", dm_chat_id)
+        sender = TelegramSender(
+            bot_token=os.environ[cfg.telegram.bot_token_env],
+            chat_id=tg_chat_id, message_thread_id=thread_id,
+            retry_max_attempts=cfg.retry.max_attempts,
+            retry_backoff_seconds=cfg.retry.backoff_seconds,
+        )
+        ok = resend_raw_card(
+            channel=channel, msg_id=msg_id,
+            db_path=cfg.sources.telegram.db_path, sender=sender,
+            seen_path=_dd / "raw_channel_seen.txt",
+        )
+        return 0 if ok else 1
+    except Exception as e:
+        log.exception("resend failed: %s", e)
         return 1
 
 
@@ -634,39 +735,51 @@ def _citation_caption(analysis) -> str:
     return f"📷 {c.platform} · {c.group_name} · {time_part}"
 
 
-def _push_rich_digest(tg, cfg, concise_md: str, citation_map: dict) -> bool:
+def _push_rich_digest(
+    tg,
+    cfg,
+    concise_md: str,
+    citation_map: dict,
+    *,
+    health_rich_md: str = "",
+    health_chart_path: Path | None = None,
+) -> bool:
     """Send the digest as ONE rich message with the cited images INLINE at the
-    LLM's [IMGn] marker positions — the original 图文混排 ask (Bot API 10.x
-    sendRichMessage). Returns False on ANY failure so the caller falls back to
-    the classic text + trailing-photos push; all uploaded KV source images are
-    deleted in every case (Telegram re-hosts them during the send)."""
-    from chat_daily_tg.img_relay import delete_image, upload_image
-    uploaded: dict[str, str] = {}  # local_path -> relay url (dedupes repeat citations)
+    LLM's [IMGn] marker positions. Bot API 10.2 media is uploaded directly in
+    the multipart sendRichMessage call, avoiding the old public KV relay.
+    Returns False on ANY failure so the caller falls back to text + photos."""
     try:
         # Rich messages consume MARKDOWN, so build from the RAW concise output
         # (post_process_concise would have converted [label](url) links into
         # Telegram-HTML <a> tags, which rich markdown must not receive).
         md = abbreviate_sources(concise_md, cfg.source_abbreviations)
         segments = resolve_citations(md, citation_map)
-        if not any(analysis for _, analysis in segments):
+        if not health_rich_md and not health_chart_path and not any(
+            analysis for _, analysis in segments
+        ):
             return False
-        parts: list[str] = []
+        parts: list[str] = [health_rich_md, "\n\n"] if health_rich_md else []
+        media: list[tuple[str, str, str]] = []
+        media_ids: dict[str, str] = {}
+        if health_chart_path:
+            media.append(("health_chart", str(health_chart_path), "photo"))
         for text_chunk, analysis in segments:
             parts.append(text_chunk)
             if analysis:
                 path = analysis.candidate.local_path
-                if path not in uploaded:
-                    uploaded[path] = upload_image(cfg.img_relay, path)
+                if path not in media_ids:
+                    media_id = f"citation_{len(media_ids) + 1}"
+                    media_ids[path] = media_id
+                    media.append((media_id, path, "photo"))
                 caption = _citation_caption(analysis).replace('"', "'")
-                parts.append(f'\n\n![]({uploaded[path]} "{caption}")\n\n')
-        tg.send_rich_message(markdown="".join(parts))
+                parts.append(
+                    f'\n\n![](tg://photo?id={media_ids[path]} "{caption}")\n\n'
+                )
+        tg.send_rich_message(markdown="".join(parts), media=media)
         return True
     except Exception as e:
         log.warning("rich digest push failed, falling back to text+photo: %s", e)
         return False
-    finally:
-        for url in uploaded.values():
-            delete_image(cfg.img_relay, url)
 
 
 def _fact_risk_report(verification: dict) -> str:
@@ -924,20 +1037,56 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         if evidence_index is not None:
             evidence_index.close()
 
+    health_plain = ""
+    health_rich_md = ""
+    health_chart_path: Path | None = None
+
     # Personal Health/Watch context is deterministic and remains outside the LLM
     # trust boundary. Failure is isolated so stale iCloud sync never blocks the
     # group-chat digest.
     if cfg.health_briefing.enabled:
         try:
-            from chat_daily_tg.health_briefing import build_health_briefing
-            briefing = build_health_briefing(
+            from chat_daily_tg.health_briefing import (
+                build_health_report,
+                format_health_briefing,
+            )
+            from chat_daily_tg.health_card import render_health_card
+            from chat_daily_tg.health_rich import build_health_rich_markdown
+
+            health_report = build_health_report(
                 date.fromisoformat(date_str), cfg.health_briefing, cfg.schedule.timezone,
             )
-            if briefing:
-                (archive_dir / "health-briefing.md").write_text(briefing, encoding="utf-8")
-                out = replace(out, concise_md=f"{briefing}\n\n{out.concise_md}")
+            if health_report:
+                health_plain = format_health_briefing(health_report)
+                (archive_dir / "health-briefing.md").write_text(
+                    health_plain, encoding="utf-8"
+                )
+                health_chart_path = render_health_card(
+                    health_report, archive_dir / "health-card.png"
+                )
+                health_rich_md = build_health_rich_markdown(
+                    health_report,
+                    chart_media_id="health_chart" if health_chart_path else None,
+                )
+                (archive_dir / "health-rich.md").write_text(
+                    health_rich_md, encoding="utf-8"
+                )
+                out = replace(out, concise_md=f"{health_plain}\n\n{out.concise_md}")
         except Exception as e:
             log.warning("health briefing skipped (non-fatal): %s", e)
+
+    # Dedup audit footer: silence must be auditable — the user should learn
+    # "N cards were withheld today" from the report itself, not from grepping
+    # two machines' logs. Empty counts add nothing (footer omitted).
+    try:
+        from chat_daily_tg.dedup_journal import today_counts
+        counts = today_counts()
+        if counts:
+            line = "♻️ 今日频道去重：" + "、".join(
+                f"{layer} {n} 条" for layer, n in sorted(counts.items()))
+            out = replace(out, concise_md=f"{out.concise_md}\n\n{line}")
+    except Exception as e:
+        log.warning("dedup footer skipped (non-fatal): %s", e)
 
     # Post-hoc validation
     warnings = validate_clusters_in_output(clusters, out.concise_md)
@@ -1019,6 +1168,7 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         # digest must still go out at most once.
         card_marker = archive_dir / ".card-sent"
         digest_marker = archive_dir / ".digest-sent"
+        health_card_marker = archive_dir / ".health-card-sent"
         image_sent = card_marker.exists()
         if image_sent:
             log.info("card already sent for %s, skipping (catch-up)", date_str)
@@ -1069,10 +1219,47 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 # the log or this misattribution recurs (PR #8 review, sweep).
                 log.warning("vision included %d citable image(s) but the digest "
                             "cites none — LLM declined to cite", len(citation_map))
-            if cited_list and cfg.img_relay.enabled and _push_rich_digest(tg, cfg, out.concise_md, citation_map):
+            rich_digest_md = out.concise_md
+            if health_plain and rich_digest_md.startswith(f"{health_plain}\n\n"):
+                rich_digest_md = rich_digest_md[len(health_plain) + 2:]
+            chart_for_rich = (
+                health_chart_path
+                if health_chart_path and not health_card_marker.exists()
+                else None
+            )
+            rich_ok = _push_rich_digest(
+                tg,
+                cfg,
+                rich_digest_md,
+                citation_map,
+                health_rich_md=health_rich_md,
+                health_chart_path=chart_for_rich,
+            )
+            if rich_ok:
                 digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
-                log.info("TG push complete (single rich message, %d inline image(s))", len(cited_list))
+                if chart_for_rich:
+                    health_card_marker.write_text(
+                        _dt.now().isoformat(), encoding="utf-8"
+                    )
+                log.info(
+                    "TG push complete (single rich message, health_chart=%s, %d cited image(s))",
+                    bool(chart_for_rich), len(cited_list),
+                )
             else:
+                if health_chart_path and not health_card_marker.exists():
+                    try:
+                        tg.send_photo(
+                            health_chart_path,
+                            caption=f"📊 昨日健康概览 · {date_str}",
+                        )
+                        health_card_marker.write_text(
+                            _dt.now().isoformat(), encoding="utf-8"
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "health card fallback send failed; continuing text-only: %s",
+                            e,
+                        )
                 full_text = "".join(chunk for chunk, _ in segments) if segments else concise_processed
                 tg.send(full_text, parse_mode="HTML",
                         state_path=archive_dir / ".text-push-state.json")
@@ -1123,7 +1310,13 @@ if __name__ == "__main__":
                    help="Send the weekly growth A/B report to the DM")
     p.add_argument("--dm-test", action="store_true",
                    help="With --growth-only: send the winner card to the DM, zero state writes")
+    p.add_argument("--resend", metavar="CHAT_ID:MSG_ID", default=None,
+                   help="Rebuild and send ONE channel card, bypassing seen/HWM and every "
+                        "dedup layer — the recovery hatch for a wrong suppression "
+                        "(find the ids in the dedup journal / rawcard archive)")
     args = p.parse_args()
+    if args.resend:
+        sys.exit(run_resend(args.resend))
     if args.channels_only:
         sys.exit(run_channels(no_push=args.no_push))
     if args.bilibili_only:

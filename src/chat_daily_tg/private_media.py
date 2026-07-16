@@ -21,7 +21,10 @@ from pathlib import Path
 from chat_daily_tg.config import RawChannel
 from chat_daily_tg.notifier import notify_failure
 from chat_daily_tg.raw_channels import (
+    _dedup_register,
+    _dedup_skip,
     matches_exclude_patterns,
+    strip_promo_lines,
     strip_promo_lines_html,
     visible_text,
 )
@@ -143,6 +146,8 @@ def push_private_channel(
     min_id: int = 0,
     delay_seconds: float = 1.0,
     no_push: bool = False,
+    content_store=None,   # content_seen.ContentSeenStore | None (L1 dedup)
+    topic_gate=None,      # topic_dedup.TopicDedupGate | None (L2 dedup)
 ) -> int:
     """Download + push one private channel's window. Returns posts pushed.
 
@@ -162,6 +167,16 @@ def push_private_channel(
 
     pushed = 0
     dropped_posts: list[tuple[int, int]] = []  # (first_msg_id, dropped_count)
+    if topic_gate is not None and channel.dedup and posts:
+        try:  # one embed batch per channel (same as the public path); failure →
+            # the gate falls back to per-card lazy embedding or goes offline.
+            topic_gate.prepare([
+                strip_promo_lines(p.text or "", channel.strip_patterns)
+                for p in posts
+                if seen is None or SeenStore.key(channel.id, p.first_msg_id) not in seen
+            ])
+        except Exception as e:
+            log.warning("topic gate prepare failed (%s): %s", channel.name, e)
     try:
         for p in posts:
             key = SeenStore.key(channel.id, p.first_msg_id) if seen is not None else None
@@ -172,10 +187,41 @@ def push_private_channel(
                     for mid in (p.msg_ids or [p.first_msg_id]):
                         seen.add(SeenStore.key(channel.id, mid))
                 continue
+            # Dedup layers operate on the promo-stripped PLAIN text (no header/HTML —
+            # those differ per channel and would defeat cross-channel matching).
+            # Media-only posts have no text → both layers no-op → always deliver.
+            content_plain = strip_promo_lines(p.text or "", channel.strip_patterns)
+            member_ids = p.msg_ids or [p.first_msg_id]
+            if seen is not None and _dedup_skip(
+                    content_plain, channel, member_ids, seen, content_store):
+                continue
+            l2_verdict = None
+            annotation = ""
+            if topic_gate is not None and channel.dedup:
+                try:
+                    l2_verdict = topic_gate.assess(content_plain)
+                    if l2_verdict.action == "skip":
+                        log.info("skip topic-dup (%s msg %s): sim=%.2f vs msg %s",
+                                 channel.name, p.first_msg_id, l2_verdict.similarity,
+                                 l2_verdict.matched_msg_id)
+                        if seen is not None:
+                            for mid in member_ids:
+                                seen.add(SeenStore.key(channel.id, mid))
+                        continue
+                    if l2_verdict.action == "annotate" and l2_verdict.matched_msg_id:
+                        annotation = topic_gate.annotation_html(l2_verdict.matched_msg_id)
+                except Exception as e:
+                    log.warning("topic gate assess failed (%s msg %s): %s",
+                                channel.name, p.first_msg_id, e)
+                    l2_verdict = None
             # Use the message HTML (keeps news-source links + bold), drop promo lines.
             content_html = strip_promo_lines_html(p.html or escape_html(p.text), channel.strip_patterns)
             has_text = bool(visible_text(content_html).strip())
             header = f"📢 <b>{escape_html(channel.name)}</b> · {p.time}"
+            if annotation:
+                # Inserted BEFORE the 1024-caption check below so the overflow
+                # fallback accounts for the extra line.
+                header = f"{header}\n{annotation}"
             body = f"{header}\n\n{content_html}" if has_text else header
             dropped = 0
             try:
@@ -209,6 +255,18 @@ def push_private_channel(
                 # incremental run re-fetch and re-send the tail as a partial album.
                 for mid in (p.msg_ids or [p.first_msg_id]):
                     seen.add(SeenStore.key(channel.id, mid))
+            _dedup_register(content_plain, channel, member_ids, content_store)
+            if topic_gate is not None and channel.dedup:
+                try:
+                    # Media sends don't surface their message ids; empty ids = no-op,
+                    # and the next forum sync ingests the delivered copy instead.
+                    topic_gate.index.register_sent(
+                        [], content_plain, "chatdaily_raw", thread_id=None,
+                        vector=(l2_verdict.vector if l2_verdict is not None else None),
+                    )
+                except Exception as e:
+                    log.warning("delivered-index register failed (%s msg %s): %s",
+                                channel.name, p.first_msg_id, e)
             pushed += 1
             if delay_seconds > 0:
                 _t.sleep(delay_seconds)

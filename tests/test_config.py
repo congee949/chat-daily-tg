@@ -236,3 +236,76 @@ telegram:
     assert cfg.resolve_model_alias("vibekey").endpoint == "https://api.vibekey.cn/v1"
     cfg.override_summary_model("vibekey")
     assert cfg.models.summary.model == "test-model"
+
+
+def test_load_config_dedup_layers_roundtrip_and_defaults(tmp_path: Path):
+    # Explicit dedup section + a per-channel opt-out.
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  telegram:
+    enabled: true
+    raw_channels:
+      - id: "-1001"
+        name: "a"
+        username: "a"
+      - id: "-1002"
+        name: "b"
+        username: "b"
+        dedup: false
+    dedup:
+      content:
+        window_days: 7
+      topic:
+        enabled: true
+        mode: "annotate"
+llm:
+  endpoint: "https://example.test"
+  model: "m"
+  api_key_env: "K"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+    d = cfg.sources.telegram.dedup
+    assert d.content.window_days == 7
+    assert d.content.enabled is True                # default holds in partial section
+    assert d.topic.enabled is True
+    assert d.topic.mode == "annotate"
+    assert d.topic.judge_model == "gpt-5.6-terra"   # unset field keeps its default
+    assert cfg.sources.telegram.raw_channels[0].dedup is True   # default opt-in
+    assert cfg.sources.telegram.raw_channels[1].dedup is False  # explicit opt-out
+
+    # dedup section entirely absent → full defaults.
+    cfg_file2 = tmp_path / "config2.yaml"
+    cfg_file2.write_text(
+        """
+sources:
+  telegram:
+    enabled: true
+    raw_channels:
+      - id: "-1001"
+        name: "a"
+        username: "a"
+llm:
+  endpoint: "https://example.test"
+  model: "m"
+  api_key_env: "K"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+""",
+        encoding="utf-8",
+    )
+    cfg2 = load_config(cfg_file2)
+    d2 = cfg2.sources.telegram.dedup
+    assert d2.content.enabled is True
+    assert d2.content.window_days == 14
+    assert d2.topic.enabled is False
+    assert d2.topic.mode == "report"
+    assert d2.topic.judge_model == "gpt-5.6-terra"
+    assert cfg2.sources.telegram.raw_channels[0].dedup is True

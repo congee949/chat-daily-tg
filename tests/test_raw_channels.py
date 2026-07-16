@@ -342,3 +342,357 @@ def test_push_raw_channels_alerts_when_all_private_fail(tmp_path, monkeypatch):
     assert n == 0
     assert len(alerts) == 1
     assert "私有频道全部失败" in alerts[0][0]
+
+
+# --------------------------------------------------------------------------- #
+# Dedup-layer wiring integration tests (appended): push_raw_channel_cards with
+# content_store= (L1), topic_gate= (L2) and the resend_raw_card escape hatch.
+# Everything goes through the public push_raw_channel_cards API; the L2 gate is
+# a stub here (TopicDedupGate has its own unit tests in test_topic_dedup.py).
+
+from types import SimpleNamespace
+
+from chat_daily_tg.config import RawChannel as _RC  # noqa: F401 (clarity alias)
+from chat_daily_tg.content_seen import ContentSeenStore, fingerprints_for
+from chat_daily_tg.raw_seen import SeenStore
+
+# ≥24 substantive code points after normalization → gets a text fingerprint.
+_DUP_TEXT = (
+    "纽约州议会周三通过一项校园食品安全法案，"
+    "要求全州公立学校每个季度公开披露餐饮采购来源与供应商资质审查结果。"
+)
+_SHARED_URL = "https://example.com/2026/dist-systems-consistency"
+
+
+class _RecordingSender:
+    """Fake sender matching the REAL TelegramSender.send_card return type:
+    a list of the Telegram message ids of the sent chunks."""
+
+    def __init__(self, start_id: int = 100):
+        self.sent: list[tuple[str, str | None]] = []
+        self._next = start_id
+
+    def send_card(self, text_html, link=None):
+        self.sent.append((text_html, link))
+        mid = self._next
+        self._next += 1
+        return [mid]
+
+
+def _capture_journal(monkeypatch):
+    """Redirect dedup_journal.record so no test touches the real journal file."""
+    import chat_daily_tg.dedup_journal as dj
+
+    entries: list[dict] = []
+    monkeypatch.setattr(dj, "record", lambda entry, path=None: entries.append(entry))
+    return entries
+
+
+def _push_channels(monkeypatch, tmp_path, *, channels, rows_by_chat, sender,
+                   seen_path, **extra):
+    """Drive the public API with monkeypatched sync/read (same convention as
+    test_filtered_public_post_is_not_sent_and_is_marked_seen above)."""
+    from chat_daily_tg import raw_channels
+
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(
+        raw_channels, "read_messages",
+        lambda **k: list(rows_by_chat.get(k["chat_id"], [])),
+    )
+    return raw_channels.push_raw_channel_cards(
+        channels=channels, since="2026-07-15", until="2026-07-16",
+        db_path=tmp_path / "messages.db", sender=sender, archive_dir=tmp_path,
+        seen_path=seen_path, delay_seconds=0, **extra,
+    )
+
+
+def test_cross_channel_text_dup_suppressed_marks_seen_and_stays_idempotent(
+        tmp_path, monkeypatch):
+    journal = _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    seen_path = tmp_path / "seen.txt"
+    ch_a = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    ch_b = RawChannel(id="-1002222", name="B频道", username="chan_b")
+    rows = {
+        "-1001111": [_row(content=_DUP_TEXT, msg_id=101)],
+        "-1002222": [_row(content=_DUP_TEXT, msg_id=555)],  # same body, new msg_id
+    }
+
+    sender_a = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_a], rows_by_chat=rows,
+                       sender=sender_a, seen_path=seen_path, content_store=store)
+    assert n == 1 and len(sender_a.sent) == 1
+    hit = store.lookup(fingerprints_for(_DUP_TEXT))  # write-after-send registered
+    assert hit is not None
+    assert hit.chat_id == "-1001111" and hit.msg_id == 101
+
+    sender_b = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                       sender=sender_b, seen_path=seen_path, content_store=store)
+    assert n == 0 and sender_b.sent == []          # duplicate suppressed
+    seen = SeenStore(seen_path)
+    assert SeenStore.key(ch_b.id, 555) in seen      # high-water mark advances
+    assert seen.max_msg_id(ch_b.id) == 555
+
+    # Re-running the same push sends nothing: the head id is already seen.
+    sender_b2 = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                       sender=sender_b2, seen_path=seen_path, content_store=store)
+    assert n == 0 and sender_b2.sent == []
+    assert len(journal) == 1                        # skip journaled exactly once
+
+
+def test_bare_link_url_dup_suppressed_but_commentary_delivers(tmp_path, monkeypatch):
+    _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    seen_path = tmp_path / "seen.txt"
+    ch_a = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    ch_b = RawChannel(id="-1002222", name="B频道", username="chan_b")
+    ch_c = RawChannel(id="-1003333", name="C频道", username="chan_c")
+    text_a = ("这篇讲分布式系统一致性取舍的长文非常扎实，"
+              f"从线性一致到最终一致的推导都配了工程实例，推荐后端工程师精读。 {_SHARED_URL}")
+    text_b = _SHARED_URL                                   # bare link, no commentary
+    text_c = f"补充一个不同视角的评论，观点与上文相反，值得对照阅读。 {_SHARED_URL}"
+    rows = {
+        "-1001111": [_row(content=text_a, msg_id=11)],
+        "-1002222": [_row(content=text_b, msg_id=22)],
+        "-1003333": [_row(content=text_c, msg_id=33)],
+    }
+
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_a], rows_by_chat=rows,
+                       sender=_RecordingSender(), seen_path=seen_path,
+                       content_store=store)
+    assert n == 1                                          # commentary+URL delivered
+
+    sender_b = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                       sender=sender_b, seen_path=seen_path, content_store=store)
+    assert n == 0 and sender_b.sent == []                  # bare re-link suppressed
+    assert SeenStore.key(ch_b.id, 22) in SeenStore(seen_path)
+
+    sender_c = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_c], rows_by_chat=rows,
+                       sender=sender_c, seen_path=seen_path, content_store=store)
+    assert n == 1 and len(sender_c.sent) == 1              # own commentary delivers
+    assert "补充一个不同视角的评论" in sender_c.sent[0][0]
+
+
+def test_per_channel_dedup_opt_out_delivers_despite_fingerprint_hit(
+        tmp_path, monkeypatch):
+    journal = _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    store.register(fingerprints_for(_DUP_TEXT), "-1001111", 101, "A频道")
+    ch_b = RawChannel(id="-1002222", name="B频道", username="chan_b", dedup=False)
+    rows = {"-1002222": [_row(content=_DUP_TEXT, msg_id=555)]}
+
+    sender = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                       sender=sender, seen_path=tmp_path / "seen.txt",
+                       content_store=store)
+    assert n == 1 and len(sender.sent) == 1     # dedup: false wins over the hit
+    assert _DUP_TEXT in sender.sent[0][0]
+    assert journal == []                        # no suppression, nothing journaled
+
+
+def test_content_store_failure_still_delivers(tmp_path, monkeypatch):
+    class BoomStore:
+        def lookup(self, fingerprints):
+            raise RuntimeError("content_seen db locked")
+
+        def register(self, *a, **k):
+            raise RuntimeError("content_seen db locked")
+
+    ch = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    rows = {"-1001111": [_row(content=_DUP_TEXT, msg_id=101)]}
+    sender = _RecordingSender()
+    seen_path = tmp_path / "seen.txt"
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=sender, seen_path=seen_path, content_store=BoomStore())
+    assert n == 1 and len(sender.sent) == 1     # 投递优先于完美
+    assert SeenStore.key(ch.id, 101) in SeenStore(seen_path)
+
+
+def test_l1_skip_writes_one_journal_entry(tmp_path, monkeypatch):
+    entries = _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    store.register(fingerprints_for(_DUP_TEXT), "-1001111", 101, "A频道")
+    ch_b = RawChannel(id="-1002222", name="B频道", username="chan_b")
+    rows = {"-1002222": [_row(content=_DUP_TEXT, msg_id=555)]}
+
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                       sender=_RecordingSender(), seen_path=tmp_path / "seen.txt",
+                       content_store=store)
+    assert n == 0
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["layer"] == "L1" and e["action"] == "skip" and e["reason"] == "text"
+    assert e["chat_id"] == "-1002222" and e["msg_id"] == 555
+    assert e["matched_msg_id"] == 101 and e["matched_channel"] == "A频道"
+
+
+def test_no_content_store_keeps_existing_behavior_duplicates_send(
+        tmp_path, monkeypatch):
+    # content_store omitted (default None) → the dedup layers are inert and a
+    # cross-channel duplicate is delivered twice, byte-identical to old behavior.
+    seen_path = tmp_path / "seen.txt"
+    ch_a = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    ch_b = RawChannel(id="-1002222", name="B频道", username="chan_b")
+    rows = {
+        "-1001111": [_row(content=_DUP_TEXT, msg_id=101)],
+        "-1002222": [_row(content=_DUP_TEXT, msg_id=555)],
+    }
+    sender = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch_a], rows_by_chat=rows,
+                       sender=sender, seen_path=seen_path)
+    n += _push_channels(monkeypatch, tmp_path, channels=[ch_b], rows_by_chat=rows,
+                        sender=sender, seen_path=seen_path)
+    assert n == 2 and len(sender.sent) == 2
+    assert _DUP_TEXT in sender.sent[0][0] and _DUP_TEXT in sender.sent[1][0]
+
+
+def test_resend_raw_card_bridges_bare_positive_chat_id_and_marks_seen(tmp_path):
+    # resend queries messages.db directly; the row's chat_id is stored in the
+    # bare-positive tg-cli form while channel.id is the "-100…" config form —
+    # canonical_chat_ids must bridge the two.
+    import sqlite3
+
+    from chat_daily_tg.raw_channels import resend_raw_card
+
+    db = tmp_path / "messages.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE messages (chat_id INTEGER, chat_name TEXT, msg_id INTEGER, "
+        "sender_name TEXT, content TEXT, timestamp TEXT, raw_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+        (1833253016, "yihong", 13927, "y", "误杀后需要补发的正文一段",
+         "2026-07-15T02:00:00+00:00", None),
+    )
+    conn.commit()
+    conn.close()
+
+    ch = RawChannel(id="-1001833253016", name="yihong", username="hyi0618")
+    sender = _RecordingSender()
+    seen_path = tmp_path / "seen.txt"
+    ok = resend_raw_card(channel=ch, msg_id=13927, db_path=db,
+                         sender=sender, seen_path=seen_path)
+    assert ok is True
+    assert len(sender.sent) == 1
+    text, link = sender.sent[0]
+    assert "误杀后需要补发的正文一段" in text
+    assert link == "https://t.me/hyi0618/13927"
+    assert SeenStore.key(ch.id, 13927) in SeenStore(seen_path)
+
+
+def test_resend_raw_card_missing_msg_returns_false(tmp_path):
+    import sqlite3
+
+    from chat_daily_tg.raw_channels import resend_raw_card
+
+    db = tmp_path / "messages.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE messages (chat_id INTEGER, chat_name TEXT, msg_id INTEGER, "
+        "sender_name TEXT, content TEXT, timestamp TEXT, raw_json TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    ch = RawChannel(id="-1001833253016", name="yihong", username="hyi0618")
+    sender = _RecordingSender()
+    assert resend_raw_card(channel=ch, msg_id=1, db_path=db, sender=sender,
+                           seen_path=tmp_path / "seen.txt") is False
+    assert sender.sent == []
+
+
+# ---- L2 gate wiring (stub gate — the real TopicDedupGate has its own tests) --
+
+
+class _StubIndex:
+    def __init__(self):
+        self.registered: list[dict] = []
+
+    def register_sent(self, msg_ids, text, producer, thread_id=None, vector=None):
+        self.registered.append({
+            "msg_ids": msg_ids, "text": text, "producer": producer,
+            "thread_id": thread_id, "vector": vector,
+        })
+
+
+class _StubGate:
+    """Only the surface push_raw_channel_cards touches: prepare / assess /
+    annotation_html / index.register_sent."""
+
+    def __init__(self, verdict=None, assess_raises=False):
+        self.index = _StubIndex()
+        self.prepared: list[list[str]] = []
+        self._verdict = verdict
+        self._raises = assess_raises
+
+    def prepare(self, texts):
+        self.prepared.append(list(texts))
+
+    def assess(self, text):
+        if self._raises:
+            raise RuntimeError("embedder down")
+        return self._verdict
+
+    def annotation_html(self, matched_msg_id):
+        return ("🔁 疑似同一事件 · "
+                f'<a href="https://t.me/c/424841223/{matched_msg_id}">前文↗</a>')
+
+
+def test_topic_gate_skip_suppresses_card_and_marks_seen(tmp_path, monkeypatch):
+    gate = _StubGate(verdict=SimpleNamespace(
+        action="skip", matched_msg_id=777, similarity=0.95,
+        vector=[0.1, 0.2], new_info="none"))
+    ch = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    rows = {"-1001111": [_row(content=_DUP_TEXT, msg_id=101)]}
+    sender = _RecordingSender()
+    seen_path = tmp_path / "seen.txt"
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=sender, seen_path=seen_path, topic_gate=gate)
+    assert n == 0 and sender.sent == []
+    assert SeenStore.key(ch.id, 101) in SeenStore(seen_path)  # terminal, hwm moves
+    assert gate.prepared == [[_DUP_TEXT]]       # one embed batch per channel
+    assert gate.index.registered == []          # nothing sent → nothing indexed
+
+
+def test_topic_gate_annotate_prepends_annotation_and_registers_sent(
+        tmp_path, monkeypatch):
+    verdict = SimpleNamespace(action="annotate", matched_msg_id=777,
+                              similarity=0.91, vector=[0.3, 0.4], new_info="minor")
+    gate = _StubGate(verdict=verdict)
+    ch = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    rows = {"-1001111": [_row(content=_DUP_TEXT, msg_id=101)]}
+    sender = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=sender, seen_path=tmp_path / "seen.txt",
+                       topic_gate=gate)
+    assert n == 1 and len(sender.sent) == 1
+    text = sender.sent[0][0]
+    assert "🔁 疑似同一事件" in text and "t.me/c/424841223/777" in text
+    assert _DUP_TEXT in text                    # original body intact
+    assert text.startswith("📢 ")               # header still leads the card
+    assert len(gate.index.registered) == 1
+    reg = gate.index.registered[0]
+    assert reg["msg_ids"] == [100]              # the sender-returned message ids
+    assert reg["text"] == _DUP_TEXT
+    assert reg["producer"] == "chatdaily_raw"
+    assert reg["vector"] == [0.3, 0.4]          # verdict vector reused, no re-embed
+
+
+def test_topic_gate_assess_failure_delivers_unmodified(tmp_path, monkeypatch):
+    gate = _StubGate(assess_raises=True)
+    ch = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    rows = {"-1001111": [_row(content=_DUP_TEXT, msg_id=101)]}
+    sender = _RecordingSender()
+    seen_path = tmp_path / "seen.txt"
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=sender, seen_path=seen_path, topic_gate=gate)
+    assert n == 1 and len(sender.sent) == 1     # gate failure never blocks delivery
+    text = sender.sent[0][0]
+    assert "疑似同一事件" not in text and _DUP_TEXT in text
+    assert SeenStore.key(ch.id, 101) in SeenStore(seen_path)
+    assert len(gate.index.registered) == 1      # still indexed for future runs
+    assert gate.index.registered[0]["vector"] is None  # no verdict → no vector

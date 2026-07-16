@@ -92,10 +92,49 @@ class RawChannel(BaseModel):
     # Whole-post regex filters. Unlike strip_patterns, a match suppresses the
     # entire message (useful for recurring bot-generated check-in posts).
     exclude_patterns: list[str] = Field(default_factory=list)
+    # Per-channel opt-out of the content/topic dedup layers (L1/L2).
+    dedup: bool = True
     prefer_content_link: bool = False
     # 论坛话题路由 key（对应 ~/qwenproxy/.tg-notify-targets.json 的 topics）。
     # 默认 channels_news（频道·资讯）。找不到 key 时 resolve_tg_target 回落 DM。
     topic: str = "channels_news"
+
+
+class DedupContent(BaseModel):
+    """L1 content-level dedup for raw channels (content_seen.py): exact text
+    fingerprints + canonical-URL identity over a rolling window. Hit policy is
+    fixed in code (text hit → skip; URL hit only skips bare-link posts)."""
+    enabled: bool = True
+    window_days: int = Field(default=14, ge=1, le=90)
+
+
+class DedupTopic(BaseModel):
+    """L2 topic-level dedup (topic_dedup.py): same-event detection against the
+    delivered forum surface via embeddings + an LLM judge. Stays disabled until
+    the calibration report (scripts/calibrate_topic_dedup.py) sets real
+    thresholds; mode ratchets report → annotate → enforce, one rung at a time.
+    Thresholds live here, not in code (VisionModel precedent — recalibrate
+    without a deploy)."""
+    enabled: bool = False
+    mode: Literal["report", "annotate", "enforce"] = "report"
+    forum_chat_id: str = "-1004424841223"
+    index_window_days: int = Field(default=14, ge=1, le=90)
+    retrieval_window_hours: int = Field(default=48, ge=1, le=336)
+    sync_limit: int = Field(default=300, ge=10, le=5000)
+    candidate_min_sim: float = Field(default=0.80, ge=0.0, le=1.0)
+    strong_sim: float = Field(default=0.93, ge=0.0, le=1.0)
+    max_judge_calls_per_run: int = Field(default=5, ge=0, le=50)
+    judge_model_alias: str = "vibekey"       # resolve_model_alias name
+    judge_model: str = "gpt-5.6-terra"       # overrides the alias's model
+    judge_timeout_seconds: float = 25.0
+    exclude_producers: list[str] = Field(
+        default_factory=lambda: ["alert", "daily_summary", "growth", "bilibili"]
+    )
+
+
+class DedupConfig(BaseModel):
+    content: DedupContent = Field(default_factory=DedupContent)
+    topic: DedupTopic = Field(default_factory=DedupTopic)
 
 
 class TelegramSource(BaseModel):
@@ -105,6 +144,7 @@ class TelegramSource(BaseModel):
     raw_channels: list[RawChannel] = Field(default_factory=list)
     raw_card_delay_seconds: float = 1.0  # pause between card pushes to respect TG rate limits
     sync_before_export: bool = True
+    dedup: DedupConfig = Field(default_factory=DedupConfig)
 
 
 class BilibiliUp(BaseModel):
@@ -178,13 +218,10 @@ class HealthBriefing(BaseModel):
 
 
 class ImgRelay(BaseModel):
-    """Ephemeral Cloudflare KV image relay for single-message rich digests.
+    """Legacy Cloudflare KV relay settings.
 
-    sendRichMessage only accepts publicly fetchable https image URLs (attach://,
-    file_id, and Telegram's own file URLs are all rejected — tested 2026-07-02).
-    The relay uploads the cited image to the user's own CF Workers KV under an
-    unguessable key, Telegram re-hosts it at send time, and the key is deleted
-    immediately after (ttl_seconds is the belt-and-braces backstop)."""
+    Bot API 10.2 accepts rich-message media in the multipart request, so the
+    daily digest no longer needs a public relay. Kept for old config files."""
     enabled: bool = False
     account_id: str = ""
     namespace_id: str = ""

@@ -48,7 +48,8 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 
 | 变量 | 用途 |
 |---|---|
-| `CLIPROXY_API_KEY` | 本机 CLIProxyAPI（summary / vision / grok judge 共用） |
+| `VIBEKEY_API_KEY` | VibeKey（日报 summary / verifier） |
+| `CLIPROXY_API_KEY` | 本机 CLIProxyAPI（vision / grok judge 共用） |
 | `DEEPSEEK_API_KEY` | `llm` 别名，growth 挖掘与 B 卡 |
 | `GOOGLE_API_KEY` | Gemini embedding 证据检索 |
 | `TG_BOT_TOKEN` / `TG_CHAT_ID` | Telegram bot 推送 |
@@ -59,13 +60,13 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 
 | 别名 | 实际模型 | 用途 |
 |---|---|---|
-| `models.summary` | gemini-3.5-flash-low @ `127.0.0.1:8317` | 日报摘要 |
+| `models.summary` | gpt-5.6-sol @ `api.vibekey.cn` | 日报摘要与核验 |
 | `models.vision` | gemini-3.5-flash-low @ `127.0.0.1:8317` | 图片理解 |
 | `llm` | deepseek-v4-pro @ `api.deepseek.com` | growth 挖掘 / B 卡（质量敏感，wrapper 固定传 `--model llm`） |
 | `grok` | grok-4.5 @ `127.0.0.1:8317` | growth A/B judge（**异源**：作者与评审必须分厂） |
 | `models.embedding` | gemini-embedding-2 | 高风险 claim 证据检索 |
 
-CLIProxyAPI（`127.0.0.1:8317`）是本机进程，summary / vision / judge 三者共依赖它——它挂了日报正文就没了。`NO_PROXY` 必须放行 `127.0.0.1`。
+日报正文与核验走 VibeKey。CLIProxyAPI（`127.0.0.1:8317`）继续服务 vision / judge；它挂了图片理解会降级，但不再直接阻断日报正文。`NO_PROXY` 必须放行 `127.0.0.1`。
 
 ### TG 话题路由表
 

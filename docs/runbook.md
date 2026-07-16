@@ -160,9 +160,9 @@ env -u ALL_PROXY -u all_proxy .venv/bin/python run_daily.py --date 2026-07-14
 
 ### 切换模型
 
-改 `~/chat-daily/config.yaml` 的 `models.summary` / `models.vision`，或顶层别名 `llm` / `grok`。别名对照见 README 的「模型配置」。
+改 `~/chat-daily/config.yaml` 的 `models.summary` / `models.vision`，或顶层别名 `vibekey` / `llm` / `grok`。别名对照见 README 的「模型配置」。
 
-CLIProxyAPI（`127.0.0.1:8317`）是本机进程，summary / vision / judge 三者共依赖——它不在，日报正文就没了。切模型前先确认端点活着。
+当前 summary / verifier 走 VibeKey，vision / judge 走 CLIProxyAPI（`127.0.0.1:8317`）。切模型前先确认对应端点和模型列表可用。
 
 ### 部署到 r4s
 

@@ -217,6 +217,7 @@ class Config(BaseModel):
     llm: LLM | None = None
     gemini: LLM | None = None
     grok: LLM | None = None
+    vibekey: LLM | None = None
     models: Models | None = None
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)

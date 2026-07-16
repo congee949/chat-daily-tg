@@ -174,3 +174,31 @@ telegram:
     assert cfg.models.summary.model == "deepseek-v4-pro"
     with pytest.raises(KeyError):
         cfg.resolve_model_alias("nope")
+
+
+def test_resolve_vibekey_model_alias(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["test"]
+llm:
+  endpoint: "https://example.test/v1"
+  model: "default-model"
+  api_key_env: "DEFAULT_API_KEY"
+vibekey:
+  endpoint: "https://api.vibekey.cn/v1"
+  model: "test-model"
+  api_key_env: "VIBEKEY_API_KEY"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_file)
+    assert cfg.resolve_model_alias("vibekey").endpoint == "https://api.vibekey.cn/v1"
+    cfg.override_summary_model("vibekey")
+    assert cfg.models.summary.model == "test-model"

@@ -6,7 +6,7 @@
 # the alert path uses, and flag in-Python Telegram alerts on. Without the proxy
 # export the httpx clients go DIRECT and Telegram pushes time out whenever
 # Shadowrocket's global TUN isn't active (review finding #14). NO_PROXY keeps the
-# local qwenproxy (embeddings/vision on :3000) direct.
+# local model proxy (CLIProxyAPI on :8317 — summary/vision/judge) direct.
 guard_setup_env() {
   export HTTPS_PROXY="$PROXY" HTTP_PROXY="$PROXY"
   export NO_PROXY="127.0.0.1,localhost,::1"

@@ -6,6 +6,7 @@ block in config.yaml is dead: nothing reads it.
 """
 from __future__ import annotations
 import argparse
+from dataclasses import replace
 from datetime import date, timedelta
 import json
 import logging
@@ -922,6 +923,21 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     finally:
         if evidence_index is not None:
             evidence_index.close()
+
+    # Personal Health/Watch context is deterministic and remains outside the LLM
+    # trust boundary. Failure is isolated so stale iCloud sync never blocks the
+    # group-chat digest.
+    if cfg.health_briefing.enabled:
+        try:
+            from chat_daily_tg.health_briefing import build_health_briefing
+            briefing = build_health_briefing(
+                date.fromisoformat(date_str), cfg.health_briefing, cfg.schedule.timezone,
+            )
+            if briefing:
+                (archive_dir / "health-briefing.md").write_text(briefing, encoding="utf-8")
+                out = replace(out, concise_md=f"{briefing}\n\n{out.concise_md}")
+        except Exception as e:
+            log.warning("health briefing skipped (non-fatal): %s", e)
 
     # Post-hoc validation
     warnings = validate_clusters_in_output(clusters, out.concise_md)

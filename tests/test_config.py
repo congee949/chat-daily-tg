@@ -140,6 +140,40 @@ telegram:
     assert cfg.models.embedding.min_similarity == 0.4
 
 
+def test_load_config_reads_channel_exclusions_and_health_briefing(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  telegram:
+    enabled: true
+    raw_channels:
+      - id: "-1001"
+        name: "channel"
+        username: "channel"
+        exclude_patterns: ['(?m)^#morning\\s*$']
+llm:
+  endpoint: "https://example.test"
+  model: "m"
+  api_key_env: "K"
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+health_briefing:
+  enabled: true
+  export_dir: "~/HealthExport/AutoSync"
+  baseline_days: 21
+  min_baseline_samples: 5
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.sources.telegram.raw_channels[0].exclude_patterns == [r"(?m)^#morning\s*$"]
+    assert cfg.health_briefing.enabled is True
+    assert cfg.health_briefing.baseline_days == 21
+    assert cfg.health_briefing.min_baseline_samples == 5
+
+
 def test_resolve_model_alias_and_growth_judge_model(tmp_path: Path):
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(

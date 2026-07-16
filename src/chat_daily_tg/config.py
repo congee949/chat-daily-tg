@@ -166,6 +166,17 @@ class Archive(BaseModel):
     media_retention_days: int = 14
 
 
+class HealthBriefing(BaseModel):
+    """Deterministic personal preface sourced from Health Auto Export."""
+    enabled: bool = False
+    export_dir: str = (
+        "~/Library/Mobile Documents/"
+        "iCloud~com~ifunography~HealthExport/Documents/AutoSync"
+    )
+    baseline_days: int = Field(default=28, ge=7, le=90)
+    min_baseline_samples: int = Field(default=7, ge=3, le=30)
+
+
 class ImgRelay(BaseModel):
     """Ephemeral Cloudflare KV image relay for single-message rich digests.
 
@@ -226,6 +237,7 @@ class Config(BaseModel):
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
     archive: Archive = Field(default_factory=Archive)
+    health_briefing: HealthBriefing = Field(default_factory=HealthBriefing)
     img_relay: ImgRelay = Field(default_factory=ImgRelay)
     growth: Growth = Field(default_factory=Growth)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)

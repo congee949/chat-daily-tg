@@ -5,6 +5,7 @@ from pytest_httpx import HTTPXMock
 from chat_daily_tg.config import RawChannel
 from chat_daily_tg.raw_channels import (
     build_card,
+    matches_exclude_patterns,
     strip_promo_lines,
     strip_promo_lines_html,
     visible_text,
@@ -27,6 +28,12 @@ def test_strip_promo_lines_html_keeps_source_link_drops_promo_footer():
     assert "ExamplePd" not in out and "exampletg" not in out  # promo links gone
     assert "示例频道" not in out and "投稿" not in out
     assert "<strong>部分中国银行" in out  # bold title kept
+
+
+def test_whole_post_exclusion_matches_morning_tag_and_ignores_bad_regex():
+    post = "今天的起床时间是--2026-07-16 06:23:33。\n\n#morning"
+    assert matches_exclude_patterns(post, [r"(?m)^#morning\s*$"])
+    assert not matches_exclude_patterns("一篇正常文章", [r"(?m)^#morning\s*$", "["])
 
 
 def test_visible_text_strips_tags_and_unescapes():
@@ -236,6 +243,33 @@ def test_push_album_pushes_one_card_and_marks_all_ids_seen(tmp_path, monkeypatch
     again = FakeSender()
     assert raw_channels.push_raw_channel_cards(sender=again, **kwargs) == 0
     assert again.sent == []
+
+
+def test_filtered_public_post_is_not_sent_and_is_marked_seen(tmp_path, monkeypatch):
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-1001833253016", name="yihong", username="hyi0618",
+                    exclude_patterns=[r"(?m)^#morning\s*$"])
+    rows = [_row(content="起床啦。\n\n#morning", msg_id=13927)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: rows)
+
+    class FakeSender:
+        sent = []
+
+        def send_card(self, text_html, link=None):
+            self.sent.append((text_html, link))
+
+    seen_path = tmp_path / "seen.txt"
+    count = raw_channels.push_raw_channel_cards(
+        channels=[ch], since="2026-07-16", until="2026-07-17",
+        db_path=tmp_path / "db", sender=FakeSender(), archive_dir=tmp_path,
+        seen_path=seen_path, delay_seconds=0,
+    )
+    assert count == 0
+    assert FakeSender.sent == []
+    assert SeenStore.key(ch.id, 13927) in SeenStore(seen_path)
 
 
 def test_send_card_public_sets_preview_no_button(httpx_mock: HTTPXMock):

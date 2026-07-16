@@ -20,7 +20,11 @@ from pathlib import Path
 
 from chat_daily_tg.config import RawChannel
 from chat_daily_tg.notifier import notify_failure
-from chat_daily_tg.raw_channels import strip_promo_lines_html, visible_text
+from chat_daily_tg.raw_channels import (
+    matches_exclude_patterns,
+    strip_promo_lines_html,
+    visible_text,
+)
 from chat_daily_tg.raw_seen import SeenStore
 from chat_daily_tg.tg_sender import TelegramSender, escape_html
 
@@ -162,6 +166,11 @@ def push_private_channel(
         for p in posts:
             key = SeenStore.key(channel.id, p.first_msg_id) if seen is not None else None
             if key is not None and key in seen:
+                continue
+            if matches_exclude_patterns(p.text, channel.exclude_patterns):
+                if seen is not None:
+                    for mid in (p.msg_ids or [p.first_msg_id]):
+                        seen.add(SeenStore.key(channel.id, mid))
                 continue
             # Use the message HTML (keeps news-source links + bold), drop promo lines.
             content_html = strip_promo_lines_html(p.html or escape_html(p.text), channel.strip_patterns)

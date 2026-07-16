@@ -89,6 +89,9 @@ class RawChannel(BaseModel):
     username: str | None = None
     limit: int = 500
     strip_patterns: list[str] = Field(default_factory=list)
+    # Whole-post regex filters. Unlike strip_patterns, a match suppresses the
+    # entire message (useful for recurring bot-generated check-in posts).
+    exclude_patterns: list[str] = Field(default_factory=list)
     prefer_content_link: bool = False
     # 论坛话题路由 key（对应 ~/qwenproxy/.tg-notify-targets.json 的 topics）。
     # 默认 channels_news（频道·资讯）。找不到 key 时 resolve_tg_target 回落 DM。

@@ -140,6 +140,21 @@ def strip_promo_lines_html(html: str, patterns: list[str]) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+def matches_exclude_patterns(text: str, patterns: list[str]) -> bool:
+    """Return True when a whole post should be suppressed.
+
+    Invalid operator-supplied regexes are ignored (and logged) so one typo cannot
+    stop an entire channel's delivery.
+    """
+    for pattern in patterns:
+        try:
+            if re.search(pattern, text or ""):
+                return True
+        except re.error as exc:
+            log.warning("invalid raw-channel exclude regex %r ignored: %s", pattern, exc)
+    return False
+
+
 def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
     """Build one verbatim card from a message row. Returns None only for a private
     channel message with no text (nothing to show, no preview to fall back on)."""
@@ -244,16 +259,22 @@ def push_raw_channel_cards(
         # (e.g. bad timestamp) skips itself instead of aborting the whole channel. Each
         # card carries every member msg_id so all of them get marked seen on send.
         cards: list[tuple[list[int], Card]] = []
+        excluded_ids: list[int] = []
         for group in _group_albums(rows):
             head = group[0]
+            ids = [r["msg_id"] for r in group]
+            if matches_exclude_patterns((head["content"] or "").strip(), ch.exclude_patterns):
+                excluded_ids.extend(ids)
+                continue
             try:
                 c = build_card(head, ch)
             except Exception as e:
                 log.warning("raw card build skipped (%s msg %s): %s", ch.name, head["msg_id"], e)
                 continue
             if c is not None:
-                cards.append(([r["msg_id"] for r in group], c))
-        log.info("raw channel %s: %d msgs → %d cards", ch.name, len(rows), len(cards))
+                cards.append((ids, c))
+        log.info("raw channel %s: %d msgs → %d cards (%d filtered)",
+                 ch.name, len(rows), len(cards), len(excluded_ids))
 
         # Archive verbatim cards for auditability (always, even with --no-push).
         archive_path = archive_dir / f"rawcard-{_safe(ch.name)}.md"
@@ -267,6 +288,12 @@ def push_raw_channel_cards(
 
         if no_push:
             continue
+
+        # A configured exclusion is a successful terminal decision, not a send
+        # failure. Record every member so incremental polling does not fetch the
+        # same intentionally suppressed post forever.
+        for mid in excluded_ids:
+            seen.add(SeenStore.key(ch.id, mid))
 
         for ids, c in cards:
             if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card

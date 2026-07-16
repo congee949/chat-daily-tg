@@ -77,7 +77,7 @@ citation_map 有图 且 img_relay 开启
 回落：tg.send(全文一条，支持断点续传) + 尾随图片逐张独立发送
 ```
 
-富消息用 Bot API 10.x 的 `sendRichMessage`（32768 字符 + 最多 50 个媒体块）。它的媒体来源**只接受 https + 正规域名的公网 URL**——`attach://`、`file_id`、`api.telegram.org/file/` 全部实测报错。所以图片要先传到 Cloudflare KV（随机 48 位 hex key + TTL），TG 在调用期间同步抓图转存为自己的 PhotoSize，源 URL 发完即删（`finally` 清理）。
+富消息用 Bot API 10.x 的 `sendRichMessage`（32768 字符 + 最多 50 个媒体块）。媒体自 Bot API 10.2 起走**多部分表单直传**（tg_sender.send_rich_message(media=…)），不再经 Cloudflare KV 公网中转；KV 中转模块（img_relay.py）已退役、仅旧 config 兼容保留。
 
 回落路径用 `state_path=.text-push-state.json` 支持多 chunk 断点续传；富消息路径没有 chunk 级续传，所以幂等粒度是 day-level marker。
 

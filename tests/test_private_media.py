@@ -203,3 +203,69 @@ def test_dump_channel_preflight_rejects_missing_kabi_python(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="kabi-tg-cli"):
         private_media.dump_channel("-100x", "2026-01-01", "2026-01-02",
                                    tmp_path / "out", limit=10)
+
+
+def test_media_post_bypasses_l1_dedup_but_text_only_dup_is_skipped(tmp_path, monkeypatch):
+    """A4 false-kill guard: a media post whose caption is a bare URL already in
+    the ContentSeenStore still DELIVERS — its photos are unseen content and a
+    seen-based skip would terminally lose them (宁可重复不可误杀). The same
+    bare-URL caption on a TEXT-ONLY post IS the duplicate and is skipped."""
+    from chat_daily_tg import private_media
+    from chat_daily_tg.config import RawChannel
+    from chat_daily_tg.content_seen import ContentSeenStore, fingerprints_for
+    from chat_daily_tg.raw_seen import SeenStore
+    import chat_daily_tg.dedup_journal as dj
+
+    url = "https://example.com/2026/dist-systems-consistency"
+    manifest = [
+        {"msg_id": 60, "date": "2026-06-05T10:00:00+08:00", "text": url,
+         "grouped_id": None, "media": [{"path": "/x/60.jpg", "kind": "photo"}]},
+        {"msg_id": 61, "date": "2026-06-05T10:05:00+08:00", "text": url,
+         "grouped_id": None, "media": []},
+    ]
+    monkeypatch.setattr(private_media, "dump_channel", lambda *a, **k: manifest)
+    journal: list[dict] = []
+    monkeypatch.setattr(dj, "record", lambda entry, path=None: journal.append(entry))
+
+    store = ContentSeenStore(tmp_path / "cs.db")
+    # The bare link was already delivered elsewhere (e.g. a public text card).
+    store.register(fingerprints_for(url), chat_id="-100earlier", msg_id=5,
+                   channel="先行频道")
+
+    class FakeSender:
+        def __init__(self):
+            self.media_calls = []
+            self.cards = []
+
+        def send_media(self, path, kind, caption=""):
+            self.media_calls.append((path, kind, caption))
+            return 1
+
+        def send_card(self, text_html, link=None):
+            self.cards.append((text_html, link))
+            return [2]
+
+    sender = FakeSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+    pushed = private_media.push_private_channel(
+        channel=RawChannel(id="-100priv", name="私有频道P"),
+        since="2026-06-05", until="2026-06-06",
+        out_dir=tmp_path / "dump", sender=sender, limit=500,
+        seen=seen, delay_seconds=0, content_store=store,
+    )
+    assert pushed == 1                       # media post delivered, text dup skipped
+    assert len(sender.media_calls) == 1      # the photo went out...
+    _, kind, caption = sender.media_calls[0]
+    assert kind == "photo" and url in caption and "私有频道P" in caption
+    assert sender.cards == []                # ...the text-only duplicate did not
+
+    # The text-only skip was journaled as an L1 url hit; the media post was not.
+    assert len(journal) == 1
+    e = journal[0]
+    assert e["layer"] == "L1" and e["action"] == "skip" and e["reason"] == "url"
+    assert e["msg_id"] == 61 and e["chat_id"] == "-100priv"
+
+    # Both terminal outcomes advance the seen store (delivery and skip alike).
+    assert SeenStore.key("-100priv", 60) in seen
+    assert SeenStore.key("-100priv", 61) in seen
+    store.close()

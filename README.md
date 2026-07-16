@@ -30,7 +30,7 @@
 | 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合 |
 | Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，注入 verifier |
 | 图片理解（可选） | 开启后用多模态模型分析聊天中的图片，高分图并入日报 |
-| 富消息内嵌图 | 日报正文与配图合成**单条** Telegram 富消息（Bot API 10.x `sendRichMessage`）；图片经 Cloudflare KV 短时中转，发后即删。任一环失败自动回落「全文一条 + 尾图独立一条」 |
+| 富消息内嵌图 | 日报正文、健康图与引用配图合成**单条** Telegram 富消息（Bot API 10.2 `sendRichMessage`）；媒体随请求直接上传，无需公网图片中转。任一环失败自动回落「健康图 + 全文 + 引用尾图」 |
 | Telegram 推送 | 通过 Bot API 推到路由表指定的话题 |
 | 本地归档 | 每天的原始导出、详细总结、核验记录、图片分析存到 `~/chat-daily/archive/` |
 | 重复话题降权 | 近 7 天重复话题自动降权，避免旧闻反复出现 |
@@ -61,7 +61,7 @@
 │   ├── summarizer.py               # LLM 摘要和二次事实核验
 │   ├── evidence_index.py           # Embedding 证据索引和检索
 │   ├── vision.py                   # 图片理解、引用池、[IMGn] 解析
-│   ├── img_relay.py                # Cloudflare KV 图片中转（富消息用）
+│   ├── img_relay.py                # [已退役] Cloudflare KV 图片中转（富消息已改多部分直传）
 │   ├── card_renderer.py            # PNG 卡片渲染（headless Chrome）
 │   ├── prompts.py                  # Prompt 模板
 │   ├── post_process.py             # 后处理
@@ -157,13 +157,14 @@ wx export "<群名>" --since 2026-06-10 --until 2026-06-11 --limit 10   # 验证
 |---|---|---|---|
 | `TG_BOT_TOKEN` | Yes | Telegram bot token | [@BotFather](https://t.me/BotFather) |
 | `TG_CHAT_ID` | Yes | 推送目标 chat_id | [@userinfobot](https://t.me/userinfobot) 或 API |
-| `CLIPROXY_API_KEY` | Yes | 本机 CLIProxyAPI 的 key；当前 summary / vision / judge 都走它 | 本机 CLIProxyAPI 配置 |
+| `VIBEKEY_API_KEY` | Yes | VibeKey 的 key；当前日报 summary 与 verifier 走它 | VibeKey 控制台 |
+| `CLIPROXY_API_KEY` | Yes | 本机 CLIProxyAPI 的 key；当前 vision / judge 走它 | 本机 CLIProxyAPI 配置 |
 | `DEEPSEEK_API_KEY` | No | `llm` 别名用（成长挖掘默认走它）；日报摘要已不用 | [api-docs.deepseek.com](https://api-docs.deepseek.com/) |
 | `GOOGLE_API_KEY` | No | Gemini embedding API key（开启 `models.embedding.enabled` 时需要） | Google AI Studio / Gemini API |
-| `CF_KV_API_TOKEN` | No | Cloudflare KV 图片中转（开启 `img_relay` 时需要）；建议用最小权限 token（仅 Account / Workers KV Storage / Edit） | Cloudflare dashboard |
+| `CF_KV_API_TOKEN` | No | 已退役：富消息媒体改 Bot API 多部分直传，KV 中转仅旧 config 兼容保留 | Cloudflare dashboard |
 | `VISION_API_KEY` | No | 旧 vision 后端（qwenproxy）的 key，当前配置未使用 | 自行准备 OpenAI 兼容接口 |
 
-必需性取决于开了哪些管线：只跑日报需要前三个；成长挖掘另需 `DEEPSEEK_API_KEY`；富消息内嵌图另需 `CF_KV_API_TOKEN`。
+必需性取决于开了哪些管线：只跑纯文本日报需要 `TG_BOT_TOKEN`、`TG_CHAT_ID` 和 `VIBEKEY_API_KEY`；开启图片理解还需 `CLIPROXY_API_KEY`；成长挖掘另需 `DEEPSEEK_API_KEY`。Bot API 10.2 富消息媒体直接上传，不再需要 `CF_KV_API_TOKEN`。
 
 ### config.yaml
 
@@ -185,9 +186,9 @@ sources:
 
 models:
   summary:
-    endpoint: "http://127.0.0.1:8317/v1"     # 本机 CLIProxyAPI
-    model: "gemini-3.5-flash-low"
-    api_key_env: "CLIPROXY_API_KEY"
+    endpoint: "https://api.vibekey.cn/v1"
+    model: "gpt-5.6-sol"
+    api_key_env: "VIBEKEY_API_KEY"
     max_tokens: 32000
     timeout: 600.0
   vision:
@@ -224,15 +225,16 @@ Embedding 证据检索也是可选功能。开启 `models.embedding.enabled` 后
 
 | 别名 | 当前指向 | 谁在用 |
 |---|---|---|
-| `models.summary` | gemini-3.5-flash-low @ CLIProxyAPI | 日报摘要与核验 |
+| `models.summary` | gpt-5.6-sol @ VibeKey | 日报摘要与核验 |
 | `models.vision` | gemini-3.5-flash-low @ CLIProxyAPI | 图片理解 |
 | `models.embedding` | gemini-embedding-2 @ Google | 证据检索 |
 | `llm` | deepseek-v4-pro @ api.deepseek.com | 成长挖掘与 B 卡（wrapper 固定传 `--model llm`） |
 | `grok` | grok-4.5 @ CLIProxyAPI | 成长 A/B judge |
+| `vibekey` | gpt-5.6-sol @ api.vibekey.cn | 日报默认模型，也可用 `--model vibekey` 显式选择 |
 
 成长挖掘的 judge 刻意与作者**异源**（B 卡由 `llm` 写、judge 用 `grok`），避免 LLM 自评的自偏好。`Growth.judge_model` 设为空即回落同源。
 
-CLIProxyAPI（`127.0.0.1:8317`）是本机进程，summary / vision / judge 三者共依赖它——它不在，日报正文就没了。跑在代理环境下时 `NO_PROXY` 必须放行 `127.0.0.1`。
+日报正文与核验走 VibeKey；CLIProxyAPI（`127.0.0.1:8317`）继续服务 vision / judge。CLIProxyAPI 不可用时图片理解会降级，但日报正文仍可由 VibeKey 生成。跑在代理环境下时 `NO_PROXY` 必须放行 `127.0.0.1`。
 
 ## 归档产物
 
@@ -305,9 +307,10 @@ uv run --extra dev pytest -q
 | [wx-cli](https://github.com/jackwener/wx-cli) | 微信本地消息库解密导出（`npm i -g @jackwener/wx-cli`） |
 | [tg-cli](https://github.com/public-clis/tg-cli) | Telegram 本地 SQLite 导出（**只存文本**，图片靠 telethon 旁路） |
 | kabi-tg-cli | 私有频道 / 图片下载借用它的 telethon 解释器与登录 session |
-| CLIProxyAPI | 本机模型代理（`127.0.0.1:8317`），summary / vision / judge 共用 |
+| VibeKey | OpenAI 兼容日报摘要与核验 API（`gpt-5.6-sol`） |
+| CLIProxyAPI | 本机模型代理（`127.0.0.1:8317`），vision / judge 共用 |
 | [DeepSeek API](https://api-docs.deepseek.com/) | `llm` 别名，成长挖掘 |
-| Cloudflare Workers + KV | 富消息内嵌图的短时中转（发后即删） |
+| Cloudflare Workers + KV | 旧版富消息图片中转；Bot API 10.2 路径已不再需要 |
 | [BotFather](https://t.me/BotFather) | 创建 Telegram bot |
 | [userinfobot](https://t.me/userinfobot) | 获取 Telegram chat_id |
 | headless Chrome | PNG 卡片渲染与架构图重渲 |

@@ -311,8 +311,7 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 
 
 def test_run_daily_sends_cited_image_inline_when_llm_marks_it(tmp_path, monkeypatch):
-    """When the LLM inserts [IMG1] in its concise output, the push must split
-    around it and post the image via sendPhoto right after that text chunk."""
+    """Bot API 10.2 sends cited media inline in one multipart rich message."""
     import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
@@ -403,14 +402,15 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     post_calls = tg_client_cls.return_value.__enter__.return_value.post.call_args_list
     photo_calls = [c for c in post_calls if c.args[0].endswith("/sendPhoto")]
     message_calls = [c for c in post_calls if c.args[0].endswith("/sendMessage")]
-    # The digest goes out as ONE intact text message (marker stripped), and the
-    # cited photo follows as a trailing message with only the source caption.
-    assert len(photo_calls) == 1
-    assert len(message_calls) == 1
-    text = message_calls[0].kwargs["data"]["text"]
-    assert "测试总览内容" in text and "测试主题" in text  # full digest, not split
-    assert "[IMG1]" not in text
-    assert photo_calls[0].kwargs["data"]["caption"] == "📷 微信 · G1 · 10:00"
+    rich_calls = [c for c in post_calls if c.args[0].endswith("/sendRichMessage")]
+    assert photo_calls == []
+    assert message_calls == []
+    assert len(rich_calls) == 1
+    body = rich_calls[0].kwargs["data"]["rich_message"]
+    assert "测试总览内容" in body and "测试主题" in body
+    assert "[IMG1]" not in body
+    assert "tg://photo?id=citation_1" in body
+    assert "rich_media_0" in rich_calls[0].kwargs["files"]
 
 
 def test_run_daily_adds_embedding_evidence_to_verifier_prompt(tmp_path, monkeypatch):
@@ -470,6 +470,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n\n### 2026-05-06 14:22\n\n**B**: 这个能直接读x\n",
             media_candidates=[],
         )
+        # run_daily builds the embedder via the shared GeminiEmbedder.from_config
+        # factory — route the classmethod to the same stub instance.
+        embedder_cls.from_config.return_value = embedder_cls.return_value
         embedder_cls.return_value.embed_documents.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         embedder_cls.return_value.embed_queries.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         mock_chat.side_effect = [
@@ -882,53 +885,49 @@ def _rich_cfg_and_map(tmp_img_path: str):
     return _Cfg(), {1: analysis}
 
 
-def test_push_rich_digest_inline_markdown_and_cleanup(tmp_path):
+def test_push_rich_digest_uses_direct_media_upload(tmp_path):
     import run_daily
-    cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"jpg")
+    cfg, citation_map = _rich_cfg_and_map(str(image))
     concise_md = "### 🧠 AI / 工具\n- AI 重点内容 [IMG1]\n\n### 🔗 资源\n- 一个链接"
     tg = MagicMock()
 
-    with patch("chat_daily_tg.img_relay.upload_image",
-               return_value="https://r.example.workers.dev/k.jpg") as up, \
-         patch("chat_daily_tg.img_relay.delete_image") as dele:
-        ok = run_daily._push_rich_digest(tg, cfg, concise_md, citation_map)
+    ok = run_daily._push_rich_digest(tg, cfg, concise_md, citation_map)
 
     assert ok is True
     md = tg.send_rich_message.call_args.kwargs["markdown"]
-    assert '![](https://r.example.workers.dev/k.jpg "📷 微信 · G1 · 10:00")' in md
+    assert '![](tg://photo?id=citation_1 "📷 微信 · G1 · 10:00")' in md
     # image block sits between the cited bullet and the following section
     assert md.index("AI 重点内容") < md.index("![](") < md.index("### 🔗 资源")
     assert "[IMG1]" not in md
-    dele.assert_called_once()
+    assert tg.send_rich_message.call_args.kwargs["media"] == [
+        ("citation_1", str(image), "photo")
+    ]
 
 
 def test_push_rich_digest_returns_false_on_failure_for_fallback(tmp_path):
     import run_daily
     cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
     tg = MagicMock()
+    tg.send_rich_message.side_effect = OSError("file missing")
 
-    with patch("chat_daily_tg.img_relay.upload_image", side_effect=RuntimeError("kv down")), \
-         patch("chat_daily_tg.img_relay.delete_image") as dele:
-        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+    ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
 
     assert ok is False
-    tg.send_rich_message.assert_not_called()
-    dele.assert_not_called()  # nothing uploaded, nothing to delete
+    tg.send_rich_message.assert_called_once()
 
 
-def test_push_rich_digest_send_failure_still_deletes_kv(tmp_path):
+def test_push_rich_digest_send_failure_needs_no_relay_cleanup(tmp_path):
     import run_daily
     cfg, citation_map = _rich_cfg_and_map(str(tmp_path / "a.jpg"))
     tg = MagicMock()
     tg.send_rich_message.side_effect = RuntimeError("400 photo fetch failed")
 
-    with patch("chat_daily_tg.img_relay.upload_image",
-               return_value="https://r.example.workers.dev/k.jpg"), \
-         patch("chat_daily_tg.img_relay.delete_image") as dele:
-        ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
+    ok = run_daily._push_rich_digest(tg, cfg, "- 内容 [IMG1]", citation_map)
 
     assert ok is False
-    dele.assert_called_once()
+    tg.send_rich_message.assert_called_once()
 
 
 def test_coerce_enum_maps_llm_output_onto_closed_set():

@@ -20,7 +20,16 @@ from pathlib import Path
 
 from chat_daily_tg.config import RawChannel
 from chat_daily_tg.notifier import notify_failure
-from chat_daily_tg.raw_channels import strip_promo_lines_html, visible_text
+from chat_daily_tg.raw_channels import (
+    _dedup_register,
+    _dedup_skip,
+    _l2_check,
+    _l2_register,
+    matches_exclude_patterns,
+    strip_promo_lines,
+    strip_promo_lines_html,
+    visible_text,
+)
 from chat_daily_tg.raw_seen import SeenStore
 from chat_daily_tg.tg_sender import TelegramSender, escape_html
 
@@ -139,6 +148,8 @@ def push_private_channel(
     min_id: int = 0,
     delay_seconds: float = 1.0,
     no_push: bool = False,
+    content_store=None,   # content_seen.ContentSeenStore | None (L1 dedup)
+    topic_gate=None,      # topic_dedup.TopicDedupGate | None (L2 dedup)
 ) -> int:
     """Download + push one private channel's window. Returns posts pushed.
 
@@ -158,17 +169,71 @@ def push_private_channel(
 
     pushed = 0
     dropped_posts: list[tuple[int, int]] = []  # (first_msg_id, dropped_count)
+    if topic_gate is not None and channel.dedup and posts:
+        try:  # one embed batch per channel (same as the public path); failure →
+            # the gate falls back to per-card lazy embedding or goes offline.
+            # Only posts that will actually be assessed: unseen, not matching an
+            # exclude pattern (paying embedding quota for configured spam was
+            # review finding E4), and text-only (media posts bypass the gates).
+            topic_gate.prepare([
+                strip_promo_lines(p.text or "", channel.strip_patterns)
+                for p in posts
+                if not p.media
+                and (seen is None or SeenStore.key(channel.id, p.first_msg_id) not in seen)
+                and not matches_exclude_patterns(p.text, channel.exclude_patterns)
+            ])
+        except Exception as e:
+            log.warning("topic gate prepare failed (%s): %s", channel.name, e)
     try:
         for p in posts:
             key = SeenStore.key(channel.id, p.first_msg_id) if seen is not None else None
             if key is not None and key in seen:
                 continue
+            if matches_exclude_patterns(p.text, channel.exclude_patterns):
+                if seen is not None:
+                    for mid in (p.msg_ids or [p.first_msg_id]):
+                        seen.add(SeenStore.key(channel.id, mid))
+                try:
+                    from chat_daily_tg import dedup_journal
+                    dedup_journal.record({
+                        "layer": "L1", "action": "skip", "reason": "exclude_pattern",
+                        "chat_id": channel.id, "msg_id": p.first_msg_id,
+                        "channel": channel.name, "text_head": (p.text or "")[:120],
+                    })
+                except Exception:
+                    pass
+                continue
+            # Dedup layers operate on the promo-stripped PLAIN text (no header/HTML —
+            # those differ per channel and would defeat cross-channel matching).
+            content_plain = strip_promo_lines(p.text or "", channel.strip_patterns)
+            member_ids = p.msg_ids or [p.first_msg_id]
+            l2_verdict = None
+            annotation = ""
+            if not p.media:
+                # Suppression applies to TEXT posts only. A media post's caption
+                # is not its content: an album captioned with a bare URL that a
+                # text card already delivered still carries photos nobody has
+                # seen — skipping it would terminally lose them (宁可重复不可误杀,
+                # review finding A4). Media posts bypass both gates entirely.
+                if seen is not None and _dedup_skip(
+                        content_plain, channel, member_ids, seen, content_store):
+                    continue
+                l2_skip, annotation, l2_verdict = _l2_check(
+                    topic_gate, channel, content_plain, member_ids,
+                    seen) if seen is not None else (False, "", None)
+                if l2_skip:
+                    continue
             # Use the message HTML (keeps news-source links + bold), drop promo lines.
             content_html = strip_promo_lines_html(p.html or escape_html(p.text), channel.strip_patterns)
             has_text = bool(visible_text(content_html).strip())
             header = f"📢 <b>{escape_html(channel.name)}</b> · {p.time}"
+            if annotation:
+                # Inserted BEFORE the 1024-caption check below so the overflow
+                # fallback accounts for the extra line.
+                header = f"{header}\n{annotation}"
             body = f"{header}\n\n{content_html}" if has_text else header
             dropped = 0
+            sent_ids: list[int] = []
             try:
                 if p.media:
                     # Merge text + media into ONE message: the text rides as the media
@@ -181,7 +246,7 @@ def push_private_channel(
                         sender.send_card(body, link=None)
                         dropped = _send_media(p.media, sender, caption="")
                 elif has_text:
-                    sender.send_card(body, link=None)
+                    sent_ids = sender.send_card(body, link=None) or []
                 else:
                     continue  # nothing left after stripping promo lines, no media
             except Exception as e:
@@ -200,6 +265,11 @@ def push_private_channel(
                 # incremental run re-fetch and re-send the tail as a partial album.
                 for mid in (p.msg_ids or [p.first_msg_id]):
                     seen.add(SeenStore.key(channel.id, mid))
+            _dedup_register(content_plain, channel, member_ids, content_store)
+            # Text-only sends surface their forum message ids and register into
+            # the delivered index directly; media sends don't (the next forum
+            # sync ingests the delivered copy instead).
+            _l2_register(topic_gate, channel, content_plain, sent_ids, sender, l2_verdict)
             pushed += 1
             if delay_seconds > 0:
                 _t.sleep(delay_seconds)

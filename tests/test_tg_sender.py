@@ -358,6 +358,34 @@ def test_send_media_overlong_visible_caption_degrades_to_plain(httpx_mock: HTTPX
     assert "parse_mode" not in body  # plain text: stray '<' must not hit the HTML parser
 
 
+def test_send_rich_message_uploads_media_in_same_multipart_request(
+    httpx_mock: HTTPXMock, tmp_path
+):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/bot-TOKEN-/sendRichMessage",
+        method="POST",
+        json={"ok": True, "result": {"message_id": 9}},
+    )
+    image = tmp_path / "health.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    s = TelegramSender(
+        bot_token="-TOKEN-", chat_id="12345", message_thread_id=77
+    )
+
+    message_id = s.send_rich_message(
+        markdown='![](tg://photo?id=health_chart "健康概览")',
+        media=[("health_chart", str(image), "photo")],
+    )
+
+    assert message_id == 9
+    body = httpx_mock.get_request().read().decode("utf-8", "replace")
+    assert "rich_message" in body
+    assert "health_chart" in body
+    assert "attach%3A%2F%2Frich_media_0" in body or "attach://rich_media_0" in body
+    assert "message_thread_id" in body
+    assert "health.png" in body
+
+
 def test_send_multichunk_resumes_after_partial_failure(tmp_path, httpx_mock, mocker):
     """A 2-chunk push whose 2nd chunk fails must, on the next run, resume from the
     2nd chunk instead of re-sending the first half (review finding #42)."""

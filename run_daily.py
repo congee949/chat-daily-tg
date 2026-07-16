@@ -249,10 +249,18 @@ def _build_dedup_gates(cfg, *, no_push: bool):
                 t.forum_chat_id, sync_limit=t.sync_limit,
             )
             index.backfill_embeddings(embedder)
-            alias = cfg.resolve_model_alias(t.judge_model_alias)
+            m = cfg.resolve_model_alias(t.judge_model_alias)
+            llm = LLMClient(
+                endpoint=m.endpoint, model=m.model,
+                api_key=os.environ[m.api_key_env],
+                max_tokens=m.max_tokens, timeout=m.timeout,
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+                extra_body=m.extra_body,
+            )
+            # SameEventJudge applies model/timeout overrides to a replace() COPY.
             judge = SameEventJudge(
-                LLMClient(alias), model=t.judge_model,
-                timeout=t.judge_timeout_seconds,
+                llm, model=t.judge_model, timeout=t.judge_timeout_seconds,
             )
             topic_gate = TopicDedupGate(
                 index, embedder, judge, mode=t.mode,

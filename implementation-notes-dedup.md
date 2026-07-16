@@ -1,0 +1,36 @@
+# Implementation Notes — 推送去重分层体系（L1/L1x/L2）
+
+计划：`~/.claude/plans/chatdaily-telegram-deep-star.md`（2026-07-16 获批）。
+
+## Design Decisions
+
+- **L1x 跨 producer 层：度量后 NO-GO，不建机制。** 预写 gate（时间序命中 ≤1/月不建）；实测 6 天窗（索引 07-10→07-16，217 条，健康断言通过）：106 条已送达频道帖、6 条含推链、4 条裸链接，**三个时间桶命中全 0** → 0/月。scp 拉索引、pull 脚本、launchd 移相全部不做。
+- **`XMonitorIndex` 保留为休眠能力**：类已实现并测试（TTL 过滤、24h staleness=视为不存在、assumed 条目跳过），但集成层不构造它（`check_duplicate(xmon=None)`）。fming_weekly 入组后复测若翻案，接一根构造线即可启用。
+- **bare URL 提取允许 ASCII 括号、尾部按括号配平剥离**：`wiki/Foo_(bar)` 存活、prose 的孤立 `)` 剥掉。全角括号/CJK 标点/汉字终止 URL（治语料里 46 处中文胶连）；代价是罕见的裸 CJK path URL 被截断 → 指纹不同 → 只丢抑制不丢投递（允许的失败方向）。
+- **markdown label 计入正文**：`[北京朝阳](url)` 的 label 算实质内容 → 偏向「有评论」判定 → 偏向照发（安全方向）。
+- **裸链接阈值 ≤10 个实质码点**（unicodedata 类别 P/S/Z/C 之外），替代设计稿的 <30 字符英文校准；21 字中文策展评语实测判为实质评论。
+- **URL 指纹只在同一张表**：`content_seen(fingerprint PK)`，`text:<sha1>` 与 `url:<sha1>` 混存，INSERT OR IGNORE 首发者持有指纹。
+- **journal 独立小模块 dedup_journal.py**：L1/L2 共用，write 永不 raise；today_counts() 供日报页脚。
+- **`dedup: false` 是整层豁免不是只免抑制**：opt-out 频道既不被抑制也不注册指纹——「首发在豁免频道的内容不会压制后来的重复」是接受的语义（豁免=该频道完全不参与本层），集成测试锁定此行为。
+- **register_sent 信任 send_card 的返回**：真实 TelegramSender 返回 list[int]；自定义 sender 若返回 None 会把 None 写进 delivered index（仅影响非常规调用方，记档不防御）。
+
+## Deviations
+
+- 原计划 Phase 2（scp pull + XMonitorIndex 接线 + Minute 移相）依 gate 判决取消——不是范围缩水，是度量先行机制按预期工作。
+- implementation notes 用本文件（-dedup 后缀）：仓库根的 implementation-notes.md 属于另一在飞任务（health briefing），不覆盖。
+
+## Open Questions / Blockers
+
+- **L2 校准阻塞在群成员资格**：tg-cli 会话 = Congee 小号（@Congee123, id 8113034240），通知群 -1004424841223 里没有它（`tg info` Could not find chat）。需要用户把该账号拉进通知群，校准与 DeliveredIndex 的 ingest 才有数据面。设计已预期此探测（校准脚本第一步 fail-loud）。
+- 私有频道（科技圈在花）不落 tg-cli messages.db（Telethon 直下）→ L1x 度量对它盲测（已在脚本输出加 ⚠ 警告）。对 L2 无影响（L2 吃的是通知群本身）。
+
+## Watch items（校准可跑后核对）
+
+- 单行 📢 卡 normalize_for_embedding 后为空（头行被剥）→ 校准报告的「skipped <24 chars」计数会暴露真实占比；若过高需调整归一化保留正文首行。
+- `tg info` 失败时 exit code 仍为 0（"Could not find chat" 在 stdout）——校准脚本已按输出嗅探而非返回码判断，其他脚本复用时注意。
+- guess_producer 的 macrumors 模式是占位——enforce 模式前必须用真实落库形态硬化（校准报告 §corpus 提供样本）。
+
+## Tradeoffs
+
+- 度量窗口只有 6 天（索引 TTL 上限 14 天、生产开启于 07-10）——但 blindspot 阶段对 5 个月本地语料的预跑（裸链接∩被监控账号=1 条）与 6 天实测互相印证，NO-GO 结论稳健。
+- t.co 不解析（语料 0 例）；article 壳推文 `t:` 不入 x_monitor 索引 → 保守放行。

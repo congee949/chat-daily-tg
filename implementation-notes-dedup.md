@@ -34,3 +34,10 @@
 
 - 度量窗口只有 6 天（索引 TTL 上限 14 天、生产开启于 07-10）——但 blindspot 阶段对 5 个月本地语料的预跑（裸链接∩被监控账号=1 条）与 6 天实测互相印证，NO-GO 结论稳健。
 - t.co 不解析（语料 0 例）；article 壳推文 `t:` 不入 x_monitor 索引 → 保守放行。
+
+## 校准日补记（2026-07-16 晚）
+
+- **校准脚本外推假设满窗语料**——实际新号只见 23h 历史（群隐藏历史，回填 0 行），脚本判 STAYS DARK 是错的；人工校正 ≈1 对/天 → GO，更正节已追加进报告文件。教训：**外推前先核 time span**，脚本下版应按真实跨度归一。
+- **L2 report 模式当日开启**（config.yaml + .bak-l2report 备份）；judge 构造 bug（LLMClient 签名）由 fail-open 兜住后修复（commit 3933b05），真机复跑零警告。
+- **x_monitor 卡片 tg-cli 文本为空**（44/45 空行踩 :00/:30 节拍）→ L2 覆盖面限于文本可见 producer；X 侧话题碰撞归未来 x_monitor register/bundle 方案。
+- 复校准窗口：~07-30（DeliveredIndex 积累 2 周后），届时再定阈值、审 journal、升 annotate。

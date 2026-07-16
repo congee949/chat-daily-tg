@@ -61,7 +61,7 @@
 │   ├── summarizer.py               # LLM 摘要和二次事实核验
 │   ├── evidence_index.py           # Embedding 证据索引和检索
 │   ├── vision.py                   # 图片理解、引用池、[IMGn] 解析
-│   ├── img_relay.py                # Cloudflare KV 图片中转（富消息用）
+│   ├── img_relay.py                # [已退役] Cloudflare KV 图片中转（富消息已改多部分直传）
 │   ├── card_renderer.py            # PNG 卡片渲染（headless Chrome）
 │   ├── prompts.py                  # Prompt 模板
 │   ├── post_process.py             # 后处理
@@ -161,7 +161,7 @@ wx export "<群名>" --since 2026-06-10 --until 2026-06-11 --limit 10   # 验证
 | `CLIPROXY_API_KEY` | Yes | 本机 CLIProxyAPI 的 key；当前 vision / judge 走它 | 本机 CLIProxyAPI 配置 |
 | `DEEPSEEK_API_KEY` | No | `llm` 别名用（成长挖掘默认走它）；日报摘要已不用 | [api-docs.deepseek.com](https://api-docs.deepseek.com/) |
 | `GOOGLE_API_KEY` | No | Gemini embedding API key（开启 `models.embedding.enabled` 时需要） | Google AI Studio / Gemini API |
-| `CF_KV_API_TOKEN` | No | Cloudflare KV 图片中转（开启 `img_relay` 时需要）；建议用最小权限 token（仅 Account / Workers KV Storage / Edit） | Cloudflare dashboard |
+| `CF_KV_API_TOKEN` | No | 已退役：富消息媒体改 Bot API 多部分直传，KV 中转仅旧 config 兼容保留 | Cloudflare dashboard |
 | `VISION_API_KEY` | No | 旧 vision 后端（qwenproxy）的 key，当前配置未使用 | 自行准备 OpenAI 兼容接口 |
 
 必需性取决于开了哪些管线：只跑纯文本日报需要 `TG_BOT_TOKEN`、`TG_CHAT_ID` 和 `VIBEKEY_API_KEY`；开启图片理解还需 `CLIPROXY_API_KEY`；成长挖掘另需 `DEEPSEEK_API_KEY`。Bot API 10.2 富消息媒体直接上传，不再需要 `CF_KV_API_TOKEN`。

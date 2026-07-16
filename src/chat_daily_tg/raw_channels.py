@@ -244,6 +244,54 @@ def _dedup_register(content_plain: str, ch: RawChannel, ids: list[int],
         log.warning("content dedup register failed (%s msg %s): %s", ch.name, ids[0], e)
 
 
+def _l2_check(topic_gate, ch: RawChannel, content_plain: str, ids: list[int],
+              seen: SeenStore) -> tuple[bool, str, object]:
+    """L2 topic-gate decision, shared by the public and private send paths.
+    Returns (skip, annotation_html, verdict). skip=True means the card was
+    journaled (with its own chat_id:msg_id for --resend) and marked seen.
+    Any failure returns (False, "", None) — deliver."""
+    if topic_gate is None or not ch.dedup:
+        return False, "", None
+    try:
+        v = topic_gate.assess(content_plain, ref={
+            "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+        })
+        if v.action == "skip":
+            log.info("skip topic-dup (%s msg %s): sim=%.2f vs msg %s",
+                     ch.name, ids[0], v.similarity, v.matched_msg_id)
+            for mid in ids:
+                seen.add(SeenStore.key(ch.id, mid))
+            return True, "", v
+        if v.action == "annotate" and v.matched_msg_id:
+            return False, topic_gate.annotation_html(v.matched_msg_id), v
+        return False, "", v
+    except Exception as e:
+        log.warning("topic gate assess failed (%s msg %s): %s", ch.name, ids[0], e)
+        return False, "", None
+
+
+def _l2_register(topic_gate, ch: RawChannel, content_plain: str,
+                 sent_ids: list[int] | None, sender, verdict) -> None:
+    """Write-after-send into the delivered index — but ONLY when the send
+    actually landed in the indexed forum group. resolve_tg_target falls back
+    to the DM on a missing topic key, and DM message ids live in a different
+    id-space: registering them would collide with real forum PKs and mint
+    deep links into the wrong chat."""
+    if topic_gate is None or not ch.dedup or not sent_ids:
+        return
+    try:
+        target = str(getattr(sender, "chat_id", ""))
+        if target.removeprefix("-100") != topic_gate.group_internal_id:
+            return
+        topic_gate.register_sent(
+            sent_ids, content_plain, "chatdaily_raw",
+            thread_id=getattr(sender, "message_thread_id", None),
+            vector=(verdict.vector if verdict is not None else None),
+        )
+    except Exception as e:
+        log.warning("delivered-index register failed (%s): %s", ch.name, e)
+
+
 def resend_raw_card(*, channel: RawChannel, msg_id: int, db_path: str | Path,
                     sender: TelegramSender, seen_path: str | Path) -> bool:
     """--resend escape hatch: rebuild and send ONE card, bypassing SeenStore, the
@@ -344,11 +392,13 @@ def push_raw_channel_cards(
         # into the identity and defeat cross-channel matching.
         cards: list[tuple[list[int], Card, str]] = []
         excluded_ids: list[int] = []
+        excluded_posts: list[tuple[int, str]] = []  # (head_id, text head) for the journal
         for group in _group_albums(rows):
             head = group[0]
             ids = [r["msg_id"] for r in group]
             if matches_exclude_patterns((head["content"] or "").strip(), ch.exclude_patterns):
                 excluded_ids.extend(ids)
+                excluded_posts.append((ids[0], (head["content"] or "")[:120]))
                 continue
             try:
                 c = build_card(head, ch)
@@ -378,9 +428,22 @@ def push_raw_channel_cards(
 
         # A configured exclusion is a successful terminal decision, not a send
         # failure. Record every member so incremental polling does not fetch the
-        # same intentionally suppressed post forever.
+        # same intentionally suppressed post forever. Journaled like every other
+        # suppression: an overbroad exclude regex is otherwise untraceable —
+        # excluded posts never reach the rawcard archive, and --resend's
+        # documented recovery flow starts from the journal.
         for mid in excluded_ids:
             seen.add(SeenStore.key(ch.id, mid))
+        for head_id, text_head in excluded_posts:
+            try:
+                from chat_daily_tg import dedup_journal
+                dedup_journal.record({
+                    "layer": "L1", "action": "skip", "reason": "exclude_pattern",
+                    "chat_id": ch.id, "msg_id": head_id, "channel": ch.name,
+                    "text_head": text_head,
+                })
+            except Exception:
+                pass
 
         if topic_gate is not None and ch.dedup and cards:
             try:  # one embed batch per channel; failure → gate goes offline, all deliver.
@@ -400,27 +463,18 @@ def push_raw_channel_cards(
             if _dedup_skip(content_plain, ch, ids, seen, content_store):
                 continue
 
+            l2_skip, annotation, l2_verdict = _l2_check(
+                topic_gate, ch, content_plain, ids, seen)
+            if l2_skip:
+                continue
             text_html = c.text_html
-            l2_verdict = None
-            if topic_gate is not None and ch.dedup:
-                try:
-                    l2_verdict = topic_gate.assess(content_plain)
-                    if l2_verdict.action == "skip":
-                        # Same terminal semantics as excluded_ids: record every member
-                        # so the high-water mark advances. The gate journals itself.
-                        log.info("skip topic-dup (%s msg %s): sim=%.2f vs msg %s",
-                                 ch.name, ids[0], l2_verdict.similarity,
-                                 l2_verdict.matched_msg_id)
-                        for mid in ids:
-                            seen.add(SeenStore.key(ch.id, mid))
-                        continue
-                    if l2_verdict.action == "annotate" and l2_verdict.matched_msg_id:
-                        head_part, sep, body = text_html.partition("\n\n")
-                        ann = topic_gate.annotation_html(l2_verdict.matched_msg_id)
-                        text_html = f"{head_part}\n{ann}{sep}{body}" if sep else f"{text_html}\n{ann}"
-                except Exception as e:
-                    log.warning("topic gate assess failed (%s msg %s): %s", ch.name, ids[0], e)
-                    l2_verdict = None
+            if annotation:
+                # build_card's layout contract: one header line, then "\n\n",
+                # then the body (raw_channels.py:194). The annotation becomes a
+                # second header line. Contract is pinned by tests.
+                head_part, sep, body = text_html.partition("\n\n")
+                text_html = (f"{head_part}\n{annotation}{sep}{body}"
+                             if sep else f"{text_html}\n{annotation}")
 
             try:
                 sent_ids = sender.send_card(text_html, link=c.link)
@@ -432,16 +486,7 @@ def push_raw_channel_cards(
             for mid in ids:
                 seen.add(SeenStore.key(ch.id, mid))
             _dedup_register(content_plain, ch, ids, content_store)
-            if topic_gate is not None and ch.dedup:
-                try:
-                    topic_gate.index.register_sent(
-                        sent_ids, content_plain, "chatdaily_raw",
-                        thread_id=getattr(sender, "message_thread_id", None),
-                        vector=(l2_verdict.vector if l2_verdict is not None else None),
-                    )
-                except Exception as e:
-                    log.warning("delivered-index register failed (%s msg %s): %s",
-                                ch.name, ids[0], e)
+            _l2_register(topic_gate, ch, content_plain, sent_ids, sender, l2_verdict)
             total += 1
             if delay_seconds > 0:
                 time.sleep(delay_seconds)

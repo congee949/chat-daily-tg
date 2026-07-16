@@ -380,7 +380,15 @@ def test_check_duplicate_xmon_hit_skips_with_detail(store, tmp_path):
     d = check_duplicate("https://x.com/i/status/123", store=store, xmon=xmon)
     assert d.skip is True
     assert d.reason == "xmon"
-    assert d.detail == {"matched_key": "t:123", "matched_by": "x_monitor", "matched_ts": ts}
+    # Same key shape as text/url hits (uniform journal schema), plus the
+    # x_monitor-specific matched_key.
+    assert d.detail == {
+        "matched_chat_id": "x_monitor",
+        "matched_msg_id": "t:123",
+        "matched_channel": "x_monitor@x_monitor",
+        "matched_sent_at": ts,
+        "matched_key": "t:123",
+    }
 
 
 def test_check_duplicate_without_xmon_no_gate(store):
@@ -392,3 +400,40 @@ def test_check_duplicate_no_urls_short_text_delivers(store):
     d = check_duplicate("哭了", store=store)
     assert d.skip is False
     assert d.reason == ""
+
+
+# --------------------------------------------------------------------------- #
+# regression pins (2026-07-16 review fixes)
+
+def test_generic_host_db_tracking_keys_stripped():
+    # canonicalize_url must share db.py's _TRACKING_KEYS vocabulary: spm/fbclid/
+    # ref reposts collapse to the bare URL on generic hosts (review finding R3 —
+    # the two URL identities must not drift).
+    bare = canonicalize_url("https://example.com/article")
+    assert bare == "https://example.com/article"
+    assert canonicalize_url("https://example.com/article?spm=a2df1.b1000") == bare
+    assert canonicalize_url("https://example.com/article?fbclid=IwAR123abc") == bare
+    assert canonicalize_url("https://example.com/article?ref=producthunt") == bare
+
+
+def test_generic_host_page_param_survives_tracker_strip():
+    # ?page=2 is identity-bearing (may be different content) and must survive
+    # even when mixed with tracking keys.
+    c = canonicalize_url("https://example.com/list?page=2&spm=x&fbclid=y&ref=z")
+    assert c == "https://example.com/list?page=2"
+
+
+def test_xmon_z_suffix_timestamp_loads_and_matches(tmp_path):
+    # x_monitor stamps ISO timestamps with a trailing 'Z'; the index must parse
+    # that form (fromisoformat alone rejects it pre-3.11-style) so a fresh entry
+    # loads and is matchable rather than silently dropped.
+    p = tmp_path / "pushed_index.json"
+    ts_z = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    _write_index(p, {"t:456": {"ts": ts_z, "by": "x_monitor"}})
+    idx = XMonitorIndex(p, ttl_days=14)
+    assert "t:456" in idx.entries
+    hit = idx.lookup({"t:456"})
+    assert hit is not None
+    key, entry = hit
+    assert key == "t:456" and entry["ts"] == ts_z

@@ -306,6 +306,26 @@ class Config(BaseModel):
         has_bilibili = self.sources.bilibili.enabled and bool(self.sources.bilibili.fetch.whitelist)
         if not has_wechat and not has_telegram and not has_bilibili:
             raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, sources.telegram.raw_channels, or sources.bilibili")
+
+        # L2 topic dedup couples to facts outside its own section (a top-level
+        # judge alias + the embedding model). Runtime failure there degrades to
+        # "layer silently off every run" by design (投递优先于完美), so the ONLY
+        # place to fail loud is config load — enabling the layer with a broken
+        # coupling must be a config error, not weeks of empty journals.
+        t = self.sources.telegram.dedup.topic
+        if t.enabled:
+            try:
+                self.resolve_model_alias(t.judge_model_alias)
+            except KeyError:
+                raise ValueError(
+                    f"dedup.topic.enabled=true but judge_model_alias "
+                    f"{t.judge_model_alias!r} does not resolve to a top-level model alias"
+                )
+            em = self.models.embedding if self.models else None
+            if not (em and em.enabled):
+                raise ValueError(
+                    "dedup.topic.enabled=true requires models.embedding.enabled=true"
+                )
         return self
 
     def resolve_model_alias(self, model_name: str) -> LLM:

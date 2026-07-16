@@ -57,7 +57,10 @@ fming_weekly 是重转发型频道：112 帖中 **约 40 帖（36%）是转发**
 ```yaml
 sources:
   telegram:
-    dedup_window_days: 14   # 0 = 关闭
+    dedup:                  # as-built 形态（原设计的 dedup_window_days 已改嵌套节）
+      content:
+        enabled: true        # false = 关闭 L1（原设计 "0 = 关闭" 不再适用）
+        window_days: 14
     raw_channels:
       - id: "<join 后从 tg-cli dialogs 获取>"
         name: "Frost's Notes"

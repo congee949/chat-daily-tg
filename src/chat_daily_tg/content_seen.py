@@ -36,6 +36,8 @@ from hashlib import sha1
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from chat_daily_tg.db import _TRACKING_KEYS
+
 log = logging.getLogger(__name__)
 
 # Same shape as raw_channels._MD_LINK_RE — [label](url) markdown links are
@@ -155,7 +157,10 @@ def canonicalize_url(url: str) -> str | None:
     kept = []
     for k, v in parse_qsl(parts.query, keep_blank_values=True):
         lk = k.lower()
-        if lk.startswith("utm_") or lk.startswith("share"):
+        # Same tracker vocabulary as db.py's permanent-store fingerprint — the
+        # two URL identities must not drift (a spm=/fbclid= repost escaping L1
+        # while collapsing in the opportunity store was review finding R3).
+        if lk.startswith("utm_") or lk.startswith("share") or lk in _TRACKING_KEYS:
             continue
         kept.append((k, v))
     kept.sort()
@@ -361,7 +366,8 @@ class XMonitorIndex:
                 if not isinstance(entry, dict):
                     continue
                 try:
-                    ts = datetime.fromisoformat(str(entry.get("ts")))
+                    ts = datetime.fromisoformat(
+                        str(entry.get("ts")).replace("Z", "+00:00"))
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
                 except (TypeError, ValueError):
@@ -435,10 +441,14 @@ def check_duplicate(
         xhit = xmon.lookup(tweet_keys_from_urls(urls))
         if xhit:
             key, entry = xhit
+            # Same detail shape as text/url hits so journal analysis and the
+            # consumer's log line never fork on the hit source.
             return DedupDecision(True, "xmon", {
+                "matched_chat_id": "x_monitor",
+                "matched_msg_id": key,
+                "matched_channel": f"x_monitor@{entry.get('by', '?')}",
+                "matched_sent_at": entry.get("ts", ""),
                 "matched_key": key,
-                "matched_by": entry.get("by", ""),
-                "matched_ts": entry.get("ts", ""),
             })
 
     return DedupDecision(False)

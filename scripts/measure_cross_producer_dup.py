@@ -41,6 +41,7 @@ from chat_daily_tg.content_seen import (  # noqa: E402  (shared mapping — runt
     is_bare_link_post,
     tweet_keys_from_urls,
 )
+from chat_daily_tg.raw_channels import strip_promo_lines  # noqa: E402
 from chat_daily_tg.telegram_exporter import canonical_chat_ids, parse_timestamp  # noqa: E402
 
 DEFAULT_DB = Path.home() / "Library/Application Support/tg-cli/messages.db"
@@ -138,7 +139,12 @@ def main() -> None:
             if post_ts.astimezone(timezone.utc) < idx_start - SAME_WINDOW:
                 continue  # before the index's observable window
             c["pushed_in_window"] += 1
-            text = r["content"] or ""
+            # Same input the runtime feeds check_duplicate: promo-stripped text.
+            # Classifying on the raw content over-counts substance (a promo
+            # footer makes a bare link look like commentary) and biases the
+            # WOULD-SUPPRESS number toward NO-GO (review finding C3).
+            text = strip_promo_lines(
+                (r["content"] or "").strip(), ch.get("strip_patterns") or [])
             urls = canonical_urls(text)
             keys = tweet_keys_from_urls(urls)
             for u in urls:

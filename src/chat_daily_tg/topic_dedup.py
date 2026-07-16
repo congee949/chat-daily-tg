@@ -27,7 +27,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -35,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from chat_daily_tg import dedup_journal
+from chat_daily_tg.evidence_index import cosine_similarity as _cosine_similarity
 from chat_daily_tg.paths import DELIVERED_INDEX_DB
 from chat_daily_tg.telegram_exporter import canonical_chat_ids, parse_timestamp, sync_chat
 
@@ -71,9 +71,15 @@ _PRODUCER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("x_monitor", re.compile(r"^(?:📢 ?@\S+|📄 .*published)")),
     ("growth", re.compile(r"^🌱")),
     ("bilibili", re.compile(r"^👤 .+", re.MULTILINE)),
-    ("daily_summary", re.compile(r"^(?:📋|.{0,16}日报)")),
+    # The digest may open with the health-briefing preface (### 🌤️ 个人晨报 …)
+    # before its own 日报 title, so the marker is searched across the first few
+    # lines, not just line one. Known gap: chunk 2+ of a split digest carries no
+    # marker at all and stays 'other' — the calibration report's producer
+    # distribution is the check for whether that residue matters.
+    ("daily_summary", re.compile(r"^(?:#{0,4}\s*)?(?:📋|🌤|.{0,24}(?:日报|晨报))", re.MULTILINE)),
     ("macrumors", re.compile(r"macrumors", re.IGNORECASE)),
 )
+_PRODUCER_SNIFF_CHARS = 400  # patterns see only the head — deep-body 日报 mentions don't reclassify
 
 
 def guess_producer(text: str | None) -> str:
@@ -83,7 +89,7 @@ def guess_producer(text: str | None) -> str:
     'other' merely means one more row participates in retrieval.
     """
     try:
-        body = (text or "").lstrip()
+        body = (text or "").lstrip()[:_PRODUCER_SNIFF_CHARS]
         if not body:
             return "other"
         for name, pattern in _PRODUCER_PATTERNS:
@@ -127,15 +133,12 @@ def normalize_for_embedding(text: str | None) -> str:
 
 
 def cosine(a: list[float] | None, b: list[float] | None) -> float:
-    """Adapted from evidence_index.cosine_similarity; 0.0 on any shape mismatch."""
+    """None/shape-tolerant wrapper over evidence_index.cosine_similarity so the
+    L2 gate and the evidence stage can never drift onto different math (the
+    calibrated thresholds assume the shared implementation)."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    return _cosine_similarity(a, b)
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +154,7 @@ CREATE TABLE IF NOT EXISTS delivered (
     norm_text TEXT NOT NULL,
     embedding TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_delivered_ts ON delivered(ts);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -336,18 +340,23 @@ class DeliveredIndex:
         """Embedded rows inside the window, minus excluded producers.
         Any read problem returns [] (gate then delivers)."""
         try:
-            cutoff = _now_utc() - timedelta(hours=window_hours)
+            # Window + producer filters run in SQL so the ~15KB embedding blobs
+            # of out-of-window / excluded rows never leave sqlite (all writers
+            # stamp ISO UTC +00:00, so the lexicographic ts comparison and the
+            # idx_delivered_ts index are both valid).
+            cutoff = (_now_utc() - timedelta(hours=window_hours)).isoformat()
+            excl = sorted(exclude_producers)
+            marks = ",".join("?" for _ in excl)
+            producer_clause = f"AND producer NOT IN ({marks})" if excl else ""
             out: list[IndexedMsg] = []
             rows = self._conn.execute(
                 "SELECT msg_id, ts, producer, text, norm_text, embedding "
-                "FROM delivered WHERE embedding IS NOT NULL"
+                "FROM delivered WHERE embedding IS NOT NULL AND ts >= ? "
+                f"{producer_clause}",
+                [cutoff, *excl],
             ).fetchall()
             for r in rows:
-                if r["producer"] in exclude_producers:
-                    continue
                 try:
-                    if parse_timestamp(r["ts"]) < cutoff:
-                        continue
                     vec = [float(v) for v in json.loads(r["embedding"])]
                 except (ValueError, TypeError):
                     continue
@@ -554,6 +563,7 @@ class TopicDedupGate:
         exclude_producers: frozenset[str] = DEFAULT_EXCLUDE_PRODUCERS,
         max_judge_calls_per_run: int = 5,
         group_internal_id: str = "4424841223",
+        ingest: dict | None = None,
     ):
         if mode not in _GATE_MODES:
             log.warning("L2 gate got unknown mode %r; coerced to report", mode)
@@ -568,9 +578,28 @@ class TopicDedupGate:
         self.exclude_producers = frozenset(exclude_producers)
         self.max_judge_calls_per_run = max_judge_calls_per_run
         self.group_internal_id = str(group_internal_id)
+        # Lazy forum ingest: {"db_path":…, "forum_chat_id":…, "sync_limit":…}.
+        # Deferring the tg sync + embedding backfill to the first prepare()
+        # with actual unseen cards makes a zero-new-card 2-hourly run cost
+        # zero network calls.
+        self._ingest = dict(ingest) if ingest else None
+        self._ingested = False
         self.offline = False
         self._vectors: dict[str, list[float]] = {}
         self._judge_calls = 0
+        self._candidates: list[IndexedMsg] | None = None  # per-run retrieval cache
+
+    def _ensure_ingested(self) -> None:
+        """Run the deferred forum ingest + embedding backfill exactly once per
+        run, and only when something will actually be assessed."""
+        if self._ingested or self._ingest is None:
+            return
+        self._ingested = True
+        self.index.ingest_new(
+            self._ingest["db_path"], self._ingest["forum_chat_id"],
+            sync_limit=self._ingest.get("sync_limit", 300),
+        )
+        self.index.backfill_embeddings(self.embedder)
 
     def prepare(self, texts: list[str]) -> None:
         """One embed_queries batch for the run's cards. Failure → offline:
@@ -585,6 +614,7 @@ class TopicDedupGate:
                     norms.append(n)
             if not norms:
                 return
+            self._ensure_ingested()
             vectors = self.embedder.embed_queries(norms)
             if len(vectors) != len(norms):
                 raise ValueError(
@@ -596,15 +626,20 @@ class TopicDedupGate:
             self.offline = True
             log.warning("L2 prepare failed (%s) — gate offline this run, all cards deliver", e)
 
-    def assess(self, text: str) -> GateVerdict:
-        """Never raises, never returns anything worse than the mode allows."""
+    def assess(self, text: str, ref: dict | None = None) -> GateVerdict:
+        """Never raises, never returns anything worse than the mode allows.
+
+        `ref` is the card's own identity ({chat_id, msg_id, channel}) — it goes
+        into the journal so a wrong suppression can be recovered with
+        --resend CHAT_ID:MSG_ID (the journal is the durable record; without the
+        ids it cannot drive the escape hatch)."""
         try:
-            return self._assess(text or "")
+            return self._assess(text or "", ref)
         except Exception as e:
             log.warning("L2 gate error (%s) — delivering unchecked", e)
             return GateVerdict("deliver", None, 0.0, "substantial", False, "gate-error", None)
 
-    def _assess(self, text: str) -> GateVerdict:
+    def _assess(self, text: str, ref: dict | None = None) -> GateVerdict:
         norm = normalize_for_embedding(text)
         if len(norm) < _MIN_GATE_CHARS:
             return GateVerdict("deliver", None, 0.0, "substantial", False, "short-text", None)
@@ -614,6 +649,7 @@ class TopicDedupGate:
         vector = self._vectors.get(norm)
         if vector is None:
             try:
+                self._ensure_ingested()
                 vector = [float(x) for x in self.embedder.embed_queries([norm])[0]]
                 self._vectors[norm] = vector
             except Exception as e:
@@ -621,9 +657,16 @@ class TopicDedupGate:
                 log.warning("L2 embed failed (%s) — gate offline this run, all cards deliver", e)
                 return GateVerdict("deliver", None, 0.0, "substantial", False, "embed-error", None)
 
+        if self._candidates is None:
+            # One decoded snapshot per run — recent() pulls ~15KB embedding
+            # JSON per row, so per-assess reloads scale O(cards × window).
+            # register_sent() appends to this cache to keep same-run
+            # collision detection working.
+            self._candidates = self.index.recent(
+                window_hours=self.retrieval_window_hours,
+                exclude_producers=self.exclude_producers)
         candidates: list[tuple[float, IndexedMsg]] = []
-        for m in self.index.recent(window_hours=self.retrieval_window_hours,
-                                   exclude_producers=self.exclude_producers):
+        for m in self._candidates:
             sim = cosine(vector, m.vector)
             if sim >= self.candidate_min_sim:
                 candidates.append((sim, m))
@@ -686,8 +729,31 @@ class TopicDedupGate:
             "judged": judged,
             "reason": reason,
             "text_head": text[:100],
+            **(ref or {}),
         })
         return GateVerdict(final, best.msg_id, best_sim, new_info, judged, reason, vector)
+
+    def register_sent(
+        self,
+        msg_ids: list[int] | None,
+        text: str,
+        producer: str,
+        thread_id: int | None = None,
+        vector: list[float] | None = None,
+    ) -> None:
+        """Write-after-send through the gate so the per-run retrieval cache
+        stays coherent (a bare index.register_sent would be invisible to
+        same-run assess() calls once the cache is warm)."""
+        if not msg_ids:
+            return
+        self.index.register_sent(msg_ids, text, producer,
+                                 thread_id=thread_id, vector=vector)
+        if self._candidates is not None and vector and producer not in self.exclude_producers:
+            self._candidates.append(IndexedMsg(
+                msg_id=int(msg_ids[0]), ts=_now_utc().isoformat(),
+                producer=producer, text=text or "",
+                norm_text=normalize_for_embedding(text or ""), vector=vector,
+            ))
 
     @staticmethod
     def _journal(entry: dict) -> None:

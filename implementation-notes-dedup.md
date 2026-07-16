@@ -46,3 +46,15 @@
 
 - 「新号只见 23h 历史」的真实原因是**用户对通知群设了每日清除聊天记录**（服务端只留 ~24h），不是我先前写的「群对新成员隐藏历史」——111 条可见 ≈ 一天真实流量的算术证实。校准报告更正节已同步改。
 - 三个设计后果：①L2 索引不受影响（本地 sqlite 是持久层，channels 每 2h 同步一次、远早于清除线）；②🔁 标注深链对 >24h 匹配是死链，annotate 模式前置项：带链标注限制在 <24h 匹配或接受死链；③Mac 电池+合盖睡 >24h 的间隙推送会在清除前无人捕获 → 索引永久缺口（欠抑制，安全方向）——已知睡眠盲区的新增后果。
+
+## PR 对抗式审查与修复（2026-07-16 深夜，8 finder → 19 项修复）
+
+**流程级事故（P0，已修）**：并发会话在飞的 run_daily.py 改动（health_card/health_rich 导入、send_rich_message(media=)）被本会话 6f44f4f/3933b05 提交时不慎扫入，依赖文件却未提交——HEAD 曾 4 测试红、健康晨报与富消息在干净检出上是死的（fail-open 掩盖）。修复=收编切片 b92eecd 落齐依赖，HEAD 复绿。教训：**共享工作树上 `git add <file>` 前必须 `git diff --cached` 核对是否扫入他人 hunks**。
+
+正确性修复：私有相册裸链接误杀（媒体帖免抑制——caption 不是内容本体）；DM 回落污染 DeliveredIndex（forum 守卫 + group_internal_id 从 forum_chat_id 派生）；digest 自相似污染 L2 检索（daily_summary 模式硬化，chunk2+ 归因缺口留给校准核对）；页脚把 report/annotate 计入去重 + UTC/CST 日界错位（today_counts 只数 skip、按北京日）；L2 journal 缺被抑制卡自身 ids → assess(ref=)；exclude_patterns 帖零留痕 → journal；度量脚本用原文而非 strip 后文本分类（已对齐；NO-GO 结论不受影响——命中通道 yihong 无 strip_patterns）；xmon detail 形状统一；topic.enabled 而 judge alias/embedding 缺失 → config 加载期 fail-loud（原先是静默逐轮空转）。
+
+复用/效率：judge 构造改用现成 `_llm_from_block`（此前手搓签名正是 20:52 生产 bug 的根因）；GeminiEmbedder.from_config 统一三处构造（校准=生产同一嵌入）；cosine 委托 evidence_index；零新卡轮免群同步/嵌入（惰性 ingest）；recent() SQL 过滤 + ts 索引 + 每轮解码缓存；L2 双路径 40 行复制抽成 _l2_check/_l2_register；私有 prepare 不再给 excluded/媒体帖花嵌入配额；文本路捕获 send_card ids 复活 register_sent。
+
+文档矛盾五处同步修：CLAUDE.md write-after-send 增加终态抑制例外条款（journal+--resend 为前提）、marker 清单补 .health-card-sent、KV 中转→多部分直传（CLAUDE/README/ARCHITECTURE 三处）、run_daily docstring schedule.timezone 事实修正、spark 旧 config 键 as-built 化。
+
+**记档不修**：topic_dedup 的 JSON 解析器未并入全仓统一（4 模块解析器合并是独立重构，fail-open 已兜底）；exclude_producers 双份默认值改测试锁定等值（避免 config↔topic_dedup 导入环）；digest chunk2+ 归因（结构修复=digest 推送路径直接 register_sent，等校准数据）；`dedup: false`=整层豁免（有意语义）；journal 无 version 字段；health prepend/strip 回环（并发会话活代码）。

@@ -470,6 +470,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n\n### 2026-05-06 14:22\n\n**B**: 这个能直接读x\n",
             media_candidates=[],
         )
+        # run_daily builds the embedder via the shared GeminiEmbedder.from_config
+        # factory — route the classmethod to the same stub instance.
+        embedder_cls.from_config.return_value = embedder_cls.return_value
         embedder_cls.return_value.embed_documents.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         embedder_cls.return_value.embed_queries.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         mock_chat.side_effect = [

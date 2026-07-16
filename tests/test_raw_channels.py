@@ -246,7 +246,7 @@ def test_push_album_pushes_one_card_and_marks_all_ids_seen(tmp_path, monkeypatch
 
 
 def test_filtered_public_post_is_not_sent_and_is_marked_seen(tmp_path, monkeypatch):
-    from chat_daily_tg import raw_channels
+    from chat_daily_tg import dedup_journal, raw_channels
     from chat_daily_tg.raw_seen import SeenStore
 
     ch = RawChannel(id="-1001833253016", name="yihong", username="hyi0618",
@@ -254,6 +254,10 @@ def test_filtered_public_post_is_not_sent_and_is_marked_seen(tmp_path, monkeypat
     rows = [_row(content="起床啦。\n\n#morning", msg_id=13927)]
     monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
     monkeypatch.setattr(raw_channels, "read_messages", lambda **k: rows)
+    # Exclusions journal for auditability — capture it, or every pytest run
+    # appends a fake skip line to the PRODUCTION journal that feeds the
+    # daily-report footer.
+    monkeypatch.setattr(dedup_journal, "record", lambda entry, **k: None)
 
     class FakeSender:
         sent = []
@@ -366,11 +370,15 @@ _SHARED_URL = "https://example.com/2026/dist-systems-consistency"
 
 class _RecordingSender:
     """Fake sender matching the REAL TelegramSender.send_card return type:
-    a list of the Telegram message ids of the sent chunks."""
+    a list of the Telegram message ids of the sent chunks. chat_id matches the
+    stub gate's group so the forum-guard in _l2_register lets registration
+    through (a DM-fallback sender would be filtered — tested separately)."""
 
-    def __init__(self, start_id: int = 100):
+    def __init__(self, start_id: int = 100, chat_id: str = "-100424841223"):
         self.sent: list[tuple[str, str | None]] = []
         self._next = start_id
+        self.chat_id = chat_id
+        self.message_thread_id = 41
 
     def send_card(self, text_html, link=None):
         self.sent.append((text_html, link))
@@ -620,22 +628,28 @@ class _StubIndex:
 
 
 class _StubGate:
-    """Only the surface push_raw_channel_cards touches: prepare / assess /
-    annotation_html / index.register_sent."""
+    """Only the surface the send paths touch: prepare / assess(ref=) /
+    annotation_html / register_sent / group_internal_id (forum guard)."""
 
     def __init__(self, verdict=None, assess_raises=False):
         self.index = _StubIndex()
         self.prepared: list[list[str]] = []
+        self.refs: list[dict | None] = []
+        self.group_internal_id = "424841223"
         self._verdict = verdict
         self._raises = assess_raises
 
     def prepare(self, texts):
         self.prepared.append(list(texts))
 
-    def assess(self, text):
+    def assess(self, text, ref=None):
+        self.refs.append(ref)
         if self._raises:
             raise RuntimeError("embedder down")
         return self._verdict
+
+    def register_sent(self, msg_ids, text, producer, thread_id=None, vector=None):
+        self.index.register_sent(msg_ids, text, producer, thread_id, vector)
 
     def annotation_html(self, matched_msg_id):
         return ("🔁 疑似同一事件 · "
@@ -696,3 +710,55 @@ def test_topic_gate_assess_failure_delivers_unmodified(tmp_path, monkeypatch):
     assert SeenStore.key(ch.id, 101) in SeenStore(seen_path)
     assert len(gate.index.registered) == 1      # still indexed for future runs
     assert gate.index.registered[0]["vector"] is None  # no verdict → no vector
+
+
+def test_l2_register_forum_guard_blocks_dm_fallback_allows_forum(tmp_path, monkeypatch):
+    """resolve_tg_target can fall back to the DM on a missing topic key; DM
+    message ids live in a different id-space, so a delivered card must NOT be
+    registered into the forum index — but the delivery itself is unaffected.
+    The same card sent by a real forum sender IS registered."""
+    ch = RawChannel(id="-1001111", name="A频道", username="chan_a")
+    rows = {"-1001111": [_row(content=_DUP_TEXT, msg_id=101)]}
+    deliver = SimpleNamespace(action="deliver", matched_msg_id=None,
+                              similarity=0.0, vector=[0.1, 0.2],
+                              new_info="substantial")
+
+    dm_gate = _StubGate(verdict=deliver)
+    dm_sender = _RecordingSender(chat_id="999888777")  # DM, not the forum
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=dm_sender, seen_path=tmp_path / "seen-dm.txt",
+                       topic_gate=dm_gate)
+    assert n == 1 and len(dm_sender.sent) == 1  # delivered normally
+    assert dm_gate.index.registered == []       # DM ids never enter the index
+
+    forum_gate = _StubGate(verdict=deliver)
+    forum_sender = _RecordingSender(chat_id="-100424841223")  # matches the gate
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=forum_sender, seen_path=tmp_path / "seen-forum.txt",
+                       topic_gate=forum_gate)
+    assert n == 1
+    assert len(forum_gate.index.registered) == 1
+    assert forum_gate.index.registered[0]["msg_ids"] == [100]
+
+
+def test_exclude_pattern_suppression_writes_l1_journal_entry(tmp_path, monkeypatch):
+    """An exclude_patterns hit is a terminal suppression that never reaches the
+    rawcard archive — the journal entry is its only trace, and --resend's
+    documented recovery flow starts from it."""
+    entries = _capture_journal(monkeypatch)
+    ch = RawChannel(id="-1002222", name="B频道", username="chan_b",
+                    exclude_patterns=[r"(?m)^#morning\s*$"])
+    rows = {"-1002222": [_row(content="起床啦。\n\n#morning", msg_id=777)]}
+    sender = _RecordingSender()
+    n = _push_channels(monkeypatch, tmp_path, channels=[ch], rows_by_chat=rows,
+                       sender=sender, seen_path=tmp_path / "seen.txt")
+    assert n == 0 and sender.sent == []
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["layer"] == "L1"
+    assert e["action"] == "skip"
+    assert e["reason"] == "exclude_pattern"
+    assert e["chat_id"] == "-1002222"
+    assert e["msg_id"] == 777
+    assert e["channel"] == "B频道"
+    assert SeenStore.key(ch.id, 777) in SeenStore(tmp_path / "seen.txt")

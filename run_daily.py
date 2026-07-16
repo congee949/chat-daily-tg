@@ -2,7 +2,8 @@
 
 Serves all four pipelines; flags pick one (see --help). Scheduling lives in the launchd
 plists, not here — the daily summary runs 06:30 with 09:00/13:00 catch-ups. The `schedule`
-block in config.yaml is dead: nothing reads it.
+block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
+(health briefing day-boundary) — do not delete the block.
 """
 from __future__ import annotations
 import argparse
@@ -229,7 +230,6 @@ def _build_dedup_gates(cfg, *, no_push: bool):
     if dedup.topic.enabled:
         try:
             from chat_daily_tg.evidence_index import GeminiEmbedder
-            from chat_daily_tg.llm_client import LLMClient
             from chat_daily_tg.paths import DELIVERED_INDEX_DB
             from chat_daily_tg.topic_dedup import (
                 DeliveredIndex, SameEventJudge, TopicDedupGate,
@@ -238,29 +238,12 @@ def _build_dedup_gates(cfg, *, no_push: bool):
             em = cfg.models.embedding if cfg.models else None
             if not (em and em.enabled):
                 raise RuntimeError("models.embedding disabled — L2 needs it")
-            embedder = GeminiEmbedder(
-                endpoint=em.endpoint, model=em.model,
-                api_key=os.environ[em.api_key_env],
-                timeout=em.timeout, output_dimensionality=em.dimension,
-            )
+            embedder = GeminiEmbedder.from_config(em)
             index = DeliveredIndex(DELIVERED_INDEX_DB, window_days=t.index_window_days)
-            index.ingest_new(
-                Path(cfg.sources.telegram.db_path).expanduser(),
-                t.forum_chat_id, sync_limit=t.sync_limit,
-            )
-            index.backfill_embeddings(embedder)
-            m = cfg.resolve_model_alias(t.judge_model_alias)
-            llm = LLMClient(
-                endpoint=m.endpoint, model=m.model,
-                api_key=os.environ[m.api_key_env],
-                max_tokens=m.max_tokens, timeout=m.timeout,
-                retry_max_attempts=cfg.retry.max_attempts,
-                retry_backoff_seconds=cfg.retry.backoff_seconds,
-                extra_body=m.extra_body,
-            )
             # SameEventJudge applies model/timeout overrides to a replace() COPY.
             judge = SameEventJudge(
-                llm, model=t.judge_model, timeout=t.judge_timeout_seconds,
+                _llm_from_block(cfg, cfg.resolve_model_alias(t.judge_model_alias)),
+                model=t.judge_model, timeout=t.judge_timeout_seconds,
             )
             topic_gate = TopicDedupGate(
                 index, embedder, judge, mode=t.mode,
@@ -268,6 +251,17 @@ def _build_dedup_gates(cfg, *, no_push: bool):
                 retrieval_window_hours=t.retrieval_window_hours,
                 exclude_producers=frozenset(t.exclude_producers),
                 max_judge_calls_per_run=t.max_judge_calls_per_run,
+                # The annotation deep-link base and the ingest target are the
+                # SAME group — derived, not restated, so a forum migration
+                # can't leave 前文↗ links pointing into the dead group.
+                group_internal_id=str(t.forum_chat_id).removeprefix("-100").lstrip("-"),
+                # Ingest+backfill run lazily at the first prepare() with real
+                # cards: a zero-new-card run costs zero network calls.
+                ingest={
+                    "db_path": Path(cfg.sources.telegram.db_path).expanduser(),
+                    "forum_chat_id": t.forum_chat_id,
+                    "sync_limit": t.sync_limit,
+                },
             )
         except Exception as e:
             log.warning("topic dedup gate unavailable (layer off this run): %s", e)
@@ -997,14 +991,7 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     embedding_model = cfg.models.embedding if cfg.models else None
     if embedding_model and embedding_model.enabled:
         try:
-            embedding_api_key = os.environ[embedding_model.api_key_env]
-            embedder = GeminiEmbedder(
-                endpoint=embedding_model.endpoint,
-                model=embedding_model.model,
-                api_key=embedding_api_key,
-                timeout=embedding_model.timeout,
-                output_dimensionality=embedding_model.dimension,
-            )
+            embedder = GeminiEmbedder.from_config(embedding_model)
             evidence_index = build_evidence_index(
                 index_path=archive_dir / "evidence.sqlite",
                 groups_with_content=groups_with_content,

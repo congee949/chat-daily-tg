@@ -109,6 +109,18 @@ class GeminiEmbeddingError(RuntimeError):
 
 
 class GeminiEmbedder:
+    @classmethod
+    def from_config(cls, em) -> "GeminiEmbedder":
+        """The one construction site for every consumer — evidence stage, L2
+        topic gate and the calibration script must embed identically, or the
+        calibrated thresholds stop describing the shipped gate."""
+        import os
+        return cls(
+            endpoint=em.endpoint, model=em.model,
+            api_key=os.environ[em.api_key_env],
+            timeout=em.timeout, output_dimensionality=em.dimension,
+        )
+
     def __init__(
         self,
         *,

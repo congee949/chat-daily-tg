@@ -82,6 +82,10 @@ PAIR_WINDOW = timedelta(hours=48)
 DETAIL_MIN_SIM = 0.75
 HIST_LO, HIST_HI, HIST_STEP = 0.50, 1.00, 0.05
 BANDS: tuple[tuple[float, float], ...] = ((0.75, 0.80), (0.80, 0.87), (0.87, 0.93), (0.93, 1.01))
+# band_of() silently drops pairs below BANDS[0], and the detail/judge stages
+# only see pairs ≥ DETAIL_MIN_SIM — the two must stay coupled or lowering one
+# makes sub-band pairs vanish from the report with no error.
+assert DETAIL_MIN_SIM == BANDS[0][0], "DETAIL_MIN_SIM must equal BANDS[0].lo"
 JUDGE_SAMPLE_PER_BAND = 8  # ~30 total across 4 bands
 
 EXIT_OK = 0
@@ -349,14 +353,9 @@ def build_embedder():
         raise RuntimeError("config has no models.embedding block")
     if not embedding_model.enabled:
         print("  note: models.embedding.enabled is false in config — calibration proceeds anyway")
-    api_key = os.environ[embedding_model.api_key_env]
-    return cfg, GeminiEmbedder(
-        endpoint=embedding_model.endpoint,
-        model=embedding_model.model,
-        api_key=api_key,
-        timeout=embedding_model.timeout,
-        output_dimensionality=embedding_model.dimension,
-    )
+    # Shared factory: calibration must embed EXACTLY like the shipped gate,
+    # or the measured thresholds stop describing production similarity.
+    return cfg, GeminiEmbedder.from_config(embedding_model)
 
 
 def stage_embed(rep: Report, msgs: list[Msg], args: argparse.Namespace):

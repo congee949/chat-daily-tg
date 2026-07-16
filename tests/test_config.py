@@ -264,6 +264,17 @@ llm:
   endpoint: "https://example.test"
   model: "m"
   api_key_env: "K"
+vibekey:
+  endpoint: "https://api.vibekey.example/v1"
+  model: "gpt-5.6-sol"
+  api_key_env: "VIBEKEY_API_KEY"
+models:
+  summary: {endpoint: "https://example.test", model: "m", api_key_env: "K"}
+  embedding:
+    enabled: true
+    endpoint: "https://gemini.example"
+    model: "gemini-embedding-2"
+    api_key_env: "GOOGLE_API_KEY"
 telegram:
   bot_token_env: "TG_BOT_TOKEN"
   chat_id_env: "TG_CHAT_ID"
@@ -279,6 +290,18 @@ telegram:
     assert d.topic.judge_model == "gpt-5.6-terra"   # unset field keeps its default
     assert cfg.sources.telegram.raw_channels[0].dedup is True   # default opt-in
     assert cfg.sources.telegram.raw_channels[1].dedup is False  # explicit opt-out
+
+    # Enabling the topic layer with a broken coupling (missing judge alias or
+    # embedding) must fail at CONFIG LOAD — runtime failure silently degrades
+    # to "layer off every run", which is unobservable for weeks.
+    import pytest as _pytest
+    broken = cfg_file.read_text(encoding="utf-8").replace(
+        "vibekey:\n  endpoint: \"https://api.vibekey.example/v1\"\n"
+        "  model: \"gpt-5.6-sol\"\n  api_key_env: \"VIBEKEY_API_KEY\"\n", "")
+    cfg_file_broken = cfg_file.parent / "broken.yaml"
+    cfg_file_broken.write_text(broken, encoding="utf-8")
+    with _pytest.raises(ValueError, match="judge_model_alias"):
+        load_config(cfg_file_broken)
 
     # dedup section entirely absent → full defaults.
     cfg_file2 = tmp_path / "config2.yaml"

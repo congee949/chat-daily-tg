@@ -25,8 +25,8 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 ### 投递与幂等
 
 - **投递优先于完美（rather deliver than drop）。** 每个增强阶段（卡片、图片、富消息、派生视图、持久化）都要 try/except 包裹并有回落路径，任何一步失败都不得阻塞正文日报送达。
-- **seen 一律 write-after-send。** 发送成功才写入 `raw_seen.SeenStore`，失败不写、下轮重试。**相册的每个成员 id 都要写**，不能只写 head——只记 head 会让增量高水位 `max_msg_id` 卡在相册首条，下次重抓尾部媒体重复推送。
-- **幂等用 day-level 阶段 marker，不做内容 hash。** 现有：`.run-complete` / `.persisted` / `.card-sent` / `.digest-sent`。语义是"当天某阶段最多送达一次"，与内容无关（catch-up 重跑会生成不同文本）。
+- **seen 一律 write-after-send。** 发送成功才写入 `raw_seen.SeenStore`，失败不写、下轮重试。唯一例外是**有意的终态抑制**（exclude_patterns / L1 内容去重 / L2 enforce 跳过）：判定成功即写 seen 推进高水位，且必须同步写 `~/chat-daily/state/dedup_journal.jsonl` 留痕，误杀走 `--resend CHAT_ID:MSG_ID` 恢复——没有 journal 的无发送 seen 写入仍然是事故。**相册的每个成员 id 都要写**，不能只写 head——只记 head 会让增量高水位 `max_msg_id` 卡在相册首条，下次重抓尾部媒体重复推送。
+- **幂等用 day-level 阶段 marker，不做内容 hash。** 现有：`.run-complete` / `.persisted` / `.card-sent` / `.digest-sent` / `.health-card-sent`。语义是"当天某阶段最多送达一次"，与内容无关（catch-up 重跑会生成不同文本）。
   - `.run-complete` **仅在 push 成功时才写**——`--no-push` 调试跑不算交付，不得抑制补跑。
 
 ### 配置与密钥
@@ -53,7 +53,7 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 | `DEEPSEEK_API_KEY` | `llm` 别名，growth 挖掘与 B 卡 |
 | `GOOGLE_API_KEY` | Gemini embedding 证据检索 |
 | `TG_BOT_TOKEN` / `TG_CHAT_ID` | Telegram bot 推送 |
-| `CF_KV_API_TOKEN` | Cloudflare KV 图片中转（富消息内嵌图） |
+| `CF_KV_API_TOKEN` | 已退役（富消息改 Bot API 多部分直传）；仅旧 config 兼容保留 |
 | `VISION_API_KEY` | 旧 qwenproxy vision 路径，当前未用（config 一行可切回） |
 
 ### 模型别名（`~/chat-daily/config.yaml`）

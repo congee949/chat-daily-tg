@@ -631,3 +631,96 @@ def test_annotation_html_contains_deep_link(tmp_path):
 def test_annotation_html_uses_constructor_group_id(tmp_path):
     gate = _gate(tmp_path, judge=None, group_internal_id="123456")
     assert 'https://t.me/c/123456/9' in gate.annotation_html(9)
+
+
+# --------------------------------------------------------------------------- #
+# regression pins (2026-07-16 review fixes)
+
+def test_gate_register_sent_visible_to_same_run_assess_via_cache(tmp_path, monkeypatch):
+    """Same-run collision: once the per-run retrieval cache is warm, a card
+    registered through the GATE (not the bare index) must be seen by a later
+    assess() in the same run — without any re-read of the index."""
+    query_a = "第一条卡片讲的是某公司发布新产品的详细情况，包含定价与上市时间安排。"
+    sent_text = "某开源项目发布重大版本更新，带来了全新的插件系统与更快的构建速度。"
+    query_b = "近似复读：某开源项目发布重大版本更新，带来了全新的插件系统与更快构建。"
+    orth = [0.0, 1.0]  # orthogonal to the pre-existing row's [1, 0]
+
+    idx = _index(tmp_path)
+    idx.register_sent([100], DELIVERED_TEXT, "chatdaily_raw", None, [1.0, 0.0])
+    emb = FakeEmbedder({
+        normalize_for_embedding(query_a): orth,
+        normalize_for_embedding(query_b): orth,
+    })
+    gate = TopicDedupGate(idx, emb, None, mode="enforce")
+
+    v1 = gate.assess(query_a)
+    assert v1.action == "deliver" and v1.reason == "no-match"  # cache warmed
+
+    # From here on, any re-read of the index is a regression.
+    monkeypatch.setattr(
+        gate.index, "recent",
+        lambda **kw: pytest.fail("per-run cache must not be re-read"))
+
+    gate.register_sent([500], sent_text, "chatdaily_raw", vector=orth)
+    v2 = gate.assess(query_b)
+    assert v2.matched_msg_id == 500          # same-run collision caught
+    assert v2.similarity == pytest.approx(1.0)
+    assert v2.action == "annotate" and v2.reason == "degraded-strong-sim"
+
+
+def test_gate_deferred_ingest_runs_exactly_once_across_prepares(tmp_path):
+    """ingest={} defers the tg sync + backfill to the first prepare() that has
+    real texts, and runs it exactly once per run — a second prepare() with new
+    texts must not re-ingest."""
+
+    class CountingIndex:
+        def __init__(self):
+            self.ingest_calls = 0
+            self.backfill_calls = 0
+
+        def ingest_new(self, db_path, forum_chat_id, sync_limit=300):
+            self.ingest_calls += 1
+            return 0
+
+        def backfill_embeddings(self, embedder, cap=200):
+            self.backfill_calls += 1
+            return 0
+
+        def recent(self, **kw):
+            return []
+
+    idx = CountingIndex()
+    gate = TopicDedupGate(
+        idx, FakeEmbedder(), None,
+        ingest={"db_path": tmp_path / "messages.db",
+                "forum_chat_id": "-1004424841223"},
+    )
+    gate.prepare([NEW_TEXT])
+    gate.prepare([DELIVERED_TEXT])  # new text → passes the norm filter again
+    assert idx.ingest_calls == 1
+    assert idx.backfill_calls == 1
+
+
+def test_config_default_exclude_producers_matches_module_constant():
+    # config.DedupTopic duplicates the default exclusion list; pin the two so
+    # neither can drift without a test failing.
+    from chat_daily_tg.config import DedupTopic
+    from chat_daily_tg.topic_dedup import DEFAULT_EXCLUDE_PRODUCERS
+    assert set(DedupTopic().exclude_producers) == set(DEFAULT_EXCLUDE_PRODUCERS)
+
+
+def test_gate_report_journal_includes_ref_identity(tmp_path, journal):
+    """The journaled would-be skip must carry the card's own chat_id/msg_id/
+    channel — without them the --resend CHAT_ID:MSG_ID escape hatch has nothing
+    to drive."""
+    judge = FakeJudge(JudgeVerdict(True, "none", "纯复读", True))
+    gate = _gate(tmp_path, judge=judge, sim=0.9, mode="report")
+    ref = {"chat_id": "-1001833253016", "msg_id": 13927, "channel": "yihong"}
+    v = gate.assess(NEW_TEXT, ref=ref)
+    assert v.action == "deliver"  # report mode never withholds
+    assert len(journal) == 1
+    e = journal[0]
+    assert e["chat_id"] == "-1001833253016"
+    assert e["msg_id"] == 13927
+    assert e["channel"] == "yihong"
+    assert e["action"] == "skip" and e["returned"] == "deliver"

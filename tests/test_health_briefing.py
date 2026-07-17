@@ -227,3 +227,131 @@ def test_health_rich_signed_deltas():
     assert _signed_delta(None, 5, "分钟") == "—"
     assert _signed_delta(5, None, "分钟") == "—"
     assert _sleep_delta(None, 7.0) == "—"
+
+
+# ---- wait_for_wake_signal ---------------------------------------------------
+
+def _wake_stub_reader(results):
+    """Factory whose successive INSTANCES pop `results` for sleep_ending()."""
+    queue = list(results)
+
+    class Stub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def sleep_ending(self, wake_day):
+            return queue.pop(0) if queue else None
+
+    return Stub
+
+
+def _episode_ending(when):
+    from types import SimpleNamespace
+    return SimpleNamespace(end=when)
+
+
+def test_wait_for_wake_disabled_never_polls(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    def boom(*args, **kwargs):
+        raise AssertionError("must not construct a reader when disabled")
+
+    monkeypatch.setattr(hb, "HealthExportReader", boom)
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=False), date(2026, 7, 17), "Asia/Shanghai"
+    ) is False
+
+
+def test_wait_for_wake_signal_present_returns_without_sleeping(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+    episode = _episode_ending(datetime(2026, 7, 17, 8, 40, tzinfo=tz))
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([episode]))
+    monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is True
+
+
+def test_wait_for_wake_past_deadline_probes_once_no_wait(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([None]))
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 15, 0, tzinfo=tz))
+    monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is False
+
+
+def test_wait_for_wake_polls_until_sync_lands(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+    episode = _episode_ending(datetime(2026, 7, 17, 9, 12, tzinfo=tz))
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([None, None, episode]))
+    nows = iter([
+        datetime(2026, 7, 17, 7, 5, tzinfo=tz),
+        datetime(2026, 7, 17, 7, 10, tzinfo=tz),
+    ])
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: next(nows))
+    slept: list[float] = []
+    monkeypatch.setattr(hb, "_sleep", slept.append)
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is True
+    assert slept == [300, 300]
+
+
+def test_wait_for_wake_deadline_fallback_clamps_last_sleep(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([]))  # never syncs
+    nows = iter([
+        datetime(2026, 7, 17, 12, 56, tzinfo=tz),
+        datetime(2026, 7, 17, 13, 1, tzinfo=tz),
+    ])
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: next(nows))
+    slept: list[float] = []
+    monkeypatch.setattr(hb, "_sleep", slept.append)
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is False
+    assert slept == [240]  # min(poll_seconds, seconds till 13:00)
+
+
+def test_wait_for_wake_reader_crash_is_nonfatal(monkeypatch):
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+
+    def crash(*args, **kwargs):
+        raise OSError("icloud hiccup")
+
+    monkeypatch.setattr(hb, "HealthExportReader", crash)
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 14, 0, tzinfo=tz))
+    monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is False
+
+
+def test_wait_for_wake_ignores_yesterdays_evening_nap(monkeypatch):
+    """A >=2h nap that synced last night ends BEFORE wake_day — it must not
+    open the gate; the overnight episode syncing later must."""
+    import chat_daily_tg.health_briefing as hb
+
+    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
+    nap = _episode_ending(datetime(2026, 7, 16, 21, 30, tzinfo=tz))
+    overnight = _episode_ending(datetime(2026, 7, 17, 9, 5, tzinfo=tz))
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([nap, overnight]))
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 7, 5, tzinfo=tz))
+    slept: list[float] = []
+    monkeypatch.setattr(hb, "_sleep", slept.append)
+    assert hb.wait_for_wake_signal(
+        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
+    ) is True
+    assert slept == [300]  # nap rejected → one real wait → overnight accepted

@@ -18,7 +18,7 @@
 
 | label | 时间 | wrapper |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 7:05 + 9:00 / 13:00 catch-up | `run_daily_guarded.sh` |
+| `com.chat-daily-tg.agent` | 7:05 起等起床信号（`--wait-for-wake` 5 分钟轮询，13:00 兜底强制发） | `run_daily_guarded.sh` |
 | `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | `run_channels_guarded.sh` |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | `run_growth_guarded.sh` |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | `run_growth_weekly_guarded.sh` |
@@ -104,9 +104,9 @@ plutil -p ~/Library/LaunchAgents/com.chat-daily-tg.channels.plist | grep -A5 Pro
 
 1. `caffeinate -is`（wrapper 内）——防 idle/AC 睡眠，**防不了合盖**。
 2. `com.chat-daily-tg.disablesleep` LaunchDaemon（见下）——**插电时**合盖也不睡。
-3. 9:00 / 13:00 两个 catch-up + `--skip-if-done`——兜住前两层都没盖住的情况。
+3. wake-gate 循环本身 + launchd 触发合并——7:05 被睡过时 launchd 在唤醒后补发触发（`--skip-if-done` 挡已交付日）；等待中入睡则进程冻结，唤醒后循环继续、当场投递。原 9:00/13:00 catch-up 触发点已由此取代（2026-07-17）。
 
-**剩余盲区只有「电池 + 合盖」**：此时系统强制睡眠，任务跳过，靠 catch-up 在下次唤醒时补。重试网已扩为 `(HTTPStatusError, TransportError)` 涵盖 ProtocolError。
+**剩余盲区只有「电池 + 合盖」**：此时系统强制睡眠，任务跳过或冻结，靠下次唤醒时的触发补发/循环恢复来补。重试网已扩为 `(HTTPStatusError, TransportError)` 涵盖 ProtocolError。
 
 **替代唤醒方案均已否决**（别再提）：`pmset repeat wakeorpoweron` 需 root 写系统级持久状态且 dark wake 撑不住 20+ 分钟的 run；`caffeinate -u` 会点亮屏幕，7:05 无人值守不可接受；Power Nap 的 dark-wake 窗口由系统支配、无法按 job 控制——这次故障恰恰就是在这种窗口里跑出来的。
 
@@ -143,7 +143,7 @@ cd ~/Projects/chat-daily-tg
 env -u ALL_PROXY -u all_proxy .venv/bin/python run_daily.py --date 2026-07-14
 ```
 
-补跑会**重新生成不同的文本**（LLM 非确定），但 marker 保证每个阶段最多送达一次。`--no-push` 干跑不写 `.run-complete`，不会抑制后续 catch-up。
+补跑会**重新生成不同的文本**（LLM 非确定），但 marker 保证每个阶段最多送达一次。`--no-push` 干跑不写 `.run-complete`，不会抑制后续补跑。手动补跑不带 `--wait-for-wake`，立即执行不等信号。
 
 ### 改 TG 话题路由
 

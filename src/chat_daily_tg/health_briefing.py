@@ -9,6 +9,7 @@ import math
 import shutil
 import statistics
 import subprocess
+import time as _time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,13 @@ from zoneinfo import ZoneInfo
 from chat_daily_tg.config import HealthBriefing
 
 log = logging.getLogger(__name__)
+
+# Module-level seams so tests can drive the wait loop without real sleeping.
+_sleep = _time.sleep
+
+
+def _wake_now(tz: ZoneInfo) -> datetime:
+    return datetime.now(tz)
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 SLEEP_KEYS = ("core", "deep", "rem")
@@ -387,6 +395,54 @@ def _recovery_assessment(activity: ActivityDay, sleep: SleepEpisode | None,
     if score <= -2:
         return "多项恢复指标低于个人常态，今日宜控制训练负荷"
     return "恢复信号有分歧，结合主观疲劳再决定训练强度"
+
+
+def wait_for_wake_signal(
+    cfg: HealthBriefing,
+    wake_day: date,
+    timezone_name: str,
+    deadline: str = "13:00",
+    poll_seconds: float = 300,
+) -> bool:
+    """Block until wake_day's overnight sleep episode syncs in, or the deadline passes.
+
+    Gates the morning digest on the user actually being awake: the Watch sleep
+    episode reaching iCloud (phone unlocked after waking → Health Auto Export
+    syncs) IS the wake signal. Returns True once the episode is readable, False
+    when the local-time deadline forces the fallback — the caller delivers
+    either way (rather deliver than drop), the briefing just notes the missing
+    sync. A wake_day whose deadline already passed (backfill, post-noon Mac
+    wake-up) gets exactly one probe and no waiting.
+    """
+    if not cfg.enabled:
+        return False
+    tz = ZoneInfo(timezone_name)
+    hour, minute = (int(part) for part in deadline.split(":", 1))
+    deadline_at = datetime.combine(wake_day, time(hour, minute), tzinfo=tz)
+    log.info("waiting for wake signal: poll every %.0fs, deadline %s %s",
+             poll_seconds, wake_day, deadline)
+    polls = 1
+    while True:
+        try:
+            # Fresh reader per poll — the run cache pins "file missing", so a
+            # reused instance would never see the iCloud sync land.
+            episode = HealthExportReader(cfg.export_dir, timezone_name).sleep_ending(wake_day)
+        except Exception as exc:
+            episode = None
+            log.warning("wake-signal poll failed (non-fatal): %s", exc)
+        # Only an episode that ENDED on wake_day counts. sleep_ending() returns
+        # the LONGEST cluster in its 18:00→14:00 window, so a ≥2h evening nap
+        # that synced last night would otherwise open the gate at the first poll
+        # while the overnight sleep is still unsynced.
+        if episode and episode.end.date() >= wake_day:
+            log.info("wake signal: sleep ended %s (poll #%d)", f"{episode.end:%H:%M}", polls)
+            return True
+        remaining = (deadline_at - _wake_now(tz)).total_seconds()
+        if remaining <= 0:
+            log.info("no wake signal by %s local — delivering without it", deadline)
+            return False
+        polls += 1
+        _sleep(min(poll_seconds, remaining))
 
 
 def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: str) -> HealthReport | None:

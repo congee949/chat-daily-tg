@@ -22,9 +22,11 @@
 	<string>REPLACE_WITH_DATA_DIR/logs/stdout.log</string>
 	<key>StartCalendarInterval</key>
 	<array>
+		<!-- Single 07:05 trigger. Delivery timing is wake-gated in-process
+		     (run_daily --wait-for-wake, 5-min polls, 13:00 deadline); a 07:05
+		     slept through is coalesced by launchd and re-fired on Mac wake,
+		     so the old 09:00/13:00 catch-up entries are gone. -->
 		<dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>5</integer></dict>
-		<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-		<dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>REPLACE_WITH_PROJECT_DIR</string>

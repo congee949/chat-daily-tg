@@ -84,14 +84,14 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 
 | label | 时间 | 职责 |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 7:05 + 9:00 / 13:00 catch-up | 日报总结（`--skip-if-done` 防重复交付） |
+| `com.chat-daily-tg.agent` | 7:05 触发，`--wait-for-wake` 等 Watch 睡眠同步（5 分钟轮询，13:00 兜底强制发） | 日报总结（`--skip-if-done` 防重复交付） |
 | `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | 频道增量转发（`--channels-only`） |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | 成长内容挖掘 |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | 周报 + rubric 合并 |
 
 B站 digest 在 r4s cron 每小时 :30，不在此表。
 
-睡眠防护三层：`caffeinate -is`（wrapper 内，防 idle）+ `com.chat-daily-tg.disablesleep` **root LaunchDaemon**（插电时合盖也不睡；需 sudo，故不在 `install-launchd.sh` 里）+ 9:00/13:00 catch-up。**剩余盲区只有「电池 + 合盖」。**
+睡眠防护三层：`caffeinate -is`（wrapper 内，防 idle）+ `com.chat-daily-tg.disablesleep` **root LaunchDaemon**（插电时合盖也不睡；需 sudo，故不在 `install-launchd.sh` 里）+ wake-gate 循环/launchd 触发合并（睡过的 7:05 唤醒后补发；等待中冻结的循环唤醒后继续投递——原 9:00/13:00 catch-up 已于 2026-07-17 移除）。**剩余盲区只有「电池 + 合盖」。**
 
 launchd 同 label 不并发，睡过的触发点唤醒时合并，无需锁。
 

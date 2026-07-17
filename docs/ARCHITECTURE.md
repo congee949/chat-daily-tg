@@ -8,7 +8,7 @@
 
 | 管线 | flag | 触发 | 产物 |
 |---|---|---|---|
-| 每日日报 | 默认 | launchd 7:05 + 9:00/13:00 catch-up | 一条 TG 富消息（含内嵌图） |
+| 每日日报 | 默认 | launchd 7:05，`--wait-for-wake` 等起床信号（5 分钟轮询，13:00 兜底） | 一条 TG 富消息（含内嵌图） |
 | 频道转发 | `--channels-only` | launchd 6–22 每 2 小时 | 每条频道消息一张卡片 |
 | 成长挖掘 | `--growth-only` / `--growth-weekly` | launchd 9:30/15:30/21:30，周六 9:45 | 每天最多一张成长卡 |
 | B站 digest | `--bilibili-only` | **r4s cron** 每小时 :30 | 每个新视频一张卡片 |

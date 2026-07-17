@@ -33,17 +33,12 @@ fi
 # Make Telegram/DeepSeek reachable for the Python run + enable in-Python TG alerts.
 guard_setup_env
 
-# Random jitter (0–15 min) so the daily run isn't at a perfectly fixed minute.
-# NOTE: cosmetic for this setup — the run reads the LOCAL WeChat DB and delivers to
-# Telegram, so WeChat's servers never observe it; jitter would only matter if we ever
-# posted back INTO WeChat. Kept < 15 min so it never collides with the 9:00/13:00 catch-up.
-# Skip the wait for manual/test runs: CHAT_DAILY_NO_JITTER=1.
-if [ "${CHAT_DAILY_NO_JITTER:-0}" != "1" ]; then
-  sleep $(( RANDOM % 900 ))
-fi
-
 # Normal run — caffeinate holds off sleep, same as the original plist.
-/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done
+# --wait-for-wake gates delivery on the Watch sleep episode syncing in (5-min
+# polls from 07:05, forced delivery at the 13:00 deadline), which also replaces
+# the old 0–15 min cosmetic jitter: the send moment now follows the user's
+# actual wake-up, not the trigger minute.
+/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done --wait-for-wake
 rc=$?
 if [ "$rc" -ne 0 ]; then
   guard_notify "日报运行失败 exit=$rc，详见 $DATA_DIR/logs/$(date +%F).log"

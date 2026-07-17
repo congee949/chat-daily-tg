@@ -1,9 +1,10 @@
 """Entry point for chat-daily-tg.
 
 Serves all four pipelines; flags pick one (see --help). Scheduling lives in the launchd
-plists, not here — the daily summary runs 07:05 with 09:00/13:00 catch-ups. The `schedule`
+plists, not here — the daily summary fires 07:05, then --wait-for-wake holds it (5-min
+polls) until the Watch sleep episode syncs in, capped by --wake-deadline. The `schedule`
 block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
-(health briefing day-boundary) — do not delete the block.
+(health briefing day-boundary + wake deadline) — do not delete the block.
 """
 from __future__ import annotations
 import argparse
@@ -86,10 +87,10 @@ def resolve_tg_target(topic_key: str, dm_chat_id: str) -> tuple[str, int | None]
     return dm_chat_id, None
 
 
-# Written to the archive dir after a fully successful pushed run. The launchd
-# catch-up intervals re-invoke run_daily with --skip-if-done, so a morning run
-# that failed (or slept through) is retried later the same day, while a
-# completed run makes the catch-ups no-ops.
+# Written to the archive dir after a fully successful pushed run. --skip-if-done
+# (passed by the launchd wrapper) makes a re-fired trigger — launchd coalesces a
+# 07:05 slept through and re-fires it on Mac wake — a no-op once the day is
+# delivered, while a failed run stays retryable.
 COMPLETE_MARKER = ".run-complete"
 # Written once opportunities are persisted, BEFORE the (separately-retried) push.
 # A same-day catch-up after a push failure then skips re-persisting — which would
@@ -189,7 +190,8 @@ def _persist_opportunities(out, date_str: str, hot_leads_dir) -> None:
 
 
 def main(date_str: str | None = None, model_alias: str | None = None, no_push: bool = False,
-         skip_if_done: bool = False) -> int:
+         skip_if_done: bool = False, wait_for_wake: bool = False,
+         wake_deadline: str = "13:00") -> int:
     if date_str is None:
         date_str = yesterday_iso()
     configure_logging(log_file_for(date_str))
@@ -197,7 +199,8 @@ def main(date_str: str | None = None, model_alias: str | None = None, no_push: b
         log.info("run for %s already complete, skipping (--skip-if-done)", date_str)
         return 0
     try:
-        return _run(date_str, model_alias=model_alias, no_push=no_push)
+        return _run(date_str, model_alias=model_alias, no_push=no_push,
+                    wait_for_wake=wait_for_wake, wake_deadline=wake_deadline)
     except Exception as e:
         log.exception("pipeline failed: %s", e)
         notify_failure("chat-daily-tg 失败", f"{type(e).__name__}: {e}\n日志: {log_file_for(date_str)}")
@@ -808,7 +811,8 @@ def _fact_risk_report(verification: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False) -> int:
+def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False,
+         wait_for_wake: bool = False, wake_deadline: str = "13:00") -> int:
     next_day = (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
     load_env_file(DATA_DIR / ".env")
     cfg = load_config(CONFIG_PATH)
@@ -837,6 +841,25 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         log.error("no daily-summary sources configured — raw_channels only feed the "
                   "--channels-only forwarder; add sources.wechat.groups or sources.telegram.chats")
         return 1
+
+    if wait_for_wake:
+        # Hold the WHOLE pipeline (export → summary → push) until the user's
+        # morning sleep episode syncs in, so the health card carries the real
+        # wake time and everything lands in one delivery. Any failure here must
+        # degrade to an immediate run, never block it (rather deliver than drop).
+        try:
+            from chat_daily_tg.health_briefing import wait_for_wake_signal
+            got = wait_for_wake_signal(
+                cfg.health_briefing,
+                wake_day=date.fromisoformat(date_str) + timedelta(days=1),
+                timezone_name=cfg.schedule.timezone,
+                deadline=wake_deadline,
+            )
+            if not got:
+                log.info("proceeding without wake signal (disabled or deadline %s)",
+                         wake_deadline)
+        except Exception as e:
+            log.warning("wake-signal wait failed (non-fatal, running now): %s", e)
 
     archive_dir = prepare_archive_day(date_str)
     # Channel cards are handled by the separate 2-hourly forwarder (run_channels), not
@@ -1290,7 +1313,14 @@ if __name__ == "__main__":
     p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)
     p.add_argument("--no-push", action="store_true", help="Skip Telegram push")
     p.add_argument("--skip-if-done", action="store_true",
-                   help="Exit 0 immediately if this date's run already completed (catch-up schedule)")
+                   help="Exit 0 immediately if this date's run already completed "
+                        "(re-fired/coalesced launchd trigger, manual re-run)")
+    p.add_argument("--wait-for-wake", action="store_true",
+                   help="Poll the Watch sleep sync every 5 min and hold the daily summary "
+                        "until this morning's wake episode lands (or --wake-deadline)")
+    p.add_argument("--wake-deadline", metavar="HH:MM", default="13:00",
+                   help="With --wait-for-wake: stop waiting at this local time and "
+                        "deliver anyway (default 13:00)")
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     p.add_argument("--bilibili-only", action="store_true",
@@ -1324,4 +1354,5 @@ if __name__ == "__main__":
     if args.growth_weekly:
         sys.exit(run_growth_weekly(no_push=args.no_push, model_alias=args.model))
     sys.exit(main(date_str=args.date, model_alias=args.model, no_push=args.no_push,
-                  skip_if_done=args.skip_if_done))
+                  skip_if_done=args.skip_if_done, wait_for_wake=args.wait_for_wake,
+                  wake_deadline=args.wake_deadline))

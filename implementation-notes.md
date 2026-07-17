@@ -10,6 +10,10 @@
 - To avoid repeating the same measurements three times, the normal rich message uses a qualitative visual, one sentence of interpretation, and a collapsed exact-data section. The native table is omitted when the chart is available.
 - Exact sleep, workout, activity, and recent-comparison values are grouped into tables inside the collapsed details block. The explanatory baseline sentence is intentionally omitted from the reader-facing message.
 - The chart expresses relative status only with symbols at the right edge of each bar: green up arrow, neutral equals sign, and red down arrow.
+- For narrow mobile screens, the workout table contains only workout name and active energy. The activity comparison table contains only signed deltas from the recent median.
+- The embedded health chart has no caption because the surrounding morning-report structure already explains its content.
+- The chart footer does not repeat the sleep-record scope; that scope remains available only in the collapsed exact-data table (when a sleep episode exists). Because the PNG itself no longer discloses scope, the standalone-card fallback caption in run_daily.py now appends report.sleep_label.
+- When the recent baseline is insufficient, the delta table shows "—" per row plus one note line ("近期基线样本不足（N 天，需 M 天）") replacing the old per-cell "样本 N 天，暂不比较" wording.
 
 ## Deviations
 

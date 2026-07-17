@@ -1,7 +1,7 @@
 """Entry point for chat-daily-tg.
 
 Serves all four pipelines; flags pick one (see --help). Scheduling lives in the launchd
-plists, not here — the daily summary runs 06:30 with 09:00/13:00 catch-ups. The `schedule`
+plists, not here — the daily summary runs 07:05 with 09:00/13:00 catch-ups. The `schedule`
 block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
 (health briefing day-boundary) — do not delete the block.
 """
@@ -1245,7 +1245,7 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                     try:
                         tg.send_photo(
                             health_chart_path,
-                            caption=f"📊 昨日健康概览 · {date_str}",
+                            caption=f"📊 昨日健康概览 · {date_str} · {health_report.sleep_label}",
                         )
                         health_card_marker.write_text(
                             _dt.now().isoformat(), encoding="utf-8"

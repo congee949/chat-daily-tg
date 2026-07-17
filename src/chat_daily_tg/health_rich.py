@@ -15,11 +15,26 @@ def _number(value: float | None, unit: str, digits: int = 0) -> str:
     return "—" if value is None else f"{value:.{digits}f}{unit}"
 
 
-def _baseline(report: HealthReport, key: str, value: str) -> str:
-    count = report.baseline_samples.get(key, 0)
-    if report.medians.get(key) is None:
-        return f"样本 {count} 天，暂不比较"
-    return value
+def _signed_delta(
+    value: float | None,
+    baseline: float | None,
+    unit: str,
+    *,
+    digits: int = 0,
+) -> str:
+    if value is None or baseline is None:
+        return "—"
+    text = f"{value - baseline:+.{digits}f}"
+    if float(text) == 0:
+        # exact-half deltas round-half-even to "+0"/"-0"; collapse to unsigned zero
+        return f"{0:.{digits}f}{unit}"
+    return f"{text}{unit}"
+
+
+def _sleep_delta(value: float | None, baseline: float | None) -> str:
+    if value is None or baseline is None:
+        return "—"
+    return _signed_delta((value - baseline) * 60, 0.0, "分钟")
 
 
 def _summary(report: HealthReport) -> str:
@@ -63,7 +78,7 @@ def build_health_rich_markdown(report: HealthReport, *, chart_media_id: str | No
     else:
         lines.extend(["", "起床：今晨睡眠数据尚未同步，暂不判断"])
     if chart_media_id:
-        lines.extend(["", f'![](tg://photo?id={chart_media_id} "昨日睡眠与训练概览")'])
+        lines.extend(["", f"![](tg://photo?id={chart_media_id})"])
 
     lines.extend([
         "",
@@ -90,36 +105,38 @@ def build_health_rich_markdown(report: HealthReport, *, chart_media_id: str | No
     lines.extend([
         "#### 🏋️ 训练",
         "",
-        "| 时段 | 项目 | 时长 | 距离 | 活动能量 |",
-        "|:---|:---|---:|---:|---:|",
+        "| 项目 | 消耗能量 |",
+        "|:---|---:|",
     ])
     if report.workouts:
         for workout in report.workouts:
-            timing = (
-                f"{workout.start:%H:%M}–{workout.end:%H:%M}"
-                if workout.start and workout.end else "—"
-            )
             lines.append(
-                f"| {timing} | {workout.name} | {workout.duration_min:.0f}分钟 | "
-                f"{_number(workout.distance_km, '公里', 2)} | "
-                f"{_number(workout.active_kcal, '千卡')} |"
+                f"| {workout.name} | {_number(workout.active_kcal, '千卡')} |"
             )
     else:
-        lines.append("| — | 未记录 Apple Watch 体能训练 | — | — | — |")
+        lines.append("| 未记录 Apple Watch 体能训练 | — |")
     lines.extend([
         "",
-        "#### 📊 活动与近期数据",
+        "#### 📊 相对近期差值",
         "",
-        "| 指标 | 昨日 | 近期值 |",
-        "|:---|---:|---:|",
-        f"| 睡眠 | {_duration(sleep.asleep_hours if sleep else None)} | "
-        f"{_baseline(report, 'sleep', _duration(report.medians.get('sleep')))} |",
-        f"| 锻炼 | {_number(activity.exercise_min, '分钟')} | "
-        f"{_baseline(report, 'exercise', _number(report.medians.get('exercise'), '分钟'))} |",
-        f"| 移动距离 | {_number(activity.distance_km, '公里', 2)} | "
-        f"{_baseline(report, 'distance', _number(report.medians.get('distance'), '公里', 2))} |",
-        f"| 站立 | {_number(activity.stand_hours, '小时')} | "
-        f"{_baseline(report, 'stand', _number(report.medians.get('stand'), '小时'))} |",
+        "| 指标 | 差值 |",
+        "|:---|---:|",
+        f"| 睡眠 | {_sleep_delta(sleep.asleep_hours if sleep else None, report.medians.get('sleep'))} |",
+        f"| 锻炼 | {_signed_delta(activity.exercise_min, report.medians.get('exercise'), '分钟')} |",
+        f"| 移动距离 | {_signed_delta(activity.distance_km, report.medians.get('distance'), '公里', digits=2)} |",
+        f"| 站立 | {_signed_delta(activity.stand_hours, report.medians.get('stand'), '小时')} |",
+    ])
+    missing = [
+        key for key in ("sleep", "exercise", "distance", "stand")
+        if report.medians.get(key) is None
+    ]
+    if missing:
+        samples = min(report.baseline_samples.get(key, 0) for key in missing)
+        lines.extend([
+            "",
+            f"近期基线样本不足（{samples} 天，需 {report.min_baseline_samples} 天），缺基线的行暂不比较",
+        ])
+    lines.extend([
         "",
         "</details>",
         "",

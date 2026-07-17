@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -220,7 +221,8 @@ def _make_messages_db(path: Path, rows) -> None:
 
 
 FORUM_BARE = 4424841223
-TS = "2026-07-15T02:00:00+00:00"
+# 相对当前时间：固定日期会在滑出 recent() 的 48h 窗口后让测试过期失败
+TS = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
 
 def _forum_rows():

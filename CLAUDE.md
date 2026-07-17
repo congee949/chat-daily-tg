@@ -80,11 +80,11 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 | `files` | 23 | `ai_cn` | 1145 |
 | `macrumors` / `channels_news` | 41 | `market_recap` / `biz` | 1146 |
 
-### launchd（Mac，2026-07-15 实测）
+### launchd（Mac，2026-07-17 更新）
 
 | label | 时间 | 职责 |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 6:30 + 9:00 / 13:00 catch-up | 日报总结（`--skip-if-done` 防重复交付） |
+| `com.chat-daily-tg.agent` | 7:05 + 9:00 / 13:00 catch-up | 日报总结（`--skip-if-done` 防重复交付） |
 | `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | 频道增量转发（`--channels-only`） |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | 成长内容挖掘 |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | 周报 + rubric 合并 |

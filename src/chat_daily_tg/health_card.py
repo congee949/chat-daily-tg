@@ -164,9 +164,7 @@ def render_health_card(report: HealthReport, out_path: Path) -> Path | None:
         )
 
         y = _sleep_timeline(draw, report, 558)
-        y = _workout_timeline(draw, report, y + 18)
-        footer = report.sleep_label
-        draw.text((66, min(y + 20, 1038)), footer, font=_font(20), fill=MUTED)
+        _workout_timeline(draw, report, y + 18)
 
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -177,14 +177,30 @@ def test_health_card_and_rich_markdown_include_visual_and_native_details(
 
     rich = build_health_rich_markdown(report, chart_media_id="health_chart")
     assert "tg://photo?id=health_chart" in rich
+    assert "昨日睡眠与训练概览" not in rich
     assert "昨日锻炼" in rich and "近期日常" in rich
     assert "<details><summary>" in rich
     assert "| 项目 | 数据 |" in rich
-    assert "| 时段 | 项目 | 时长 | 距离 | 活动能量 |" in rich
-    assert "| 指标 | 昨日 | 近期值 |" in rich
+    assert "| 项目 | 消耗能量 |" in rich
+    assert "| 指标 | 差值 |" in rich
+    assert "| Core Training | 100千卡 |" in rich
+    assert "| 时段 |" not in rich
+    assert "| 昨日 | 近期值 |" not in rich
     assert "缺失值不按 0 处理" not in rich
     assert "至少 7 个有效日" not in rich
     assert "Core Training" in rich
+    assert "暂不比较" not in rich
+
+    import dataclasses
+
+    cold = dataclasses.replace(
+        report,
+        medians={},
+        baseline_samples={"sleep": 3, "exercise": 3, "distance": 3, "stand": 3},
+    )
+    cold_rich = build_health_rich_markdown(cold, chart_media_id=None)
+    assert "近期基线样本不足（3 天，需 7 天）" in cold_rich
+    assert "| 睡眠 | — |" in cold_rich
 
 
 def test_health_card_relative_symbols():
@@ -194,3 +210,20 @@ def test_health_card_relative_symbols():
     assert _relative_symbol(1.0)[0] == "="
     assert _relative_symbol(0.8)[0] == "↓"
     assert _relative_symbol(None)[0] == "–"
+
+
+def test_health_rich_signed_deltas():
+    from chat_daily_tg.health_rich import _signed_delta, _sleep_delta
+
+    assert _signed_delta(46, 7, "分钟") == "+39分钟"
+    assert _signed_delta(5, 6, "小时") == "-1小时"
+    assert _signed_delta(3.35, 1.89, "公里", digits=2) == "+1.46公里"
+    assert _sleep_delta(6.333, 7.067) == "-44分钟"
+    # exact-half deltas must not leak the formatter's signed zero ("+0"/"-0")
+    assert _signed_delta(31.0, 30.5, "分钟") == "0分钟"
+    assert _signed_delta(10.0, 10.5, "小时") == "0小时"
+    assert _signed_delta(1.5, 1.5, "公里", digits=2) == "0.00公里"
+    assert _sleep_delta(7.0, 7.00833) == "0分钟"
+    assert _signed_delta(None, 5, "分钟") == "—"
+    assert _signed_delta(5, None, "分钟") == "—"
+    assert _sleep_delta(None, 7.0) == "—"

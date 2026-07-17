@@ -18,7 +18,7 @@
 
 | label | 时间 | wrapper |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 6:30 + 9:00 / 13:00 catch-up | `run_daily_guarded.sh` |
+| `com.chat-daily-tg.agent` | 7:05 + 9:00 / 13:00 catch-up | `run_daily_guarded.sh` |
 | `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | `run_channels_guarded.sh` |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | `run_growth_guarded.sh` |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | `run_growth_weekly_guarded.sh` |
@@ -108,7 +108,7 @@ plutil -p ~/Library/LaunchAgents/com.chat-daily-tg.channels.plist | grep -A5 Pro
 
 **剩余盲区只有「电池 + 合盖」**：此时系统强制睡眠，任务跳过，靠 catch-up 在下次唤醒时补。重试网已扩为 `(HTTPStatusError, TransportError)` 涵盖 ProtocolError。
 
-**替代唤醒方案均已否决**（别再提）：`pmset repeat wakeorpoweron` 需 root 写系统级持久状态且 dark wake 撑不住 20+ 分钟的 run；`caffeinate -u` 会点亮屏幕，6:30 无人值守不可接受；Power Nap 的 dark-wake 窗口由系统支配、无法按 job 控制——这次故障恰恰就是在这种窗口里跑出来的。
+**替代唤醒方案均已否决**（别再提）：`pmset repeat wakeorpoweron` 需 root 写系统级持久状态且 dark wake 撑不住 20+ 分钟的 run；`caffeinate -u` 会点亮屏幕，7:05 无人值守不可接受；Power Nap 的 dark-wake 窗口由系统支配、无法按 job 控制——这次故障恰恰就是在这种窗口里跑出来的。
 
 被采纳的是 `pmset disablesleep`，但它是全局开关、不分电源档，直接开会让电池合盖也禁睡（装包里过热）。所以做成了上面那个按电源动态切换的 LaunchDaemon。
 

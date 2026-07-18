@@ -118,6 +118,10 @@ python scripts/schedule.py apply         # 改 schedule.yaml 后一键重装+rel
 `deadline` 兜底时刻）再 `python scripts/schedule.py apply`——它改 `launchd/*.plist` 模板（保留
 注释与占位符）、渲染重装、`launchctl` reload。日报 deadline 经 plist 环境变量
 `CHAT_DAILY_WAKE_DEADLINE` 注入，wrapper 读取，缺省回落 `run_daily.py` 的 13:00 默认。
+`apply` 重载前有 in-flight 保护（2026-07-18 事故后加）：某 label 的 job 正在跑
+（或运行状态拿不准）就跳过它的 unload/load 并告警、退出码非 0——因为 `launchctl
+unload` 会 SIGTERM 掉在飞行中的 run（那次杀了正跑到 vision 的日报）；确认要强杀
+才加 `--force`。已装 plist 与将写入内容逐字节相同的 label 也会跳过（幂等，不重载）。
 r4s 的 B站 digest（cron 每小时 :30）不在此工具范围，改它要 ssh 到 r4s 改 crontab。
 
 `deploy.sh` 现已带 `require_clean_tree` 守卫、detached-HEAD 检查和 `uv sync`（2026-06-29 修复），可以正常使用。

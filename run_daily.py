@@ -15,6 +15,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
 import sys
 
 from chat_daily_tg.archive import safe_filename, prepare_archive_day, cleanup_old_media
@@ -1303,11 +1304,54 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     return 0
 
 
+_TERM_ALERTED = False
+
+
+def _install_termination_alert() -> None:
+    """Turn a mid-run SIGTERM/SIGHUP into an alert instead of a silent death.
+
+    launchd `unload`/`bootout` (schedule.py retiming the agents, a reinstall, logout,
+    or shutdown) SIGTERMs the whole job — bash wrapper included — so the guard's
+    exit-code alert path never runs and the day's report vanishes with zero signal:
+    no heartbeat, no marker, no retry (single 07:05 trigger). 2026-07-18 a concurrent
+    `schedule.py apply` killed the 07:05 run mid-vision, before push, unnoticed until
+    asked. Catch the terminating signals here — inside Python, above bash — fire one
+    best-effort alert, then re-raise the signal's default action so the exit status
+    still reflects it (128+signum) and launchd reaps us without escalating to SIGKILL.
+
+    notify_failure does the offline macOS notification first (fast) and the TG send
+    second (best-effort, 15s cap), so even if launchd's ~20s ExitTimeOut SIGKILLs us
+    mid-send the local notification has already fired.
+    """
+    def _handler(signum: int, _frame) -> None:
+        global _TERM_ALERTED
+        if not _TERM_ALERTED:  # a second signal mid-handler must not re-enter
+            _TERM_ALERTED = True
+            name = signal.Signals(signum).name
+            try:
+                notify_failure(
+                    "chat-daily-tg 被中断",
+                    f"进程收到 {name}，在交付前被外部终止"
+                    "（launchd unload/reinstall、登出或关机）。当天日报可能未送达——"
+                    "检查 .run-complete / 日志，缺失则补跑 `run_daily.py --date <当天>`。",
+                )
+            except Exception:  # noqa: BLE001 — a terminal path must never mask the exit
+                pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(_sig, _handler)
+
+
 if __name__ == "__main__":
     # launchd inherits Shadowrocket's ALL_PROXY=socks5://… (launchctl setenv);
     # scrub before any httpx client is built or the whole pipeline dies at
     # Client() construction (2026-07-03 outage, all three jobs).
     scrub_socks_proxy_env()
+    # Alert-on-termination: a launchd unload/reinstall (or logout/shutdown) SIGTERMs
+    # the job past the guard's exit-code alert, so make Python itself surface it.
+    _install_termination_alert()
     p = argparse.ArgumentParser()
     p.add_argument("--date", help="YYYY-MM-DD (default: yesterday)", default=None)
     p.add_argument("--model", help="Model alias from config (e.g. 'gemini')", default=None)

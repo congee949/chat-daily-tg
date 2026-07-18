@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -978,3 +979,33 @@ def test_resolve_tg_target_reads_table_and_alerts_on_fallback(tmp_path, monkeypa
         assert run_daily.resolve_tg_target("chat_daily", "555") == ("555", None)
         notify.assert_called_once()
         assert "缺失" in notify.call_args[0][1]
+
+
+def test_termination_alert_registers_and_fires_once(monkeypatch):
+    """A launchd unload/reinstall SIGTERMs the job past the guard's exit-code alert,
+    so run_daily must surface it in-process: register SIGTERM/SIGHUP, alert exactly
+    once (re-entrant-safe), then re-raise the signal's default action so the exit
+    status reflects it and launchd reaps promptly instead of escalating to SIGKILL."""
+    import signal
+    import run_daily
+
+    registered: dict[int, object] = {}
+    monkeypatch.setattr(run_daily.signal, "signal",
+                        lambda s, h: registered.__setitem__(s, h))
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(run_daily.os, "kill", lambda pid, s: killed.append((pid, s)))
+    monkeypatch.setattr(run_daily, "_TERM_ALERTED", False)
+
+    with patch("run_daily.notify_failure") as notify:
+        run_daily._install_termination_alert()
+        assert signal.SIGTERM in registered and signal.SIGHUP in registered
+
+        handler = registered[signal.SIGTERM]
+        handler(signal.SIGTERM, None)          # first signal → one alert + re-raise
+        handler(signal.SIGTERM, None)          # second signal mid-teardown → no re-alert
+
+    notify.assert_called_once()
+    assert "被中断" in notify.call_args[0][0]
+    # Reset to default then re-raise, both times, so the process actually dies.
+    assert registered[signal.SIGTERM] is signal.SIG_DFL
+    assert killed == [(os.getpid(), signal.SIGTERM), (os.getpid(), signal.SIGTERM)]

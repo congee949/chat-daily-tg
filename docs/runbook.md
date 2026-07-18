@@ -130,6 +130,28 @@ plutil -p ~/Library/LaunchAgents/com.chat-daily-tg.channels.plist | grep -A5 Pro
 
 **处置**：cron 里必须用 POSIX 形式 `TZ=CST-8`。
 
+### 日报中途消失，无 traceback / 无 marker / 当天不重试
+
+**根因（2026-07-18 事故）**：有人在日报正跑到 vision 阶段（push 之前）时执行了
+`python scripts/schedule.py apply`。旧版 `apply` 对每个 label 无条件 `launchctl
+unload` → `load`，而 `unload` 会给该 label **正在运行的进程发 SIGTERM 并回收**——
+bash wrapper 一起被杀，到不了上报行，于是极其隐蔽：无 traceback、无 crash report、
+无 guard 心跳、无阶段 marker，agent 单一 07:05 触发当天也不重试。定位靠 plist
+mtime（≈ 中断时刻）比对进程死亡时间。
+
+**已修（触发源）**：`apply` 重载前加了 in-flight 保护——`job_running(label)` 用
+`launchctl list <label>` 探活跃 PID，正在跑（或状态拿不准）就**跳过该 label 的
+unload/load** 并告警、退出码非 0；确认要强杀才加 `--force`。另有幂等：已装 plist
+与将写入内容逐字节相同的 label 直接跳过。所以正常情况下 `apply` 不会再打断在飞行
+的 run。
+
+**排查现场**：若已发生（用了旧版、或 `--force` 强杀），先看
+`~/chat-daily/logs/agent-stderr.log` 末尾是否戛然而止、`~/Library/LaunchAgents/
+com.chat-daily-tg.agent.plist` 的 mtime 是否落在日报运行窗口内。run_daily.py 现有
+SIGTERM handler（commit aa4c57a）会把这类中断转成告警——收到「被 SIGTERM 中断」
+告警即此类。**补跑**：`python run_daily.py --date <当天>`（`--skip-if-done` 会挡已
+交付日，中断未交付则正常补发）。
+
 ### 收到两条相同告警
 
 预期行为。in-Python 优雅失败发一条，wrapper 捕获非零退出再发一条。视为告警系统的安全冗余，未消除。
@@ -170,10 +192,27 @@ env -u ALL_PROXY -u all_proxy .venv/bin/python run_daily.py --date 2026-07-14
 
 r4s 是 musl，两个坑：无 venv 模块（用 `pip3 --user`）；pypi 直连超时（走清华镜像）。
 
+### 改 4 个 label 的触发时间
+
+改仓库根 `schedule.yaml`（单一事实源）再 `apply`：
+
+```bash
+python scripts/schedule.py list      # 对比 yaml ↔ 已装 plist
+python scripts/schedule.py apply -n  # 干跑，只打印将写入的时间
+python scripts/schedule.py apply     # 写模板 + 重装 + reload
+```
+
+`apply` 有 in-flight 保护：某 label 的 job 正在跑（或 `launchctl list` 状态拿不准）
+就**跳过它的重载**并告警、退出码非 0——`launchctl unload` 会 SIGTERM 掉在飞行中的
+run（见故障排查「日报中途消失」）。此时**等该 label 无 run 时重跑 `apply`** 即可；
+确认要强杀才加 `--force`。已装 plist 逐字节相同的 label 也会跳过（幂等，不重载）。
+
 ### 重装 launchd
 
 ```bash
 ./scripts/install-launchd.sh     # 装 agent + channels + growth + growth-weekly
 ```
 
-**注意**：这会 unload/reload 全部 label。如果只想修一个，用 installer 的同一段渲染逻辑单独渲染那一个 plist，别跑整个脚本——它会打断正在跑的任务。
+**注意**：`install-launchd.sh` 会 unload/reload 全部 label，且**没有 `schedule.py
+apply` 那样的 in-flight 保护**——正在跑的任务会被打断。只改触发时间用上面的
+`schedule.py apply`（有保护）；只想重装一个 label 则单独渲染那一个 plist，别跑整个脚本。

@@ -2,6 +2,12 @@
 
 ## Design Decisions
 
+- The official-X instant-push design uses five named account policies rather than a global keyword filter. Pure retweets are rejected deterministically before semantic classification, while quotes require substantive account-authored commentary.
+- Codex quota operations from `thsottiaux` are treated as an OpenAI team source, not as an OpenAI corporate announcement. Completed grants/resets are eligible; polls, negation, conditional promises, and jokes are explicitly ineligible.
+- OpenAI model announcements and OpenAIDevs API follow-ups share an event identity but are not automatically collapsed: a developer follow-up is delivered only when it adds structured technical facts.
+- Event-index TTL is storage retention, not a universal dedup window. Quota resets use a 15-minute equivalence window and treat `again` / `another` or a new effective action as a new event, preserving multiple legitimate resets on the same day.
+- 2026-07-19 coverage fix: entitlement/quota-policy announcements are in practice posted on `ClaudeDevs`, not only `claudeai` (missed live case: "weekly limits 50% higher through Aug 19", filtered as `policy:no_developer_event`). Both Claude accounts now share one entitlement classifier (`_entitlement_event`); `ClaudeDevs` additionally passes only `quota_policy` from it — `model_access`/`plan_entitlement` remain claudeai-only, and promotional credits stay excluded on both. The missed tweet was redelivered by un-seening its id and running a single-account pass with a widened `--max-push-age-minutes`.
+
 - Apple Watch data is read from the existing Health Auto Export iCloud `AutoSync` directory. The report uses the day after the covered chat date as its briefing date, analyzes the covered date's activity, and derives wake time from the sleep episode ending on the briefing date.
 - Personal baselines use the prior 28 calendar days and require enough valid samples before a comparison is shown. Missing or stale exports are reported as unavailable, never coerced to zero.
 - Raw-channel whole-post filtering is separate from line stripping: `exclude_patterns` suppresses a matching post, while `strip_patterns` only removes matching lines from a post that is still delivered.
@@ -17,10 +23,19 @@
 
 ## Deviations
 
+- The design's high-value freshness overrides (6h for resets/releases, 24h for entitlement changes, vs the 45-minute default window) are NOT implemented in `twitter_monitor.py` — only `DEFAULT_MAX_PUSH_AGE_MINUTES = 45` exists (widened to 1440 only in seen-corruption safe mode). Discovered 2026-07-19: the missed ClaudeDevs quota tweet was 39 minutes old at redelivery and would have been silently dropped as stale past 45 minutes. Left unimplemented for now; flagged as a follow-up task.
+
 ## Tradeoffs
+
+- Ambiguous official originals may use a constrained structured classifier, but classifier failure is fail-closed. This favors notification precision over instant coverage; the underlying tweet remains available through the user's existing lookup tools.
+- Quota events are sent immediately and suppress non-material self-replies, while launch threads use a short idle window. This accepts a small launch delay to avoid notification bursts without delaying time-sensitive resets.
+- High-value event types override the monitor's current 45-minute freshness window (6 hours for resets/releases and 24 hours for entitlement changes), trading a bounded amount of catch-up traffic for resilience to short monitor outages.
 
 - Health Auto Export `.hae` files are decoded with macOS `compression_tool`, avoiding a new Python dependency at the cost of a small subprocess overhead during the once-daily report.
 - The PNG uses Pillow and system fonts instead of a browser renderer, keeping the unattended path lightweight. Telegram-native tables remain the source for exact values; the image is optimized for quick visual comparison.
 - The existing Cloudflare relay configuration remains accepted for backward-compatible configuration loading, but the daily rich-digest path no longer depends on it.
 
 ## Open Questions
+
+- Before implementation, verify that both the GraphQL and 6551 fallback adapters expose immutable author IDs and thread/conversation references consistently; otherwise the policy layer needs an adapter-owned normalized field rather than reading provider-specific payloads.
+- BWG `/root/x_monitor` currently has uncommitted changes in `twitter_monitor.py` and `test_twitter_monitor.py`; implementation must reconcile with that work instead of overwriting it.

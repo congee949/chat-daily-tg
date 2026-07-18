@@ -16,7 +16,7 @@
 
 | 账号 | 来源角色 | 原创门 | 允许即时事件 |
 |---|---|---|---|
-| `ClaudeDevs` | Claude 官方开发者账号 | 仅原创 | `dev_release`、`model_api`、`quota_reset`、`quota_compensation` |
+| `ClaudeDevs` | Claude 官方开发者账号 | 仅原创 | `dev_release`、`model_api`、`quota_reset`、`quota_compensation`、`quota_policy`（2026-07-19 补） |
 | `OpenAIDevs` | OpenAI 官方开发者账号 | 仅原创 | `dev_release`、`model_api` |
 | `claudeai` | Claude 产品官号 | 仅原创 | `plan_entitlement`、`quota_policy`、`model_access` |
 | `OpenAI` | OpenAI 公司官号 | 仅原创 | `model_launch`、`major_product_launch`、`permanent_plan_change` |
@@ -117,8 +117,14 @@ ambiguous
 
 ### 3.4 Claude 职责边界
 
-- `ClaudeDevs`：已经执行的 5-hour/weekly reset、技术故障、多扣费、退款和补偿。
+- `ClaudeDevs`：已经执行的 5-hour/weekly reset、技术故障、多扣费、退款和补偿；**以及额度政策类权益公告（`quota_policy`）**。
 - `claudeai`：套餐未来包含多少、模型访问期、weekly allocation、credits 和 Pro/Max/Team 权益。
+
+> **2026-07-19 修订**：原设计假设权益/额度政策公告只发在 `claudeai`，实测 Anthropic 把
+> "weekly limits 50% higher through Aug 19" 发在了 `ClaudeDevs`，被 `policy:no_developer_event`
+> 过滤漏推。修复：两个 Claude 官号共用权益识别（`_entitlement_event`），`ClaudeDevs` 只放行
+> 其中的 `quota_policy`；`model_access` / `plan_entitlement` 仍归 `claudeai`，营销性 credits
+> （hackathon/startup program 等）在两号都排除。
 
 `ClaudeDevs` 对 `claudeai` 的纯转推会先被原创硬门拦截；不需要额外维护账号名单式 RT 去重。
 
@@ -302,6 +308,7 @@ classifier_backend, confidence, event_key, telegram_message_ids
 11. 地区/套餐限定不会在消息中被泛化；缺字段保持未知。
 12. Telegram 失败不登记 event delivered；下一轮绕过时间窗重试。
 13. 监控中断 2 小时后，额度和模型发布仍补推；超过各自 freshness 后只记 seen。
+14. （2026-07-19 补）`ClaudeDevs` 额度政策原创（如 "weekly limits 50% higher through Aug 19"）按 `quota_policy` 推送；非额度权益（model access / plan 归属）与营销性 credits 仍不从 dev 号放行。
 
 ## 9. 落地顺序
 

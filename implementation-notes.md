@@ -6,6 +6,7 @@
 - Codex quota operations from `thsottiaux` are treated as an OpenAI team source, not as an OpenAI corporate announcement. Completed grants/resets are eligible; polls, negation, conditional promises, and jokes are explicitly ineligible.
 - OpenAI model announcements and OpenAIDevs API follow-ups share an event identity but are not automatically collapsed: a developer follow-up is delivered only when it adds structured technical facts.
 - Event-index TTL is storage retention, not a universal dedup window. Quota resets use a 15-minute equivalence window and treat `again` / `another` or a new effective action as a new event, preserving multiple legitimate resets on the same day.
+- 2026-07-19 coverage fix: entitlement/quota-policy announcements are in practice posted on `ClaudeDevs`, not only `claudeai` (missed live case: "weekly limits 50% higher through Aug 19", filtered as `policy:no_developer_event`). Both Claude accounts now share one entitlement classifier (`_entitlement_event`); `ClaudeDevs` additionally passes only `quota_policy` from it — `model_access`/`plan_entitlement` remain claudeai-only, and promotional credits stay excluded on both. The missed tweet was redelivered by un-seening its id and running a single-account pass with a widened `--max-push-age-minutes`.
 
 - Apple Watch data is read from the existing Health Auto Export iCloud `AutoSync` directory. The report uses the day after the covered chat date as its briefing date, analyzes the covered date's activity, and derives wake time from the sleep episode ending on the briefing date.
 - Personal baselines use the prior 28 calendar days and require enough valid samples before a comparison is shown. Missing or stale exports are reported as unavailable, never coerced to zero.
@@ -21,6 +22,8 @@
 - When the recent baseline is insufficient, the delta table shows "—" per row plus one note line ("近期基线样本不足（N 天，需 M 天）") replacing the old per-cell "样本 N 天，暂不比较" wording.
 
 ## Deviations
+
+- The design's high-value freshness overrides (6h for resets/releases, 24h for entitlement changes, vs the 45-minute default window) are NOT implemented in `twitter_monitor.py` — only `DEFAULT_MAX_PUSH_AGE_MINUTES = 45` exists (widened to 1440 only in seen-corruption safe mode). Discovered 2026-07-19: the missed ClaudeDevs quota tweet was 39 minutes old at redelivery and would have been silently dropped as stale past 45 minutes. Left unimplemented for now; flagged as a follow-up task.
 
 ## Tradeoffs
 

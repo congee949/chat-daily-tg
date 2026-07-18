@@ -1,3 +1,4 @@
+import os
 from datetime import date, datetime, timedelta, timezone
 
 from chat_daily_tg.config import HealthBriefing
@@ -45,6 +46,51 @@ def test_progress_uses_real_year_length():
     assert text == "第 197/365 天 · 54.0%"
     assert len(bar) == 20
     assert bar.count("█") == 10
+
+
+def test_dataless_hae_is_materialized_before_decode(tmp_path, monkeypatch):
+    # A dataless iCloud placeholder (st_blocks == 0) must get a lock-free read to
+    # pull it local before compression_tool locks it — otherwise the decode hits
+    # EDEADLK and the wake-gate spins until its deadline. See health_briefing._decode.
+    reader = HealthExportReader(tmp_path, "Asia/Shanghai")
+    path = tmp_path / "20260716.hae"
+    path.write_bytes(b"placeholder-bytes")
+
+    real_stat = os.stat
+
+    class _Dataless:
+        def __init__(self, st):
+            self.st_size = st.st_size
+            self.st_blocks = 0  # dataless iCloud placeholder
+
+    def fake_stat(target, *a, **k):
+        st = real_stat(target, *a, **k)
+        return _Dataless(st) if str(target) == str(path) else st
+
+    reads: list[str] = []
+    real_open = open
+
+    def spy_open(target, *a, **k):
+        if str(target) == str(path):
+            reads.append(str(target))
+        return real_open(target, *a, **k)
+
+    monkeypatch.setattr("chat_daily_tg.health_briefing.os.stat", fake_stat, raising=False)
+    monkeypatch.setattr("builtins.open", spy_open)
+    reader._ensure_materialized(path)
+    assert reads == [str(path)], "dataless placeholder should be read to force materialization"
+
+
+def test_materialized_hae_is_not_reread(tmp_path, monkeypatch):
+    # Already-local files (st_blocks > 0) must not be re-read on every decode.
+    reader = HealthExportReader(tmp_path, "Asia/Shanghai")
+    path = tmp_path / "20260717.hae"
+    path.write_bytes(b"local-bytes")
+    reads: list[str] = []
+    real_open = open
+    monkeypatch.setattr("builtins.open", lambda t, *a, **k: (reads.append(str(t)), real_open(t, *a, **k))[1])
+    reader._ensure_materialized(path)  # real st_blocks is nonzero for a written file
+    assert reads == []
 
 
 def test_activity_rejects_partial_autosync_totals(tmp_path):

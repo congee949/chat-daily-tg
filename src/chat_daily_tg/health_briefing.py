@@ -6,6 +6,7 @@ from collections import OrderedDict
 import json
 import logging
 import math
+import os
 import shutil
 import statistics
 import subprocess
@@ -94,6 +95,27 @@ class HealthExportReader:
         # benefit without retaining a whole month of high-frequency samples.
         self._cache: OrderedDict[Path, list[dict] | None] = OrderedDict()
 
+    @staticmethod
+    def _ensure_materialized(path: Path) -> None:
+        """Pull a dataless iCloud placeholder local before the lock-holding decoder touches it.
+
+        Health Auto Export writes `.hae` into iCloud Drive. While a chunk is still a
+        dataless placeholder (metadata present, ``st_blocks == 0``), ``compression_tool``'s
+        read triggers a *synchronous* iCloud materialization while it holds a file lock;
+        the kernel refuses the cycle as EDEADLK ("Resource deadlock avoided"), the decode
+        fails, and the wake-gate mistakes an un-downloaded file for "sleep not synced yet"
+        and spins until the 13:00 deadline. A plain, lock-free read here forces the
+        download first, so the decode sees a local file. Best-effort: any failure just
+        falls through to the normal decode path (no regression versus not calling this).
+        """
+        try:
+            st = os.stat(path)
+            if st.st_size > 0 and st.st_blocks == 0:
+                with open(path, "rb") as fh:
+                    fh.read()
+        except OSError as exc:
+            log.debug("health export materialize skipped for %s: %s", path, exc)
+
     def _decode(self, path: Path) -> list[dict] | None:
         if path in self._cache:
             self._cache.move_to_end(path)
@@ -101,6 +123,7 @@ class HealthExportReader:
         if not path.is_file():
             self._cache[path] = None
             return None
+        self._ensure_materialized(path)
         tool = shutil.which("compression_tool")
         if not tool:
             log.warning("health briefing unavailable: compression_tool not found")
@@ -263,6 +286,7 @@ class HealthExportReader:
         tool = shutil.which("compression_tool")
         if not tool:
             return None
+        self._ensure_materialized(path)
         try:
             proc = subprocess.run([tool, "-decode", "-i", str(path)], capture_output=True,
                                   timeout=30, check=False)

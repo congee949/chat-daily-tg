@@ -6,12 +6,18 @@
   2. 渲染 REPLACE_WITH_* 占位符到 ~/Library/LaunchAgents/<label>.plist；
   3. launchctl unload/load 重载。
 
+重载前有两道闸门（避免误杀在飞行中的 run，2026-07-18 事故后加）：
+  - 幂等：已装 plist 与将写入的逐字节相同 → 跳过该 label 的重载；
+  - in-flight：`launchctl list` 报活跃 PID（或状态拿不准）→ 默认跳过重载并告警，
+    退出码非 0；确认要强杀才加 --force。
+
 只管 Mac。r4s 的 B站 digest（cron 每小时 :30）不在此工具范围。
 
 用法：
   python scripts/schedule.py list          # 对比 yaml 与已装 plist 的当前时间
-  python scripts/schedule.py apply          # 写模板 + 重装 + reload
+  python scripts/schedule.py apply          # 写模板 + 重装 + reload（跳过运行中的 label）
   python scripts/schedule.py apply -n       # dry-run：只打印将写入的时间，不落盘
+  python scripts/schedule.py apply --force   # 即使 job 在运行也重载（会 SIGTERM 杀掉它）
 """
 from __future__ import annotations
 
@@ -149,6 +155,34 @@ def fmt_entries(entries: list[dict]) -> str:
     return ", ".join(one(e) for e in entries)
 
 
+def job_running(label: str) -> bool | None:
+    """该 label 的 job 当前是否正在飞行？
+
+    返回三态，让调用方分辨"确定安全"与"拿不准"：
+      True  — `launchctl list` 报了活跃 PID，正在跑，unload 会 SIGTERM 它；
+      False — 域里没这个服务（从没跑过 / 已 bootout），或已加载但无 PID（idle），
+              两种都安全重载；
+      None  — launchctl 缺失、抛错、或输出反常无法解析 → 拿不准。
+
+    对抗式取舍：宁可 None（保守跳过重载）也不误判成 False 去杀在飞行的 run。
+    """
+    try:
+        r = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return None  # launchctl 不在 PATH / 无权限 → 拿不准
+    if r.returncode != 0:
+        return False  # "Could not find service ... in domain" → 未加载，没在跑
+    if re.search(r'"PID"\s*=\s*\d+;', r.stdout):
+        return True
+    # returncode 0 但输出既无 PID 也不像 plist dict → 反常，别当 idle 处理
+    if '"Label"' not in r.stdout:
+        return None
+    return False  # 已加载但无 PID = idle，安全重载
+
+
 # ── commands ────────────────────────────────────────────────────────────────
 def cmd_list(cfg: dict) -> int:
     print("label            yaml 配置                          已装 plist")
@@ -163,31 +197,53 @@ def cmd_list(cfg: dict) -> int:
     return 0
 
 
-def cmd_apply(cfg: dict, dry_run: bool) -> int:
+def cmd_apply(cfg: dict, dry_run: bool, force: bool = False) -> int:
+    rc = 0
     for key, label in LABELS.items():
         tpl = TEMPLATE_DIR / f"{label}.plist"
         text = tpl.read_text()
         text = set_calendar(text, entries_for(key, cfg))
         if key == "agent":
             text = set_env_var(text, "CHAT_DAILY_WAKE_DEADLINE", str(cfg["agent"]["deadline"]))
+        summary = (fmt_entries(entries_for(key, cfg))
+                   + (f"  deadline={cfg['agent']['deadline']}" if key == "agent" else ""))
 
         if dry_run:
-            print(f"[dry-run] {key}: {fmt_entries(entries_for(key, cfg))}"
-                  + (f"  deadline={cfg['agent']['deadline']}" if key == "agent" else ""))
+            print(f"[dry-run] {key}: {summary}")
             continue
 
-        tpl.write_text(text)
+        tpl.write_text(text)  # 模板始终跟随 yaml（进 git），与是否重载无关
         dst = INSTALL_DIR / f"{label}.plist"
-        dst.write_text(render_placeholders(text))
+        rendered = render_placeholders(text)
+
+        # 幂等：已装 plist 逐字节相同 → 无变化，不重载（从根上少一次误杀机会）
+        if dst.exists() and dst.read_text() == rendered:
+            print(f"= 未变化，跳过重载  {key}: {summary}")
+            continue
+
+        # in-flight 保护：unload 会给正在跑的 job 发 SIGTERM，除非 --force 否则不碰
+        running = job_running(label)
+        if running is not False and not force:
+            reason = "正在运行" if running is True else "运行状态无法确定"
+            print(f"⚠ {key} {reason}，跳过重载以免杀掉在飞行中的 run；"
+                  f"稍后无 run 时重跑 apply（确认要强杀加 --force）")
+            rc = 1
+            continue
+
+        dst.write_text(rendered)
         subprocess.run(["launchctl", "unload", str(dst)],
                        stderr=subprocess.DEVNULL, check=False)
         r = subprocess.run(["launchctl", "load", str(dst)], check=False)
-        status = "✓ reloaded" if r.returncode == 0 else f"✗ launchctl load exit={r.returncode}"
-        print(f"{status}  {key}: {fmt_entries(entries_for(key, cfg))}")
+        if r.returncode == 0:
+            note = "✓ reloaded（--force 强杀）" if (force and running is not False) else "✓ reloaded"
+        else:
+            note = f"✗ launchctl load exit={r.returncode}"
+            rc = 1
+        print(f"{note}  {key}: {summary}")
 
     if dry_run:
         print("\n（dry-run，未写盘、未 reload）")
-    return 0
+    return rc
 
 
 def main() -> int:
@@ -196,11 +252,14 @@ def main() -> int:
     sub.add_parser("list", help="对比 yaml 与已装 plist 的当前时间")
     ap_apply = sub.add_parser("apply", help="写模板 + 重装 + reload")
     ap_apply.add_argument("-n", "--dry-run", action="store_true", help="只打印，不写盘")
+    ap_apply.add_argument(
+        "-f", "--force", "--force-running", dest="force", action="store_true",
+        help="即使 job 正在运行也重载（会 SIGTERM 杀掉在飞行中的 run）")
     args = ap.parse_args()
 
     cfg = load_config()
     if args.cmd == "apply":
-        return cmd_apply(cfg, args.dry_run)
+        return cmd_apply(cfg, args.dry_run, args.force)
     return cmd_list(cfg)  # 默认与 list 等价
 
 

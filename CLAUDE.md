@@ -131,6 +131,7 @@ r4s 的 B站 digest（cron 每小时 :30）不在此工具范围，改它要 ssh
 | **系统怎么工作**：四条管线数据流、推送阶梯、幂等状态机、代理拓扑 | `docs/ARCHITECTURE.md` |
 | **出事了怎么办**：部署拓扑、日志、故障排查、补跑与路由表同步 | `docs/runbook.md` |
 | 功能清单 / 安装 / 配置样例 / 归档产物 | `README.md` |
+| 定时时间可视化设计器（24h 时间轴拖拽调时 → 生成 `schedule.yaml`，配 `scripts/schedule.py apply`；单文件离线可开） | `docs/schedule-designer.html` |
 | TG 统一路由表设计 | `docs/spark/2026-07-09-unified-tg-route-table-design.md` |
 | LLM 输出信任边界校验设计 | `docs/spark/2026-07-09-llm-output-validation-design.md` |
 | B站订阅 digest 设计（含 §18.4 回滚路径） | `docs/spark/2026-07-02-bilibili-subscriptions-design.md` |

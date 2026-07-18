@@ -7,6 +7,8 @@
 - OpenAI model announcements and OpenAIDevs API follow-ups share an event identity but are not automatically collapsed: a developer follow-up is delivered only when it adds structured technical facts.
 - Event-index TTL is storage retention, not a universal dedup window. Quota resets use a 15-minute equivalence window and treat `again` / `another` or a new effective action as a new event, preserving multiple legitimate resets on the same day.
 - 2026-07-19 coverage fix: entitlement/quota-policy announcements are in practice posted on `ClaudeDevs`, not only `claudeai` (missed live case: "weekly limits 50% higher through Aug 19", filtered as `policy:no_developer_event`). Both Claude accounts now share one entitlement classifier (`_entitlement_event`); `ClaudeDevs` additionally passes only `quota_policy` from it — `model_access`/`plan_entitlement` remain claudeai-only, and promotional credits stay excluded on both. The missed tweet was redelivered by un-seening its id and running a single-account pass with a widened `--max-push-age-minutes`.
+- X currently returns `claudeai` almost entirely as `TimelineTimelineModule` thread groups. The BWG GraphQL adapter now flattens module items before normalization; without this provider-level fix, the account appeared healthy but empty and its entitlement announcements were silently missed.
+- The GraphQL adapter resolves immutable account IDs but normalized fallback tweets do not consistently expose author IDs. Production therefore verifies each configured official handle against GraphQL's immutable-ID cache/resolver before accepting either timeline source; inability to verify fails that account closed.
 
 - Apple Watch data is read from the existing Health Auto Export iCloud `AutoSync` directory. The report uses the day after the covered chat date as its briefing date, analyzes the covered date's activity, and derives wake time from the sleep episode ending on the briefing date.
 - Personal baselines use the prior 28 calendar days and require enough valid samples before a comparison is shown. Missing or stale exports are reported as unavailable, never coerced to zero.
@@ -23,7 +25,9 @@
 
 ## Deviations
 
-- The design's high-value freshness overrides (6h for resets/releases, 24h for entitlement changes, vs the 45-minute default window) are NOT implemented in `twitter_monitor.py` — only `DEFAULT_MAX_PUSH_AGE_MINUTES = 45` exists (widened to 1440 only in seen-corruption safe mode). Discovered 2026-07-19: the missed ClaudeDevs quota tweet was 39 minutes old at redelivery and would have been silently dropped as stale past 45 minutes. Left unimplemented for now; flagged as a follow-up task.
+- The BWG production rollout implements the safe first stage of the official-X design: immutable account-ID validation, original-only gates, named deterministic policies, negative cases, and seed-only activation for new accounts. Structured classifier fallback, event-index dedup, specialized renderers, and thread idle bundling remain out of this deployment; enabling the five sources without the deterministic gates was rejected as unsafe.
+- The per-event freshness windows (6h for resets/releases, 24h for entitlement changes, vs the 45-minute default) were initially left out of the rollout and flagged as follow-up after the redelivered ClaudeDevs quota tweet — already 39 minutes old — nearly aged out. They were implemented later on 2026-07-19 as `EVENT_PUSH_WINDOW_MINUTES` (server backup `twitter_monitor.py.bak-event-freshness-window-20260719`).
+- BWG's pre-existing uncommitted `twitter_monitor.py` and `test_twitter_monitor.py` were used as the implementation baseline and preserved in timestamped server-side backups before deployment.
 
 ## Tradeoffs
 
@@ -37,5 +41,4 @@
 
 ## Open Questions
 
-- Before implementation, verify that both the GraphQL and 6551 fallback adapters expose immutable author IDs and thread/conversation references consistently; otherwise the policy layer needs an adapter-owned normalized field rather than reading provider-specific payloads.
-- BWG `/root/x_monitor` currently has uncommitted changes in `twitter_monitor.py` and `test_twitter_monitor.py`; implementation must reconcile with that work instead of overwriting it.
+- Whether to build the deferred second stage (structured classifier fallback, event-index dedup, specialized renderers, thread idle bundling) is pending user decision; the deterministic first stage stands until a missed-event or noise incident argues otherwise.

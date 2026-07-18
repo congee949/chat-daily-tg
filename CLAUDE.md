@@ -110,7 +110,15 @@ python run_daily.py --channels-only      # 只跑频道转发
 pytest -v                                # 全量测试
 ./scripts/sync_tg_targets.sh --check     # 看 fleet 路由表 diff
 ./scripts/install-launchd.sh             # 装 agent + channels 两个 label
+python scripts/schedule.py list          # 看 4 个 label 当前触发时间（yaml ↔ 已装 plist）
+python scripts/schedule.py apply         # 改 schedule.yaml 后一键重装+reload（apply -n 干跑）
 ```
+
+调 Mac 上 4 个 launchd label 的触发时间：改仓库根 `schedule.yaml`（单一事实源，含日报的
+`deadline` 兜底时刻）再 `python scripts/schedule.py apply`——它改 `launchd/*.plist` 模板（保留
+注释与占位符）、渲染重装、`launchctl` reload。日报 deadline 经 plist 环境变量
+`CHAT_DAILY_WAKE_DEADLINE` 注入，wrapper 读取，缺省回落 `run_daily.py` 的 13:00 默认。
+r4s 的 B站 digest（cron 每小时 :30）不在此工具范围，改它要 ssh 到 r4s 改 crontab。
 
 `deploy.sh` 现已带 `require_clean_tree` 守卫、detached-HEAD 检查和 `uv sync`（2026-06-29 修复），可以正常使用。
 

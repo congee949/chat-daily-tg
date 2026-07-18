@@ -1,0 +1,36 @@
+# schedule.yaml — 单一事实源：Mac 上 4 个 launchd label 的触发时间。
+#
+# 改完跑：  python scripts/schedule.py apply     （改模板 + 重装 + reload）
+# 先看差异：python scripts/schedule.py list       （对比 yaml / 已装 plist）
+#           python scripts/schedule.py apply -n   （dry-run，只打印不写）
+#
+# 时间一律本地时区（CST-8）。r4s 的 B站 digest（每小时 :30）不在此表——它跑在
+# r4s cron 上、独立于 Mac，改它要 ssh 到 r4s 改 crontab。
+
+# 日报总结。trigger 是 launchd 唤起时刻；deadline 是 --wait-for-wake 的兜底：
+# 到点还没等到 Watch 睡眠同步就强制发（注入为 plist 环境变量，wrapper 读取）。
+agent:
+  trigger: "07:05"
+  deadline: "13:00"
+
+# 资讯栏频道增量转发。整点触发，可写 "HH:MM" 或纯小时数字。
+channels:
+  - "06:00"
+  - "10:00"
+  - "12:00"
+  - "14:00"
+  - "16:00"
+  - "18:00"
+  - "20:00"
+  - "22:00"
+
+# 成长内容挖掘。
+growth:
+  - "09:30"
+  - "15:30"
+  - "21:30"
+
+# 周报 + rubric 合并。weekday 用 launchd 约定：0/7=周日，6=周六。
+growth-weekly:
+  weekday: 6
+  time: "09:45"

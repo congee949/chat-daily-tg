@@ -38,7 +38,10 @@ guard_setup_env
 # polls from 07:05, forced delivery at the 13:00 deadline), which also replaces
 # the old 0–15 min cosmetic jitter: the send moment now follows the user's
 # actual wake-up, not the trigger minute.
-/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done --wait-for-wake
+# CHAT_DAILY_WAKE_DEADLINE (optional): injected by schedule.py into the agent
+# plist's EnvironmentVariables. Absent → run_daily's built-in 13:00 default.
+/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done --wait-for-wake \
+  ${CHAT_DAILY_WAKE_DEADLINE:+--wake-deadline "$CHAT_DAILY_WAKE_DEADLINE"}
 rc=$?
 if [ "$rc" -ne 0 ]; then
   guard_notify "日报运行失败 exit=$rc，详见 $DATA_DIR/logs/$(date +%F).log"

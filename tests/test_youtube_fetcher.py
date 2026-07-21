@@ -236,12 +236,36 @@ def test_flaky_feed_recovers_on_retry(httpx_mock: HTTPXMock, tmp_path, monkeypat
 
 def test_all_channels_failing_raises(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
     monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
-    # Retries exhausted on every channel (is_reusable covers all attempts).
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    # Retries exhausted on every channel across all waves (is_reusable covers
+    # per-channel attempts + the delayed second wave).
     httpx_mock.add_response(
         url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
         is_reusable=True)
     with pytest.raises(YoutubeFetchError, match="all 2 channel"):
         fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
+
+
+def test_all_fail_first_wave_recovers_on_second(httpx_mock: HTTPXMock, tmp_path,
+                                                monkeypatch):
+    """Multi-minute flake storm: wave-1 exhausts every channel, wave-2 recovers
+    after the inter-wave pause — must not raise and must ship the video."""
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    # CH_A: 3 failed attempts (wave 1) then success (wave 2).
+    for _ in range(yt._FEED_ATTEMPTS):
+        httpx_mock.add_response(
+            url=re.compile(rf".*channel_id={CH_A}.*"), status_code=404)
+    _mock_feed(httpx_mock, CH_A, _feed(
+        _entry("wave2vid001", author="频道甲"), title="频道甲"))
+    # CH_B: same pattern, empty feed on recovery.
+    for _ in range(yt._FEED_ATTEMPTS):
+        httpx_mock.add_response(
+            url=re.compile(rf".*channel_id={CH_B}.*"), status_code=500)
+    _mock_feed(httpx_mock, CH_B, _feed(title="频道乙"))
+    _mock_videos_api(httpx_mock, {"wave2vid001": "PT10M"})
+    videos = fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
+    assert [v.video_id for v in videos] == ["wave2vid001"]
 
 
 def test_blacklist_and_cap(httpx_mock: HTTPXMock, tmp_path):

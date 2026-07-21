@@ -91,6 +91,12 @@ _CALL_SPACING_SECONDS = 0.5
 # attempts below ride out the flake windows instead of alarming on them.
 _FEED_ATTEMPTS = 3
 _FEED_RETRY_BACKOFF_SECONDS = 3.0
+# Whole-run second wave: 2026-07-21 14:45–14:57 showed multi-minute storms
+# where every channel exhausted per-call retries (~9s) and the next */5 tick
+# just re-alerted. One delayed full re-poll catches storms that clear within
+# ~1 min without spamming the alert topic on every 5-minute gate reopen.
+_FEED_WAVES = 2
+_FEED_WAVE_BACKOFF_SECONDS = 45.0
 # Statuses worth retrying: the flake presents as 404/500, rate limiting as
 # 429; other 4xx (403 etc.) fail through immediately.
 _FEED_RETRYABLE_STATUSES = {404, 429, 500, 502, 503, 504}
@@ -199,14 +205,11 @@ def _fetch_feed_with_retry(client: httpx.Client, channel) -> ET.Element:
     raise last_err
 
 
-def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
-                 *, cutoff: datetime) -> list[YtVideo]:
-    """One RSS call per whitelisted channel. A single channel failing only
-    logs (deleted channel, transient error); ALL channels failing raises."""
-    blacklist_ids = {c.channel_id for c in src.fetch.blacklist}
-    channels = [c for c in src.fetch.whitelist if c.channel_id not in blacklist_ids]
+def _poll_channels(channels, seen: SeenStore, client: httpx.Client, *,
+                   cutoff: datetime) -> tuple[list[YtVideo], int, list]:
+    """One wave over ``channels``. Returns (videos, failure_count, failed_channels)."""
     videos: list[YtVideo] = []
-    failures = 0
+    failed: list = []
     for i, channel in enumerate(channels):
         if i:
             time.sleep(_CALL_SPACING_SECONDS)
@@ -215,7 +218,7 @@ def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
         except Exception as e:
             log.warning("feed failed for %s (%s): %s",
                         channel.channel_id, channel.name or "?", e)
-            failures += 1
+            failed.append(channel)
             continue
         for entry in root.findall("atom:entry", _NS):
             # Per-item isolation: one dirty entry must not kill the whole run.
@@ -226,7 +229,35 @@ def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
                 continue
             if video is not None:
                 videos.append(video)
-    if channels and failures == len(channels):
+    return videos, len(failed), failed
+
+
+def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
+                 *, cutoff: datetime) -> list[YtVideo]:
+    """RSS over whitelisted channels. A single channel failing only logs
+    (deleted channel / transient error). ALL channels failing on the first
+    wave triggers a delayed second wave; only total failure across all
+    waves raises (dead transport or sustained YouTube RSS outage)."""
+    blacklist_ids = {c.channel_id for c in src.fetch.blacklist}
+    channels = [c for c in src.fetch.whitelist if c.channel_id not in blacklist_ids]
+    if not channels:
+        return []
+
+    videos, failures, failed_channels = _poll_channels(
+        channels, seen, client, cutoff=cutoff)
+    # Only a total outage triggers extra waves — partial failure is already
+    # soft (skipped channel + lookback catch-up next round).
+    for wave in range(2, _FEED_WAVES + 1):
+        if failures < len(channels) or not failed_channels:
+            break
+        log.warning(
+            "all %d feeds failed on wave %d; waiting %.0fs then retrying",
+            len(channels), wave - 1, _FEED_WAVE_BACKOFF_SECONDS,
+        )
+        time.sleep(_FEED_WAVE_BACKOFF_SECONDS)
+        videos, failures, failed_channels = _poll_channels(
+            failed_channels, seen, client, cutoff=cutoff)
+    if not videos and failures >= len(channels):
         raise YoutubeFetchError(
             f"all {len(channels)} channel feed fetches failed — transport dead?")
     return videos

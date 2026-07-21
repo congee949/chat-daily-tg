@@ -38,8 +38,30 @@ export CHAT_DAILY_TG_ALERTS=1 CHAT_DAILY_ALERT_PROXY="$PROXY"
 export PYTHONPATH="$PROJECT/src"
 export CHAT_DAILY_DATA_DIR="$DATA_DIR"
 
+# Dedup window for shell-side alerts (seconds). run_daily also calls
+# notify_failure on digest exceptions — during a multi-tick RSS storm the
+# */5 due_gate reopen used to twin-spam the alert topic (python + shell)
+# every few minutes. Throttle the shell path; python path stays for the
+# first failure's exception detail.
+ALERT_THROTTLE_S=1200
+ALERT_STAMP="$DATA_DIR/state/youtube-alert-last"
+
 alert() {
   # Best-effort TG alert to the alert topic; mirrors guard_notify's TG branch.
+  echo "$(date '+%F %T') ALERT: $1" >> "$LOG"
+  mkdir -p "$DATA_DIR/state"
+  now=$(date +%s)
+  if [ -f "$ALERT_STAMP" ]; then
+    last=$(cat "$ALERT_STAMP" 2>/dev/null || echo 0)
+    # BusyBox date/expr safe: skip TG if last alert was within throttle window.
+    if [ -n "$last" ] && [ "$last" -eq "$last" ] 2>/dev/null; then
+      delta=$((now - last))
+      if [ "$delta" -ge 0 ] && [ "$delta" -lt "$ALERT_THROTTLE_S" ]; then
+        echo "$(date '+%F %T') alert throttled (${delta}s < ${ALERT_THROTTLE_S}s): $1" >> "$LOG"
+        return 0
+      fi
+    fi
+  fi
   tok=$(grep -m1 '^TG_BOT_TOKEN=' "$DATA_DIR/.env" 2>/dev/null | cut -d= -f2-)
   cid=$(python3 -c "
 import json
@@ -54,8 +76,8 @@ except Exception:
     "https://api.telegram.org/bot${tok}/sendMessage" \
     --data-urlencode "chat_id=${chat}" \
     ${thread:+--data-urlencode "message_thread_id=${thread}"} \
-    --data-urlencode "text=⚠️ chat-daily-tg YouTube守护(r4s): $1" >/dev/null 2>&1
-  echo "$(date '+%F %T') ALERT: $1" >> "$LOG"
+    --data-urlencode "text=⚠️ chat-daily-tg YouTube守护(r4s): $1" >/dev/null 2>&1 \
+    && echo "$now" > "$ALERT_STAMP"
 }
 
 exec 9>"$LOCK"

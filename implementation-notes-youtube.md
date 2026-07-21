@@ -96,3 +96,17 @@
 - 验证：3Blue1Brown《But what is cross-entropy?》走真实管线推送测试卡——
   API enrichment 命中（33m51s / 392,919 views，与 videos.list 直连结果一致），
   TG 卡片发送成功并写 seen。watch-page 兜底保留作降级。
+
+## 2026-07-21 补丁 3：多分钟全灭风暴 → 第二波 + 告警节流
+
+- **现象**：下午 14:45–14:57 在已上线 per-channel 3 次重试后，仍连续三轮
+  `all 11 channel feed fetches failed`（真实错误仍是 404/500，非代理）。
+  单频道 ~9s 重试窗口扛不住持续约 12 分钟的全频道风暴；due_gate */5 重开
+  导致 python `notify_failure` + shell `alert` 双子告警连发。15:00 自愈。
+- **修复**：
+  1. `_fetch_feeds`：首波全灭时 sleep `_FEED_WAVE_BACKOFF_SECONDS=45` 后对失败
+     频道再跑一波（`_FEED_WAVES=2`）；部分恢复即放行，仍全灭才 raise。
+  2. `run_daily.run_youtube` + `run_youtube_r4s.sh`：同类失败 TG 告警 20 分钟
+     节流（日志仍每轮记），避免风暴期刷屏。
+- **测试**：`test_all_fail_first_wave_recovers_on_second`；原 all-fail 用例改
+  为覆盖两波。

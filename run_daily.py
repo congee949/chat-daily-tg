@@ -527,7 +527,13 @@ def run_youtube(no_push: bool = False) -> int:
         return 0
     except Exception as e:
         log.exception("youtube digest failed: %s", e)
-        notify_failure("chat-daily-tg YouTube digest失败", f"{type(e).__name__}: {e}")
+        # YouTube RSS multi-minute flake storms reopen due_gate every */5 and
+        # would re-notify each tick; throttle the TG alert (log still records
+        # every failure). Window matches run_youtube_r4s.sh ALERT_THROTTLE_S.
+        if _alert_throttle_allow("youtube-digest", window_s=1200):
+            notify_failure("chat-daily-tg YouTube digest失败", f"{type(e).__name__}: {e}")
+        else:
+            log.info("youtube digest failure alert throttled")
         return 1
 
 
@@ -1368,6 +1374,30 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
 
 
 _TERM_ALERTED = False
+
+
+def _alert_throttle_allow(key: str, *, window_s: int = 1200) -> bool:
+    """Return True if an alert for ``key`` may fire now; records the stamp.
+
+    Used to absorb YouTube RSS multi-tick storms that would otherwise re-notify
+    every due_gate reopen (*/5). Fail-open: any I/O error allows the alert.
+    """
+    import time as _time
+    stamp = DATA_DIR / "state" / f"alert-throttle-{key}"
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        now = _time.time()
+        if stamp.is_file():
+            try:
+                last = float(stamp.read_text(encoding="utf-8").strip() or "0")
+            except ValueError:
+                last = 0.0
+            if last > 0 and (now - last) < window_s:
+                return False
+        stamp.write_text(f"{now:.0f}\n", encoding="utf-8")
+        return True
+    except OSError:
+        return True
 
 
 def _install_termination_alert() -> None:

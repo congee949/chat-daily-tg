@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -29,8 +30,9 @@ from chat_daily_tg.tg_sender import TelegramSender, escape_html
 
 log = logging.getLogger(__name__)
 
-# Placeholder text for a media-only message (empty body). For a public channel the
-# link preview still renders the media; the text just can't be empty for sendMessage.
+# Fallback text for a media-only message (empty body) when the real media could
+# not be fetched (download failure / no downloadable file). sendMessage text can't
+# be empty; the t.me preview behind it renders no image, so this is the last resort.
 _MEDIA_PLACEHOLDER = "🖼 （媒体内容，见下方预览 / 原文）"
 
 
@@ -426,6 +428,30 @@ def push_raw_channel_cards(
         if no_push:
             continue
 
+        # Media-only posts (empty body): fetch the REAL media via the user session
+        # and re-upload it through the bot — a pure-photo post arrives as the photo
+        # itself, not as a "🖼 媒体内容" placeholder card (the t.me link preview
+        # renders no image, so the placeholder was all the user saw). Best effort:
+        # any failure leaves the placeholder card as the fallback. Keyed by msg_id;
+        # downloaded files are removed after the send loop.
+        media_map: dict[int, list[tuple[str, str]]] = {}
+        media_only_ids = [mid for ids, _, cp in cards
+                          if not cp and SeenStore.key(ch.id, ids[0]) not in seen
+                          for mid in ids]
+        media_dir = archive_dir / f"rawmedia-{_safe(ch.name)}"
+        if media_only_ids:
+            try:
+                from chat_daily_tg.private_media import (
+                    dump_messages_by_ids,
+                    media_by_msg_id,
+                )
+                media_map = media_by_msg_id(
+                    dump_messages_by_ids(ch.id, media_only_ids, media_dir))
+            except Exception as e:
+                log.warning("raw media fetch failed for %s (placeholder fallback): %s",
+                            ch.name, e)
+                media_map = {}
+
         # A configured exclusion is a successful terminal decision, not a send
         # failure. Record every member so incremental polling does not fetch the
         # same intentionally suppressed post forever. Journaled like every other
@@ -448,48 +474,82 @@ def push_raw_channel_cards(
         if topic_gate is not None and ch.dedup and cards:
             try:  # one embed batch per channel; failure → gate goes offline, all deliver.
                 # Only unseen cards — a catch-up re-run must not re-embed what it
-                # is about to skip on the seen check anyway.
+                # is about to skip on the seen check anyway. Empty-body (media)
+                # posts have nothing to embed and bypass the gate entirely.
                 unseen = [cp for card_ids, _, cp in cards
-                          if SeenStore.key(ch.id, card_ids[0]) not in seen]
+                          if cp and SeenStore.key(ch.id, card_ids[0]) not in seen]
                 if unseen:
                     topic_gate.prepare(unseen)
             except Exception as e:
                 log.warning("topic gate prepare failed (%s): %s", ch.name, e)
 
-        for ids, c, content_plain in cards:
-            if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card
-                continue
+        try:
+            for ids, c, content_plain in cards:
+                if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card
+                    continue
 
-            if _dedup_skip(content_plain, ch, ids, seen, content_store):
-                continue
+                media = [m for mid in ids for m in media_map.get(mid, [])]
+                if media:
+                    # Real-media push: the card header rides as the caption, plus an
+                    # 原文 link (media messages carry no link preview). Dedup gates
+                    # are bypassed — an empty body has no fingerprintable content
+                    # (same rule as the private path, review finding A4).
+                    caption = c.text_html.partition("\n\n")[0]
+                    if c.link:
+                        caption = f'{caption} · <a href="{escape_html(c.link)}">原文</a>'
+                    try:
+                        from chat_daily_tg.private_media import _send_media
+                        dropped = _send_media(media, sender, caption)
+                    except Exception as e:
+                        log.warning("raw media push failed (%s msg %s), "
+                                    "placeholder fallback: %s", ch.name, ids[0], e)
+                    else:
+                        if dropped:
+                            log.warning("raw media partial loss (%s msg %s): "
+                                        "%d item(s) not sent", ch.name, ids[0], dropped)
+                        for mid in ids:
+                            seen.add(SeenStore.key(ch.id, mid))
+                        total += 1
+                        if delay_seconds > 0:
+                            time.sleep(delay_seconds)
+                        continue
+                    # Media send failed → fall through to the placeholder card path.
 
-            l2_skip, annotation, l2_verdict = _l2_check(
-                topic_gate, ch, content_plain, ids, seen)
-            if l2_skip:
-                continue
-            text_html = c.text_html
-            if annotation:
-                # build_card's layout contract: one header line, then "\n\n",
-                # then the body (raw_channels.py:194). The annotation becomes a
-                # second header line. Contract is pinned by tests.
-                head_part, sep, body = text_html.partition("\n\n")
-                text_html = (f"{head_part}\n{annotation}{sep}{body}"
-                             if sep else f"{text_html}\n{annotation}")
+                if _dedup_skip(content_plain, ch, ids, seen, content_store):
+                    continue
 
-            try:
-                sent_ids = sender.send_card(text_html, link=c.link)
-            except Exception as e:
-                log.warning("raw card push failed (%s): %s", ch.name, e)
-                continue
-            # write-after-send: a crash re-tries rather than drops. Record EVERY album
-            # item, or the incremental high-water mark stalls at the head id.
-            for mid in ids:
-                seen.add(SeenStore.key(ch.id, mid))
-            _dedup_register(content_plain, ch, ids, content_store)
-            _l2_register(topic_gate, ch, content_plain, sent_ids, sender, l2_verdict)
-            total += 1
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
+                l2_skip, annotation, l2_verdict = _l2_check(
+                    topic_gate, ch, content_plain, ids, seen)
+                if l2_skip:
+                    continue
+                text_html = c.text_html
+                if annotation:
+                    # build_card's layout contract: one header line, then "\n\n",
+                    # then the body (raw_channels.py:194). The annotation becomes a
+                    # second header line. Contract is pinned by tests.
+                    head_part, sep, body = text_html.partition("\n\n")
+                    text_html = (f"{head_part}\n{annotation}{sep}{body}"
+                                 if sep else f"{text_html}\n{annotation}")
+
+                try:
+                    sent_ids = sender.send_card(text_html, link=c.link)
+                except Exception as e:
+                    log.warning("raw card push failed (%s): %s", ch.name, e)
+                    continue
+                # write-after-send: a crash re-tries rather than drops. Record EVERY album
+                # item, or the incremental high-water mark stalls at the head id.
+                for mid in ids:
+                    seen.add(SeenStore.key(ch.id, mid))
+                _dedup_register(content_plain, ch, ids, content_store)
+                _l2_register(topic_gate, ch, content_plain, sent_ids, sender, l2_verdict)
+                total += 1
+                if delay_seconds > 0:
+                    time.sleep(delay_seconds)
+        finally:
+            if media_only_ids:
+                # Downloaded binaries are re-fetchable next run; don't let them
+                # accumulate in the archive tree (same rule as the private path).
+                shutil.rmtree(media_dir, ignore_errors=True)
 
     # All private channels failing together is the signature of a broken shared
     # dependency (e.g. the kabi-tg-cli interpreter vanished) — not bad luck on one

@@ -24,12 +24,17 @@ LOG_DIR = DATA_DIR / "logs"
 # Bilibili digest dedup (raw_seen.SeenStore, keys "bilibili:<bvid>").
 BILIBILI_SEEN_PATH = DATA_DIR / "bilibili_seen.txt"
 
+# YouTube digest dedup (raw_seen.SeenStore, keys "youtube:<video_id>").
+YOUTUBE_SEEN_PATH = DATA_DIR / "youtube_seen.txt"
+
 # Dedup layer state (content_seen / topic_dedup / cross-producer copies).
 STATE_DIR = DATA_DIR / "state"
 CONTENT_SEEN_DB = STATE_DIR / "content_seen.db"
 DELIVERED_INDEX_DB = STATE_DIR / "delivered_index.db"
 XMONITOR_INDEX_COPY = STATE_DIR / "xmonitor_pushed_index.json"
 DEDUP_JOURNAL = STATE_DIR / "dedup_journal.jsonl"
+# message_id → canonical URL for subscription cards (Podcast 👍 handoff).
+MEDIA_SENT_LEDGER = STATE_DIR / "media_sent_ledger.jsonl"
 
 # Growth mining (个人成长 topic) artifacts.
 GROWTH_DIR = DATA_DIR / "growth"

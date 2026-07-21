@@ -11,6 +11,7 @@
 - **摘要复用全局 `models.vision`**（qwenproxy 封面理解），失败降级 `models.summary` 文本 LLM，再失败发无摘要卡片；不单设 `summary_model` 配置项。
 
 - **观看链接改为 inline-keyboard 按钮**（2026-07-02 用户反馈）：caption 里不再放 🔗 文字链接，改为卡片下方「▶️ 在 B 站观看」URL 按钮（`TelegramSender.send_photo/send_card` 新增 `button=(text, url)` 参数，send_card 只挂最后一个 chunk）。`link_enabled` 语义随之变为控制按钮开关。
+- **caption 去掉明文 URL**（2026-07-19）：更美观；观看仍走「▶️ 在 B 站观看」按钮；👍 handoff 仍靠 media_sent_ledger write-after-send。
 
 - **API 直连 transport（2026-07-02 晚，建议路径 step 1）**：为消除「每小时开关 Chrome 页面」的桌面依赖，新增 `transport: api`（默认）——medialist + view 两个接口实测零 cookie/零 WBI 签名（arc/search 会 -352 风控，故弃用），单 UP 一次调用拿齐全部字段，快 ~15 倍。关键约束：B站 httpx 请求 `trust_env=False`，绝不能走 guard 的 HTTPS_PROXY（海外出口 = 风控）。opencli 保留为 fallback。双端一致性已实测（相同 bvid 集合、字段一致）。
 - **顺带修正 8 小时时区偏差**：对比发现 opencli `publish_time` 字符串是 UTC，旧卡片展示的发布时间一直偏早 8 小时；api 模式用 unix `pubtime` 转本地时间，正确。

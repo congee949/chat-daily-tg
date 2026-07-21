@@ -1,10 +1,14 @@
 """Dump a (private) Telegram channel's messages + media for a date window.
 
 Run UNDER the kabi-tg-cli interpreter (it has telethon + the logged-in session):
-    <kabi-tg-cli-python> tg_media_dump.py <chat_id> <since> <until> <out_dir> <limit> [min_id]
+    <kabi-tg-cli-python> tg_media_dump.py <chat_id> <since> <until> <out_dir> <limit> [min_id] [only_ids]
 
 min_id>0 (incremental mode) fetches the OLDEST page of messages above that id,
 ascending, so the caller's high-water mark never advances past an unfetched gap.
+
+only_ids (optional 7th arg, comma-separated msg ids) fetches EXACTLY those
+messages, ignoring the date window entirely — the public-channel media-only path
+already knows the ids from messages.db and only needs their media.
 
 since/until are local-tz (Asia/Shanghai) ISO dates: [since, until).
 Emits a JSON manifest to stdout: a list (oldest→newest) of
@@ -54,6 +58,37 @@ def media_size(msg) -> int:
     return 0  # photos: unknown/small, allow
 
 
+async def entry_for(msg, out_dir: str) -> dict:
+    """Build one manifest entry, downloading the media when there is any.
+    `html` preserves text-link entities (news source URLs) and bold titles,
+    which the plain `text` loses. Rendering uses `html`; `text` stays for
+    empty/skip checks."""
+    try:
+        html = tg_html.unparse(msg.message or "", msg.entities or [])
+    except Exception:
+        html = msg.message or ""
+    entry = {
+        "msg_id": msg.id,
+        "date": msg.date.astimezone(LOCAL_TZ).isoformat(),
+        "text": (msg.message or ""),
+        "html": html,
+        "grouped_id": getattr(msg, "grouped_id", None),
+        "media": [],
+    }
+    kind = media_kind(msg)
+    if kind and media_size(msg) <= MAX_BYTES:
+        try:
+            path = await asyncio.wait_for(
+                msg.download_media(file=os.path.join(out_dir, str(msg.id))),
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+            if path:
+                entry["media"].append({"path": path, "kind": kind})
+        except Exception as e:  # TimeoutError or download error → skip this file
+            print(f"skip media msg {msg.id}: {type(e).__name__}: {e}", file=sys.stderr)
+    return entry
+
+
 async def main() -> int:
     chat_id = int(sys.argv[1])
     since = sys.argv[2]
@@ -61,14 +96,23 @@ async def main() -> int:
     out_dir = sys.argv[4]
     limit = int(sys.argv[5])
     min_id = int(sys.argv[6]) if len(sys.argv) > 6 else 0  # 0 = no high-water mark
+    only_ids = ([int(x) for x in sys.argv[7].split(",") if x.strip()]
+                if len(sys.argv) > 7 else [])
     os.makedirs(out_dir, exist_ok=True)
-
-    start = datetime.combine(date.fromisoformat(since), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
-    end = datetime.combine(date.fromisoformat(until), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
 
     out: list[dict] = []
     async with tc.connect() as client:
         entity = await client.get_entity(chat_id)
+        if only_ids:
+            # Targeted fetch: exactly these messages, in ascending id order.
+            msgs = await client.get_messages(entity, ids=only_ids)
+            for m in sorted((m for m in msgs if m is not None), key=lambda m: m.id):
+                out.append(await entry_for(m, out_dir))
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+
+        start = datetime.combine(date.fromisoformat(since), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
+        end = datetime.combine(date.fromisoformat(until), time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
         count = 0
         incremental = min_id > 0
         if incremental:
@@ -109,33 +153,7 @@ async def main() -> int:
             elif md < start:
                 break  # iter is newest→oldest; past the window
             count += 1
-            # `html` preserves text-link entities (news source URLs) and bold titles,
-            # which the plain `text` loses. Rendering uses `html`; `text` stays for
-            # empty/skip checks.
-            try:
-                html = tg_html.unparse(msg.message or "", msg.entities or [])
-            except Exception:
-                html = msg.message or ""
-            entry = {
-                "msg_id": msg.id,
-                "date": md.astimezone(LOCAL_TZ).isoformat(),
-                "text": (msg.message or ""),
-                "html": html,
-                "grouped_id": getattr(msg, "grouped_id", None),
-                "media": [],
-            }
-            kind = media_kind(msg)
-            if kind and media_size(msg) <= MAX_BYTES:
-                try:
-                    path = await asyncio.wait_for(
-                        msg.download_media(file=os.path.join(out_dir, str(msg.id))),
-                        timeout=DOWNLOAD_TIMEOUT,
-                    )
-                    if path:
-                        entry["media"].append({"path": path, "kind": kind})
-                except Exception as e:  # TimeoutError or download error → skip this file
-                    print(f"skip media msg {msg.id}: {type(e).__name__}: {e}", file=sys.stderr)
-            out.append(entry)
+            out.append(await entry_for(msg, out_dir))
     if not incremental:
         out.reverse()  # descending iteration → manifest must be oldest → newest
     print(json.dumps(out, ensure_ascii=False))

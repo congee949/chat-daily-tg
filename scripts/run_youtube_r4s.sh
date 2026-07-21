@@ -1,21 +1,22 @@
 #!/bin/sh
-# run_bilibili_r4s.sh — r4s (FriendlyWrt) cron wrapper for the Bilibili digest.
-# Sole scheduler for the digest (the Mac launchd path has been retired).
+# run_youtube_r4s.sh — r4s (FriendlyWrt) cron wrapper for the YouTube digest.
+# Sole scheduler for the digest (never ran on Mac).
 #
 # Deploy: git archive → /root/chat-daily-tg (this script rides along).
 #
-# Cron (scheme B — random 20–30 min via due_gate + */5 probe):
-#   */5 * * * * /bin/sh /root/chat-daily-tg/scripts/due_gate.sh check bilibili \
-#     && /root/bin/hb-wrap bilibili -- /bin/sh /root/chat-daily-tg/scripts/run_bilibili_r4s.sh
+# Cron (scheme B — random 10–15 min via due_gate + */5 probe):
+#   */5 * * * * /bin/sh /root/chat-daily-tg/scripts/due_gate.sh check youtube \
+#     && /root/bin/hb-wrap youtube -- /bin/sh /root/chat-daily-tg/scripts/run_youtube_r4s.sh
 # due_gate MUST sit before hb-wrap so not-due ticks don't fake-green heartbeats.
 # Next interval is scheduled only after SUCCESS (failures leave gate open → retry).
 #
 # Environment notes (musl/OpenWrt specifics):
 # - TZ=CST-8: POSIX form — named zones (Asia/Shanghai) silently fall back to
 #   UTC without an IANA db, which would skew card publish times by 8h.
-# - Egress: TG/Gemini ride the bwg tinyproxy over tailscale
-#   (100.87.113.14:8888). Bilibili calls ignore it (trust_env=False, direct
-#   China exit — the whole reason fetch runs on r4s and not bwg).
+# - Egress: EVERYTHING here (YouTube RSS / googleapis / i.ytimg.com covers /
+#   TG push) rides the bwg tinyproxy over tailscale (100.87.113.14:8888) —
+#   the REVERSE of the Bilibili wrapper, where fetch must go direct. No
+#   NO_PROXY carve-out is needed beyond localhost.
 # - flock: cron has no launchd-style same-label suppression; a slow round must
 #   not overlap the next one (duplicate cards via double SeenStore read).
 set -u
@@ -23,10 +24,10 @@ set -u
 PROJECT="/root/chat-daily-tg"
 DATA_DIR="/root/chat-daily"
 PROXY="http://100.87.113.14:8888"
-LOCK="/tmp/chat-daily-bilibili.lock"
-LOG="$DATA_DIR/logs/guard-bilibili-$(TZ=CST-8 date +%F).log"
-DUE_MIN_S=1200
-DUE_MAX_S=1800
+LOCK="/tmp/chat-daily-youtube.lock"
+LOG="$DATA_DIR/logs/guard-youtube-$(TZ=CST-8 date +%F).log"
+DUE_MIN_S=600
+DUE_MAX_S=900
 DUE_GATE="$PROJECT/scripts/due_gate.sh"
 mkdir -p "$DATA_DIR/logs"
 
@@ -53,7 +54,7 @@ except Exception:
     "https://api.telegram.org/bot${tok}/sendMessage" \
     --data-urlencode "chat_id=${chat}" \
     ${thread:+--data-urlencode "message_thread_id=${thread}"} \
-    --data-urlencode "text=⚠️ chat-daily-tg B站守护(r4s): $1" >/dev/null 2>&1
+    --data-urlencode "text=⚠️ chat-daily-tg YouTube守护(r4s): $1" >/dev/null 2>&1
   echo "$(date '+%F %T') ALERT: $1" >> "$LOG"
 }
 
@@ -64,17 +65,17 @@ if ! flock -n 9; then
 fi
 
 cd "$PROJECT" || { alert "项目目录缺失 $PROJECT"; exit 1; }
-python3 run_daily.py --bilibili-only
+python3 run_daily.py --youtube-only
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  alert "B站 digest 失败 exit=$rc，详见 $DATA_DIR/logs/bilibili-$(date +%F).log"
+  alert "YouTube digest 失败 exit=$rc，详见 $DATA_DIR/logs/youtube-$(date +%F).log"
   # Leave due gate open so next */5 retries; do not schedule.
   exit "$rc"
 fi
 
-# Success only: roll next random interval (20–30 min).
+# Success only: roll next random interval (10–15 min).
 if [ -x "$DUE_GATE" ] || [ -f "$DUE_GATE" ]; then
-  /bin/sh "$DUE_GATE" schedule bilibili "$DUE_MIN_S" "$DUE_MAX_S" || \
-    echo "$(date '+%F %T') WARN: due_gate schedule bilibili failed" >> "$LOG"
+  /bin/sh "$DUE_GATE" schedule youtube "$DUE_MIN_S" "$DUE_MAX_S" || \
+    echo "$(date '+%F %T') WARN: due_gate schedule youtube failed" >> "$LOG"
 fi
 exit 0

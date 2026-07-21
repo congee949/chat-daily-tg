@@ -6,10 +6,15 @@
 # vanishes (uv prune/upgrade), launchd exits 127 before run_daily can log or
 # alert, and the forwarder dies unnoticed. This wrapper reuses the daily guard
 # (venv preflight + macOS/Telegram alert) so a broken forwarder is visible
-# (review finding #16). No jitter / no --skip-if-done: the forwarder is
-# incremental and idempotent via its per-channel high-water mark.
+# (review finding #16).
 #
-# Overridable for testing: CHAT_DAILY_PY, CHAT_DAILY_DATA_DIR, CHAT_DAILY_ALERT_PROXY.
+# After calendar launchd fire, guard_jitter_sleep waits a random 0–15 min so
+# channel pushes are not wall-clock aligned (de-fingerprinting). Opt out with
+# CHAT_DAILY_NO_JITTER=1 for manual catch-up / tests. No --skip-if-done: the
+# forwarder is incremental and idempotent via its per-channel high-water mark.
+#
+# Overridable for testing: CHAT_DAILY_PY, CHAT_DAILY_DATA_DIR, CHAT_DAILY_ALERT_PROXY,
+# CHAT_DAILY_NO_JITTER, CHAT_DAILY_JITTER_MIN_S, CHAT_DAILY_JITTER_MAX_S.
 set -uo pipefail
 
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,6 +35,9 @@ fi
 
 guard_setup_env
 
+# De-align from wall clock (0–15 min default); then caffeinate only the Python work.
+# Parent sleep under launchd is fine while AC + disablesleep holds the machine awake.
+guard_jitter_sleep
 /usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --channels-only
 rc=$?
 if [ "$rc" -ne 0 ]; then

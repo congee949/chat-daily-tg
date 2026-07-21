@@ -4,18 +4,24 @@
 # 先看差异：python scripts/schedule.py list       （对比 yaml / 已装 plist）
 #           python scripts/schedule.py apply -n   （dry-run，只打印不写）
 #
-# 时间一律本地时区（CST-8）。r4s 的 B站 digest（每小时 :30）不在此表——它跑在
-# r4s cron 上、独立于 Mac，改它要 ssh 到 r4s 改 crontab。
+# 时间一律本地时区（CST-8）。r4s 的 B站 / YouTube digest 不在此表——它们跑在
+# r4s cron 上（due_gate 随机间隔：B站 20–30min / YouTube 10–15min，*/5 探测），
+# 独立于 Mac，改它要 ssh 到 r4s 改 crontab。
 
-# 日报总结。trigger 是 launchd 唤起时刻；deadline 是 --wait-for-wake 的兜底：
-# 到点还没等到 Watch 睡眠同步就强制发（注入为 plist 环境变量，wrapper 读取）。
+# 日报总结。trigger 是 launchd 唤起时刻。
+# deadline 曾是 --wait-for-wake 兜底，现策略为「无睡眠数据立刻发」；字段仍注入
+# plist 以保持 schedule.py / 旧 wrapper 兼容，逻辑层不再等待。
 agent:
   trigger: "07:05"
   deadline: "13:00"
 
 # 资讯栏频道增量转发。整点触发，可写 "HH:MM" 或纯小时数字。
+# 实际发送 = 墙钟触发 + wrapper 内 0–15min 随机 jitter（guard_jitter_sleep），
+# 避免与整点墙钟对齐；CHAT_DAILY_NO_JITTER=1 可跳过。
+# 09:00 补档缩短 06→10 的 4h 空窗（早间资讯高峰）。
 channels:
   - "06:00"
+  - "09:00"
   - "10:00"
   - "12:00"
   - "14:00"

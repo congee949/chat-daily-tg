@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
+import re
 from typing import Any
 from typing import Literal
 import yaml
@@ -187,10 +188,63 @@ class BilibiliSource(BaseModel):
     digest: BilibiliDigest = Field(default_factory=BilibiliDigest)
 
 
+class YoutubeChannel(BaseModel):
+    """One whitelisted channel. Matching is by channel_id ONLY — handles and
+    display names are both mutable (same iron rule as Bilibili uid), so `name`
+    is a human-readable annotation, never a match key."""
+    channel_id: str
+    name: str | None = None
+    # 话题路由预留：非科技簇（英语学习、运动康复等）以后可按频道改发别的
+    # forum topic；None = 跟随 digest.topic。当前白名单全部走默认。
+    topic: str | None = None
+
+    @field_validator("channel_id")
+    @classmethod
+    def channel_id_is_uc(cls, v: str) -> str:
+        if not re.fullmatch(r"UC[0-9A-Za-z_-]{22}", v):
+            raise ValueError(f"channel_id must be a 24-char UC… id, got {v!r}")
+        return v
+
+
+class YoutubeFetch(BaseModel):
+    whitelist: list[YoutubeChannel] = Field(default_factory=list)
+    blacklist: list[YoutubeChannel] = Field(default_factory=list)
+    max_per_digest: int = 30
+    # Same wide-window rationale as Bilibili: video_id dedup makes overlap free,
+    # a failed/missed round is caught up by the next one.
+    lookback_hours: int = 48
+    # RSS carries no duration; the Data API enrichment fills it and anything at
+    # or under this is dropped as a Short (Shorts cap is 3min since 2024-10).
+    # 长视频 digest 的定位所在——调低前想清楚要不要让短片进推送。
+    min_duration_seconds: int = 180
+    timeout_seconds: float = 30.0
+
+
+class YoutubeDigest(BaseModel):
+    topic: str = "youtube"           # forum-topic key in ~/qwenproxy/.tg-notify-targets.json
+    summary_enabled: bool = True
+    cover_enabled: bool = True
+    link_enabled: bool = True        # 在 YouTube 观看 inline-keyboard button under each card
+    card_delay_seconds: float = 1.0  # pause between cards (TG rate limits)
+
+
+class YoutubeSource(BaseModel):
+    """YouTube subscription digest. Transport is per-channel RSS (no login, no
+    quota) + one YouTube Data API v3 videos.list call for durations — see
+    youtube_fetcher. Network contract is the OPPOSITE of bilibili: every
+    request must ride the wrapper's HTTP(S)_PROXY (bwg tinyproxy on r4s)."""
+    enabled: bool = False
+    api_key_env: str = "GOOGLE_API_KEY"   # YouTube Data API v3 (duration/views)
+    fetch: YoutubeFetch = Field(default_factory=YoutubeFetch)
+    digest: YoutubeDigest = Field(default_factory=YoutubeDigest)
+
+
+
 class Sources(BaseModel):
     wechat: WechatSource = Field(default_factory=WechatSource)
     telegram: TelegramSource = Field(default_factory=TelegramSource)
     bilibili: BilibiliSource = Field(default_factory=BilibiliSource)
+    youtube: YoutubeSource = Field(default_factory=YoutubeSource)
 
 
 class Retry(BaseModel):
@@ -304,8 +358,9 @@ class Config(BaseModel):
             self.sources.telegram.chats or self.sources.telegram.raw_channels
         )
         has_bilibili = self.sources.bilibili.enabled and bool(self.sources.bilibili.fetch.whitelist)
-        if not has_wechat and not has_telegram and not has_bilibili:
-            raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, sources.telegram.raw_channels, or sources.bilibili")
+        has_youtube = self.sources.youtube.enabled and bool(self.sources.youtube.fetch.whitelist)
+        if not has_wechat and not has_telegram and not has_bilibili and not has_youtube:
+            raise ValueError("configure at least one source: sources.wechat.groups, sources.telegram.chats, sources.telegram.raw_channels, sources.bilibili, or sources.youtube")
 
         # L2 topic dedup couples to facts outside its own section (a top-level
         # judge alias + the embedding model). Runtime failure there degrades to

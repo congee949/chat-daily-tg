@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs the launchd agents — the daily report (com.chat-daily-tg.agent) and
-# the 2-hourly channel forwarder (com.chat-daily-tg.channels). All plists call
-# their guarded wrapper (venv preflight + macOS/Telegram alert), NOT python directly.
+# Installs the launchd agents — daily report (com.chat-daily-tg.agent),
+# channel forwarder (com.chat-daily-tg.channels), growth + growth-weekly, and
+# ledger-sync (r4s → Mac media_sent_ledger pull). All plists call their guarded
+# wrapper, NOT python / rsync directly.
 #
 # Secrets (DEEPSEEK_API_KEY / TG_BOT_TOKEN / TG_CHAT_ID / GOOGLE_API_KEY / VISION_API_KEY)
 # live in ~/chat-daily/.env and are loaded by run_daily at runtime — never baked into
@@ -53,8 +54,11 @@ install_label "com.chat-daily-tg.agent"
 install_label "com.chat-daily-tg.channels"
 install_label "com.chat-daily-tg.growth"
 install_label "com.chat-daily-tg.growth-weekly"
-# B站 digest 只在 r4s cron 上跑（scripts/run_bilibili_r4s.sh，经 bwg tinyproxy
-# 出口）；Mac 侧 launchd 已彻底移除，此处不再安装（防双跑重复推送）。
+install_label "com.chat-daily-tg.ledger-sync"
+# B站 / YouTube digest 只在 r4s cron 上跑（run_bilibili_r4s.sh / run_youtube_r4s.sh，
+# 经 bwg tinyproxy 出口）；Mac 侧 launchd 已彻底移除，此处不再安装（防双跑重复推送）。
+# 订阅卡 write-after-send 的 media_sent_ledger 仍在 r4s 写出；Mac 通过 ledger-sync
+# 每分钟 rsync 拉取，供本机 Podcast4bot 👍 交接使用。
 
 # grep with || true so missing match doesn't abort the script
 launchctl list | grep chat-daily-tg || true

@@ -428,45 +428,37 @@ def wait_for_wake_signal(
     deadline: str = "13:00",
     poll_seconds: float = 300,
 ) -> bool:
-    """Block until wake_day's overnight sleep episode syncs in, or the deadline passes.
+    """Probe once for wake_day's overnight sleep; never block the digest on missing data.
 
-    Gates the morning digest on the user actually being awake: the Watch sleep
-    episode reaching iCloud (phone unlocked after waking → Health Auto Export
-    syncs) IS the wake signal. Returns True once the episode is readable, False
-    when the local-time deadline forces the fallback — the caller delivers
-    either way (rather deliver than drop), the briefing just notes the missing
-    sync. A wake_day whose deadline already passed (backfill, post-noon Mac
-    wake-up) gets exactly one probe and no waiting.
+    Rule (2026-07-21): sleep is optional enrichment, not a gate.
+    - Episode already synced → return True (health card can use real wake time).
+    - No usable sleep data (unsynced / unreadable / only a pre-wake nap) → return
+      False immediately and let the caller deliver the group summary now.
+      Previously this spun until ``deadline`` (default 13:00); that delayed the
+      digest when Health Auto Export lagged or iCloud decode failed.
+
+    ``deadline`` / ``poll_seconds`` are kept for call-site compatibility but are
+    no longer used to wait — a single probe always decides.
     """
+    _ = (deadline, poll_seconds)  # API/launchd compat; waiting removed by policy
     if not cfg.enabled:
         return False
-    tz = ZoneInfo(timezone_name)
-    hour, minute = (int(part) for part in deadline.split(":", 1))
-    deadline_at = datetime.combine(wake_day, time(hour, minute), tzinfo=tz)
-    log.info("waiting for wake signal: poll every %.0fs, deadline %s %s",
-             poll_seconds, wake_day, deadline)
-    polls = 1
-    while True:
-        try:
-            # Fresh reader per poll — the run cache pins "file missing", so a
-            # reused instance would never see the iCloud sync land.
-            episode = HealthExportReader(cfg.export_dir, timezone_name).sleep_ending(wake_day)
-        except Exception as exc:
-            episode = None
-            log.warning("wake-signal poll failed (non-fatal): %s", exc)
-        # Only an episode that ENDED on wake_day counts. sleep_ending() returns
-        # the LONGEST cluster in its 18:00→14:00 window, so a ≥2h evening nap
-        # that synced last night would otherwise open the gate at the first poll
-        # while the overnight sleep is still unsynced.
-        if episode and episode.end.date() >= wake_day:
-            log.info("wake signal: sleep ended %s (poll #%d)", f"{episode.end:%H:%M}", polls)
-            return True
-        remaining = (deadline_at - _wake_now(tz)).total_seconds()
-        if remaining <= 0:
-            log.info("no wake signal by %s local — delivering without it", deadline)
-            return False
-        polls += 1
-        _sleep(min(poll_seconds, remaining))
+    log.info("wake-signal probe (no wait if sleep missing): wake_day=%s", wake_day)
+    try:
+        # Fresh reader — the run cache pins "file missing"; keep the same shape
+        # as the old poll loop in case this is ever re-entered within a process.
+        episode = HealthExportReader(cfg.export_dir, timezone_name).sleep_ending(wake_day)
+    except Exception as exc:
+        log.warning("wake-signal probe failed (non-fatal, delivering now): %s", exc)
+        return False
+    # Only an episode that ENDED on wake_day counts. sleep_ending() returns the
+    # LONGEST cluster in its 18:00→14:00 window, so a ≥2h evening nap that
+    # synced last night must not count as this morning's wake.
+    if episode and episode.end.date() >= wake_day:
+        log.info("wake signal: sleep ended %s", f"{episode.end:%H:%M}")
+        return True
+    log.info("no sleep data for %s — delivering summary without waiting", wake_day)
+    return False
 
 
 def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: str) -> HealthReport | None:

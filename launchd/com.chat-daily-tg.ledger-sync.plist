@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>REPLACE_WITH_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.chat-daily-tg.ledger-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<!-- Pull r4s media_sent_ledger.jsonl every minute so Podcast4bot on Mac
+		     can resolve 👍 reactions on subscription cards written on r4s. -->
+		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_ledger_sync_guarded.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>StandardErrorPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/ledger-sync-stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/ledger-sync-stdout.log</string>
+	<key>WorkingDirectory</key>
+	<string>REPLACE_WITH_PROJECT_DIR</string>
+</dict>
+</plist>

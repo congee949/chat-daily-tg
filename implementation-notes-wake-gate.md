@@ -1,14 +1,16 @@
-# Implementation Notes — 日报 wake-gate（2026-07-17）
+# Implementation Notes — 日报 wake-gate（2026-07-17，2026-07-21 修订）
 
-需求：取消 9:00/13:00 catch-up；7:05 起每 5 分钟轮询"起床内容"，起床后健康卡与群聊总结一起投递；等不到则先把群聊总结推出去。
+需求（初版）：取消 9:00/13:00 catch-up；7:05 起等起床信号，起床后健康卡与群聊总结一起投递；等不到则先把群聊总结推出去。
+
+**2026-07-21 修订**：用户确认「没有睡眠数据就先发总结」。Health Auto Export / iCloud 滞后或 `Resource deadlock avoided` 解码失败时，原 5 分钟轮询到 13:00 会把整份群聊日报拖到中午。策略改为 **单次探测、缺数据立刻投递**。
 
 ## Design Decisions
 
-- **起床信号 = Watch 今晨睡眠段同步到 iCloud**（`sleep_ending(wake_day)` 非空且 `end.date() >= wake_day`）。用户确认选此方案；复用现有 `wake_sleep` 语义，健康卡"起床：HH:MM"与开闸判据同源。
-- **先等信号、再跑全管线**（导出→总结→推送整体后置）。用户要求"能一起发就一起发"；总结在开闸后才跑，健康卡必然带上真实起床时刻，一次投递。代价是起床后 ~5-10 分钟才送达。
-- **13:00 兜底强制投递**（`--wake-deadline`，用户选定）。到点未见信号直接跑管线，健康卡回落为"今晨睡眠数据尚未同步"——即"先把群聊总结推出去"。
-- **轮询放 `wait_for_wake_signal()`（health_briefing.py）**，run_daily 只在 `--wait-for-wake` 时调用且 try/except 包裹：等待逻辑任何异常（含 deadline 格式错）都降级为立即执行，不阻塞投递。
-- **每次轮询新建 `HealthExportReader`**：其 run cache 会把 "file missing" 钉死，复用实例永远看不到 iCloud 落盘。
+- **起床信号 = Watch 今晨睡眠段同步到 iCloud**（`sleep_ending(wake_day)` 非空且 `end.date() >= wake_day`）。复用 `wake_sleep` 语义；有数据时健康卡带真实起床时刻。
+- **无睡眠数据 → 立刻跑全管线**（2026-07-21）。睡眠是可选 enrichment，不是门闩。单次 probe 后 `False` 即开跑，不再 spin 到 `--wake-deadline`。
+- **`--wake-deadline` / `poll_seconds` 保留签名与 launchd 环境变量兼容**，逻辑层不再等待。
+- **`wait_for_wake_signal()` 仍 try/except 包裹**：reader 崩溃降级为立即执行。
+- **每次 probe 新建 `HealthExportReader`**：保留原 shape，避免 cache 钉死 file-missing（若将来再加短等待）。
 
 ## Deviations
 

@@ -84,12 +84,12 @@ B站 digest 已迁至 r4s cron，不在 Mac 上跑。
 
 | label | 时间 | 职责 |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 7:05 触发，`--wait-for-wake` 等 Watch 睡眠同步（5 分钟轮询，13:00 兜底强制发） | 日报总结（`--skip-if-done` 防重复交付） |
-| `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | 频道增量转发（`--channels-only`） |
+| `com.chat-daily-tg.agent` | 7:05 触发，`--wait-for-wake` 单次探测 Watch 睡眠；无睡眠数据则立刻发总结 | 日报总结（`--skip-if-done` 防重复交付） |
+| `com.chat-daily-tg.channels` | 6,9,10,12,14,16,18,20,22（+0–15min jitter） | 频道增量转发（`--channels-only`） |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | 成长内容挖掘 |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | 周报 + rubric 合并 |
 
-B站 digest 在 r4s cron 每小时 :30，不在此表。
+B站 / YouTube digest 在 r4s：B站 20–30min 随机、YouTube 10–15min 随机（due_gate + */5 cron），不在此表。
 
 睡眠防护三层：`caffeinate -is`（wrapper 内，防 idle）+ `com.chat-daily-tg.disablesleep` **root LaunchDaemon**（插电时合盖也不睡；需 sudo，故不在 `install-launchd.sh` 里）+ wake-gate 循环/launchd 触发合并（睡过的 7:05 唤醒后补发；等待中冻结的循环唤醒后继续投递——原 9:00/13:00 catch-up 已于 2026-07-17 移除）。**剩余盲区只有「电池 + 合盖」。**
 
@@ -122,7 +122,7 @@ python scripts/schedule.py apply         # 改 schedule.yaml 后一键重装+rel
 （或运行状态拿不准）就跳过它的 unload/load 并告警、退出码非 0——因为 `launchctl
 unload` 会 SIGTERM 掉在飞行中的 run（那次杀了正跑到 vision 的日报）；确认要强杀
 才加 `--force`。已装 plist 与将写入内容逐字节相同的 label 也会跳过（幂等，不重载）。
-r4s 的 B站 digest（cron 每小时 :30）不在此工具范围，改它要 ssh 到 r4s 改 crontab。
+r4s 的 B站 / YouTube digest（due_gate 随机间隔 + */5 cron 探测）不在此工具范围，改它要 ssh 到 r4s 改 crontab。
 
 `deploy.sh` 现已带 `require_clean_tree` 守卫、detached-HEAD 检查和 `uv sync`（2026-06-29 修复），可以正常使用。
 

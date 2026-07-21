@@ -1,31 +1,35 @@
 from datetime import datetime
+import json
 from pathlib import Path
 
-from chat_daily_tg.bilibili_digest import card_caption, push_digest
-from chat_daily_tg.bilibili_fetcher import BiliVideo
 from chat_daily_tg.config import Config
 from chat_daily_tg.raw_seen import SeenStore
+from chat_daily_tg.youtube_digest import card_caption, push_digest
+from chat_daily_tg.youtube_fetcher import YtVideo
+
+CH = "UCaaaaaaaaaaaaaaaaaaaaaa"
 
 
-def _video(bvid="BV1testtest1", **kw):
+def _video(video_id="testvid0001", **kw):
     defaults = dict(
-        bvid=bvid, title="标题 <b>带标签</b>", author="UP甲", uid=111,
-        url=f"https://www.bilibili.com/video/{bvid}",
-        cover="http://cover/x.jpg", duration="8m4s",
+        video_id=video_id, title="标题 <b>带标签</b>", author="频道甲", channel_id=CH,
+        url=f"https://www.youtube.com/watch?v={video_id}",
+        cover=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        duration="12m40s", duration_seconds=760,
         publish_time=datetime(2026, 7, 2, 8, 0), description="简介", view=45615,
     )
     defaults.update(kw)
-    return BiliVideo(**defaults)
+    return YtVideo(**defaults)
 
 
 def _cfg(**digest_overrides) -> Config:
-    digest = {"topic": "bilibili", "summary_enabled": True, "card_delay_seconds": 0.0}
+    digest = {"topic": "youtube", "summary_enabled": True, "card_delay_seconds": 0.0}
     digest.update(digest_overrides)
     return Config(
         telegram={"bot_token_env": "TG_BOT_TOKEN", "chat_id_env": "TG_CHAT_ID"},
         llm={"endpoint": "http://x", "model": "m", "api_key_env": "K"},
-        sources={"bilibili": {"enabled": True, "digest": digest,
-                              "fetch": {"whitelist": [{"uid": 111}]}}},
+        sources={"youtube": {"enabled": True, "digest": digest,
+                             "fetch": {"whitelist": [{"channel_id": CH}]}}},
     )
 
 
@@ -58,43 +62,45 @@ class FakeSender:
 def test_card_caption_escapes_html_and_includes_fields():
     cap = card_caption(_video(), "一句话摘要")
     assert "<b>标题 &lt;b&gt;带标签&lt;/b&gt;</b>" in cap
-    # meta line is now just UP主 · 时长 — publish time and view count were dropped
-    assert "UP甲" in cap and "8m4s" in cap and "07-02 08:00" not in cap and "45,615播放" not in cap
+    assert "频道甲" in cap and "12m40s" in cap
     assert "📝 一句话摘要" in cap
     # URL lives on the watch button + ledger only — not in caption text
-    assert "https://www.bilibili.com/video/" not in cap
+    assert "https://www.youtube.com/watch?v=" not in cap
     assert "<a href" not in cap and "🔗" not in cap
 
 
-def test_card_caption_omits_summary_when_absent():
-    cap = card_caption(_video(duration=None, publish_time=None, view=None), None)
+def test_card_caption_omits_summary_and_duration_when_absent():
+    cap = card_caption(_video(duration=None, duration_seconds=None,
+                              publish_time=None, view=None), None)
     assert "📝" not in cap and "<a href" not in cap
-    assert "https://www.bilibili.com/video/" not in cap
+    assert "https://www.youtube.com/watch?v=" not in cap
 
 
 # --- push_digest -------------------------------------------------------------
 
 def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: dest)
     sender = FakeSender()
     seen = SeenStore(tmp_path / "seen.txt")
-    videos = [_video("BV1newest001", publish_time=datetime(2026, 7, 2, 10)),
-              _video("BV1oldest001", publish_time=datetime(2026, 7, 1, 10))]
+    videos = [_video("newestvid01", publish_time=datetime(2026, 7, 2, 10)),
+              _video("oldestvid01", publish_time=datetime(2026, 7, 1, 10))]
     n = push_digest(videos, sender=sender, seen=seen, cfg=_cfg(),
                     summarizer=lambda v, p: "摘要", workdir=tmp_path)
     assert n == 2
-    # order + watch button both live in the button URL now (caption carries no link)
+    # 直链按钮：无 B 站那种跳转页
     sent_buttons = [b for _, _, _, b in sender.photos]
     assert sent_buttons == [
-        ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1oldest001"),
-        ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1newest001"),
+        ("▶️ 在 YouTube 观看", "https://www.youtube.com/watch?v=oldestvid01"),
+        ("▶️ 在 YouTube 观看", "https://www.youtube.com/watch?v=newestvid01"),
     ]
-    assert "bilibili:BV1newest001" in seen and "bilibili:BV1oldest001" in seen
+    assert "youtube:newestvid01" in seen and "youtube:oldestvid01" in seen
+    # caption does not print URL (watch button + ledger only)
+    assert "https://www.youtube.com/watch?v=" not in sender.photos[0][1]
 
 
 def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path):
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: dest)
     sender = FakeSender(photo_fails=True)
     seen = SeenStore(tmp_path / "seen.txt")
@@ -102,13 +108,14 @@ def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path
                     summarizer=None, workdir=tmp_path)
     assert n == 1 and len(sender.cards) == 1
     text, link, button = sender.cards[0]
-    assert link == "https://www.bilibili.com/video/BV1testtest1"
-    assert button == ("▶️ 在 B 站观看", "https://kanban.congeelife.top:8443/b/BV1testtest1")
-    assert "bilibili:BV1testtest1" in seen
+    assert link == "https://www.youtube.com/watch?v=testvid0001"
+    assert button == ("▶️ 在 YouTube 观看", "https://www.youtube.com/watch?v=testvid0001")
+    assert "https://www.youtube.com/watch?v=testvid0001" not in text
+    assert "youtube:testvid0001" in seen
 
 
 def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
@@ -117,7 +124,7 @@ def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
 
 
 def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path):
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: None)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
@@ -126,7 +133,7 @@ def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path
 
 
 def test_push_digest_total_failure_leaves_unseen_for_retry(monkeypatch, tmp_path):
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: None)
 
     class DeadSender(FakeSender):
@@ -137,14 +144,14 @@ def test_push_digest_total_failure_leaves_unseen_for_retry(monkeypatch, tmp_path
     n = push_digest([_video()], sender=DeadSender(), seen=seen, cfg=_cfg(),
                     summarizer=None, workdir=tmp_path)
     assert n == 0
-    assert "bilibili:BV1testtest1" not in seen  # next run retries it
+    assert "youtube:testvid0001" not in seen  # next run retries it
 
 
 def test_push_digest_no_push_does_not_mark_seen(tmp_path):
     seen = SeenStore(tmp_path / "seen.txt")
     n = push_digest([_video()], sender=None, seen=seen, cfg=_cfg(),
                     summarizer=None, workdir=tmp_path, no_push=True)
-    assert n == 0 and "bilibili:BV1testtest1" not in seen
+    assert n == 0 and "youtube:testvid0001" not in seen
 
 
 def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
@@ -152,28 +159,25 @@ def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
     sl.clear_cache()
     ledger = tmp_path / "media_sent_ledger.jsonl"
     monkeypatch.setattr(sl, "MEDIA_SENT_LEDGER", ledger)
-    # append_message_ids imports path default at call time via module path param - patch paths too
     monkeypatch.setattr("chat_daily_tg.sent_ledger.MEDIA_SENT_LEDGER", ledger)
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
                         lambda url, dest: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(), summarizer=None, workdir=tmp_path)
     assert n == 1
-    # default path is patched module constant used when path=None
     from chat_daily_tg.sent_ledger import lookup
     hit = lookup(sender.chat_id, 100, path=ledger)
-    # append uses MEDIA_SENT_LEDGER when path None - we patched it
-    assert hit is not None or ledger.exists()
     if not hit:
-        # read file directly
         rows = ledger.read_text(encoding="utf-8").strip().splitlines()
         assert len(rows) == 1
-        import json
         row = json.loads(rows[0])
-        assert row["url"].endswith("BV1testtest1")
-        assert row["producer"] == "bilibili"
+        assert row["url"] == "https://www.youtube.com/watch?v=testvid0001"
+        assert row["producer"] == "youtube"
         assert row["message_id"] == 100
         assert row["thread_id"] == 486
+        assert row["id"] == "youtube:testvid0001"
     else:
-        assert hit["url"].endswith("BV1testtest1")
+        assert hit["url"] == "https://www.youtube.com/watch?v=testvid0001"
+        assert hit["producer"] == "youtube"
+        assert hit["id"] == "youtube:testvid0001"

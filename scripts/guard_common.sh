@@ -73,3 +73,43 @@ guard_heartbeat() {
     "${HB_CENTER:-http://100.87.113.14:8900}/hb/$1?status=${st}&exit=$2" \
     --data-urlencode "error=${err}" >/dev/null 2>&1 || true
 }
+
+# Random delay after a calendar launchd fire so pushes are not wall-clock aligned.
+# Opt-in per wrapper (agent must NOT call this). Env:
+#   CHAT_DAILY_NO_JITTER=1          — skip entirely (manual catch-up / tests)
+#   CHAT_DAILY_JITTER_MIN_S         — inclusive lower bound (default 0)
+#   CHAT_DAILY_JITTER_MAX_S         — inclusive upper bound (default 900 = 15min)
+# Uses awk srand for inclusive [min,max] (same approach as due_gate on r4s).
+# Requires caller to have set LOG (append-only); no-op logging if LOG unset.
+guard_jitter_sleep() {
+  if [ "${CHAT_DAILY_NO_JITTER:-}" = "1" ]; then
+    echo "$(date '+%F %T') jitter skipped (CHAT_DAILY_NO_JITTER=1)" >> "${LOG:-/dev/null}" 2>/dev/null || true
+    return 0
+  fi
+
+  local min_s max_s delay
+  min_s="${CHAT_DAILY_JITTER_MIN_S:-0}"
+  max_s="${CHAT_DAILY_JITTER_MAX_S:-900}"
+
+  # Non-negative integers only; fall back to defaults on garbage.
+  case "$min_s" in ''|*[!0-9]*) min_s=0 ;; esac
+  case "$max_s" in ''|*[!0-9]*) max_s=900 ;; esac
+  if [ "$min_s" -gt "$max_s" ]; then
+    echo "$(date '+%F %T') jitter invalid range min=$min_s max=$max_s; skipping" \
+      >> "${LOG:-/dev/null}" 2>/dev/null || true
+    return 0
+  fi
+
+  delay=$(awk -v min="$min_s" -v max="$max_s" 'BEGIN {
+    srand()
+    print int(min + rand() * (max - min + 1))
+  }')
+  case "$delay" in ''|*[!0-9]*) delay=0 ;; esac
+
+  echo "$(date '+%F %T') jitter delay=${delay}s range=[${min_s},${max_s}]" \
+    >> "${LOG:-/dev/null}" 2>/dev/null || true
+
+  if [ "$delay" -gt 0 ]; then
+    sleep "$delay"
+  fi
+}

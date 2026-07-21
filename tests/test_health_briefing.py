@@ -320,65 +320,26 @@ def test_wait_for_wake_signal_present_returns_without_sleeping(monkeypatch):
     ) is True
 
 
-def test_wait_for_wake_past_deadline_probes_once_no_wait(monkeypatch):
+def test_wait_for_wake_missing_sleep_delivers_immediately(monkeypatch):
+    """No usable overnight episode → deliver summary now; never spin to deadline."""
     import chat_daily_tg.health_briefing as hb
 
     tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
     monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([None]))
-    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 15, 0, tzinfo=tz))
+    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 7, 5, tzinfo=tz))
     monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
     assert hb.wait_for_wake_signal(
         HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
     ) is False
 
 
-def test_wait_for_wake_polls_until_sync_lands(monkeypatch):
-    import chat_daily_tg.health_briefing as hb
-
-    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
-    episode = _episode_ending(datetime(2026, 7, 17, 9, 12, tzinfo=tz))
-    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([None, None, episode]))
-    nows = iter([
-        datetime(2026, 7, 17, 7, 5, tzinfo=tz),
-        datetime(2026, 7, 17, 7, 10, tzinfo=tz),
-    ])
-    monkeypatch.setattr(hb, "_wake_now", lambda _tz: next(nows))
-    slept: list[float] = []
-    monkeypatch.setattr(hb, "_sleep", slept.append)
-    assert hb.wait_for_wake_signal(
-        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
-    ) is True
-    assert slept == [300, 300]
-
-
-def test_wait_for_wake_deadline_fallback_clamps_last_sleep(monkeypatch):
-    import chat_daily_tg.health_briefing as hb
-
-    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
-    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([]))  # never syncs
-    nows = iter([
-        datetime(2026, 7, 17, 12, 56, tzinfo=tz),
-        datetime(2026, 7, 17, 13, 1, tzinfo=tz),
-    ])
-    monkeypatch.setattr(hb, "_wake_now", lambda _tz: next(nows))
-    slept: list[float] = []
-    monkeypatch.setattr(hb, "_sleep", slept.append)
-    assert hb.wait_for_wake_signal(
-        HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
-    ) is False
-    assert slept == [240]  # min(poll_seconds, seconds till 13:00)
-
-
 def test_wait_for_wake_reader_crash_is_nonfatal(monkeypatch):
     import chat_daily_tg.health_briefing as hb
-
-    tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
 
     def crash(*args, **kwargs):
         raise OSError("icloud hiccup")
 
     monkeypatch.setattr(hb, "HealthExportReader", crash)
-    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 14, 0, tzinfo=tz))
     monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
     assert hb.wait_for_wake_signal(
         HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
@@ -386,18 +347,14 @@ def test_wait_for_wake_reader_crash_is_nonfatal(monkeypatch):
 
 
 def test_wait_for_wake_ignores_yesterdays_evening_nap(monkeypatch):
-    """A >=2h nap that synced last night ends BEFORE wake_day — it must not
-    open the gate; the overnight episode syncing later must."""
+    """A >=2h nap ending BEFORE wake_day is not today's wake → deliver without waiting."""
     import chat_daily_tg.health_briefing as hb
 
     tz = HealthExportReader("/tmp", "Asia/Shanghai").tz
     nap = _episode_ending(datetime(2026, 7, 16, 21, 30, tzinfo=tz))
-    overnight = _episode_ending(datetime(2026, 7, 17, 9, 5, tzinfo=tz))
-    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([nap, overnight]))
-    monkeypatch.setattr(hb, "_wake_now", lambda _tz: datetime(2026, 7, 17, 7, 5, tzinfo=tz))
-    slept: list[float] = []
-    monkeypatch.setattr(hb, "_sleep", slept.append)
+    # Only the nap is available on the single probe; overnight never blocks.
+    monkeypatch.setattr(hb, "HealthExportReader", _wake_stub_reader([nap]))
+    monkeypatch.setattr(hb, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
     assert hb.wait_for_wake_signal(
         HealthBriefing(enabled=True), date(2026, 7, 17), "Asia/Shanghai"
-    ) is True
-    assert slept == [300]  # nap rejected → one real wait → overnight accepted
+    ) is False

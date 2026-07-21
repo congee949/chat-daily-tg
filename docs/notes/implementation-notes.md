@@ -311,3 +311,18 @@
 - **只外科式重装 channels 一个 label**,没跑整个 `install-launchd.sh`:后者会 unload/reload 正在跑 09:00 socks 验证的 agent 任务,还会把已迁 r4s、故意不加载的 bilibili 重新装回(install 脚本第 58 行已注释 bilibili,与 [[bilibili-digest-runs-on-r4s]] 一致)。
 - 用 install 脚本**同一段渲染逻辑**渲染 `launchd/com.chat-daily-tg.channels.plist` → 落 LaunchAgents → unload/load。plutil lint OK、与渲染模板逐字一致、ProgramArguments 指向 cdrun-bash + guard wrapper。
 - 验证:`--channels-only --no-push` 在污染 ALL_PROXY 下 exit=0,seen 水位线 md5 不变(积压 10+ 张卡片留给 10:00 真实补推,dry-run 不吃)。旧版 plist 备份挪出 LaunchAgents(避免 launchd 目录杂物)。
+
+## 2026-07-19 — 公开频道纯媒体帖真实图片推送（修「🖼 占位卡」）
+
+现象：公开频道里一条纯图片（无文字）的帖子，推送出来是一张写着「🖼 （媒体内容，见下方预览 / 原文）」的卡片 + 一个看不到图的 t.me 预览（Telegram 对消息链接只渲染 "VIEW MESSAGE" 跳转卡，不内联图片）——占位文字从"陪衬"变成了唯一内容。
+
+### Design Decisions
+- **根因是设计假设不成立**：原设计假设 t.me 链接预览会把图片渲染出来（`_MEDIA_PLACEHOLDER` 注释），占位文字只为 sendMessage 非空约束兜底。实际上预览只是跳转卡，图片完全不可见。
+- **复用私有频道媒体管线**：`push_raw_channel_cards` 检出正文为空的帖（单图，或无说明相册——相册折叠后头部仍是空正文），用 `dump_messages_by_ids`（`tg_media_dump.py` 新增第 7 参 `only_ids`，按 msg_id 定向抓取、跳过日期窗口；消息体构建抽出 `entry_for` 复用）经登录 session 下载媒体，bot 重新上传（`_send_media`：单媒体 send_media、纯图/视频相册 sendMediaGroup、混合类型逐条）。caption = 卡片头（📢 频道 · 时间）+ 可点「原文」链接（媒体消息没有链接预览，原文入口放进 caption）。
+- **降级链完整**：下载失败 / 消息无可下载媒体（贴纸、>45MB、已过期）/ bot 上传失败 → 落回原占位卡，投递永不丢。kabi-tg-cli 解释器缺失时 `_require_tg_cli` 报清晰原因（review #20 同款，从 `dump_channel` 抽出共用）。
+- **媒体帖绕过去重门**（L1/L2 均不查）：空正文没有可指纹化内容，与私有路径同规则（review A4，宁可重复不可误杀）；`topic_gate.prepare` 也不再为空白正文消耗 embedding 配额。
+- **seen 语义不变**：媒体帖发送成功后写齐相册每个成员 id（增量高水位不卡）；下载后的二进制推送完即删（`rawmedia-<频道>` 目录 rmtree，同私有路径规则）；已 seen 的媒体帖不重复下载（catch-up 重跑零成本）。
+
+### 验证
+- 新增 tests/test_raw_channels.py 6 例：单图真实推送（无占位卡、caption 带原文链接、文件清理、幂等重跑不重复下载）、无说明相册合成一个 media group、下载失败回落占位卡、manifest 无媒体回落占位卡、去重门绕行（gate 故障也不影响投递）、bot 上传失败回落占位卡。
+- 全套 564 passed。

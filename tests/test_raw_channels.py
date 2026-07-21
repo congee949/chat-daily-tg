@@ -245,6 +245,216 @@ def test_push_album_pushes_one_card_and_marks_all_ids_seen(tmp_path, monkeypatch
     assert again.sent == []
 
 
+# --------------------------------------------------------------------------- #
+# Public-channel media-only posts: real media is downloaded via the user session
+# and re-uploaded through the bot; the 🖼 placeholder card is only the fallback.
+
+
+def _fake_media_dump(path_kind_by_id: dict[int, list[tuple[str, str]]]):
+    """dump_messages_by_ids double: materializes one tiny file per media item in
+    the caller's out_dir (mirroring the real script) and returns the manifest."""
+    def fake(chat_id, msg_ids, out_dir):
+        from pathlib import Path as _P
+        out = _P(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        manifest = []
+        for mid in msg_ids:
+            media = []
+            for i, (name, kind) in enumerate(path_kind_by_id.get(mid, [])):
+                p = out / f"{mid}-{i}-{name}"
+                p.write_bytes(b"\xff\xd8fake")
+                media.append({"path": str(p), "kind": kind})
+            manifest.append({"msg_id": mid, "media": media})
+        return manifest
+    return fake
+
+
+class _MediaSender:
+    """Records send_media / send_media_group / send_card calls."""
+
+    def __init__(self):
+        self.media: list[tuple[str, str, str]] = []
+        self.media_groups: list[tuple[list, str]] = []
+        self.cards: list[tuple[str, str | None]] = []
+
+    def send_media(self, path, kind, caption=""):
+        self.media.append((path, kind, caption))
+        return 1
+
+    def send_media_group(self, items, caption=""):
+        self.media_groups.append((list(items), caption))
+        return list(range(1, len(items) + 1))
+
+    def send_card(self, text_html, link=None):
+        self.cards.append((text_html, link))
+        return [1]
+
+
+def _push_kwargs(ch, tmp_path, sender, seen_name="seen.txt"):
+    return dict(channels=[ch], since="2026-06-05", until="2026-06-06",
+                db_path=tmp_path / "x.db", sender=sender, archive_dir=tmp_path,
+                seen_path=tmp_path / seen_name, delay_seconds=0)
+
+
+def test_public_media_only_photo_pushes_real_media_not_placeholder(tmp_path, monkeypatch):
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=4242)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+    monkeypatch.setattr(pm, "dump_messages_by_ids",
+                        _fake_media_dump({4242: [("p.jpg", "photo")]}))
+
+    sender = _MediaSender()
+    seen_path = tmp_path / "seen.txt"
+    n = raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender))
+    assert n == 1
+    assert sender.cards == []                       # no 🖼 placeholder card
+    assert sender.media_groups == []
+    assert len(sender.media) == 1
+    path, kind, caption = sender.media[0]
+    assert kind == "photo"
+    assert "媒体" not in caption
+    assert "📢 <b>example</b>" in caption           # card header rides as caption
+    assert 'href="https://t.me/examplechan/4242"' in caption  # 原文 link kept
+    assert SeenStore.key(ch.id, 4242) in SeenStore(seen_path)
+    assert not (tmp_path / "rawmedia-example").exists()  # downloaded files cleaned up
+
+    # Idempotent re-run: head seen → nothing re-sent, and no re-download either.
+    calls = []
+    monkeypatch.setattr(pm, "dump_messages_by_ids",
+                        lambda *a, **k: calls.append(a) or [])
+    again = _MediaSender()
+    assert raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, again)) == 0
+    assert again.media == [] and again.cards == [] and calls == []
+
+
+def test_public_media_only_album_pushes_one_media_group(tmp_path, monkeypatch):
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=20), _row(content="", msg_id=21),
+            _row(content="", msg_id=22)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+    monkeypatch.setattr(pm, "dump_messages_by_ids",
+                        _fake_media_dump({20: [("a.jpg", "photo")],
+                                          21: [("b.jpg", "photo")],
+                                          22: [("c.jpg", "photo")]}))
+
+    sender = _MediaSender()
+    seen_path = tmp_path / "seen.txt"
+    n = raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender))
+    assert n == 1                                   # one album → one push, not three
+    assert sender.cards == [] and sender.media == []
+    assert len(sender.media_groups) == 1
+    items, caption = sender.media_groups[0]
+    assert len(items) == 3                          # all album photos in one group
+    assert [k for _, k in items] == ["photo", "photo", "photo"]
+    assert "媒体" not in caption
+    for mid in (20, 21, 22):
+        assert SeenStore.key(ch.id, mid) in SeenStore(seen_path)
+
+
+def test_public_media_only_download_failure_falls_back_to_placeholder(tmp_path, monkeypatch):
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=4242)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+
+    def boom(chat_id, msg_ids, out_dir):
+        raise RuntimeError("kabi dead")
+
+    monkeypatch.setattr(pm, "dump_messages_by_ids", boom)
+
+    sender = _MediaSender()
+    n = raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender))
+    assert n == 1                                   # delivery preserved
+    assert sender.media == [] and sender.media_groups == []
+    assert len(sender.cards) == 1                   # placeholder card as before
+    text, link = sender.cards[0]
+    assert "媒体" in text and link == "https://t.me/examplechan/4242"
+    assert SeenStore.key(ch.id, 4242) in SeenStore(tmp_path / "seen.txt")
+
+
+def test_public_media_only_no_media_in_manifest_falls_back_to_placeholder(
+        tmp_path, monkeypatch):
+    """The message exists but carries no downloadable media (sticker, >45MB file,
+    expired photo) → placeholder card, exactly the old behavior."""
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=4242)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+    monkeypatch.setattr(pm, "dump_messages_by_ids", _fake_media_dump({4242: []}))
+
+    sender = _MediaSender()
+    n = raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender))
+    assert n == 1
+    assert sender.media == [] and len(sender.cards) == 1
+    assert "媒体" in sender.cards[0][0]
+
+
+def test_public_media_post_bypasses_dedup_gates(tmp_path, monkeypatch):
+    """A media post's empty body has nothing to fingerprint/embed — the gates
+    must not even be consulted (same rule as the private path)."""
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=4242)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+    monkeypatch.setattr(pm, "dump_messages_by_ids",
+                        _fake_media_dump({4242: [("p.jpg", "photo")]}))
+    gate = _StubGate(assess_raises=True)
+
+    sender = _MediaSender()
+    n = raw_channels.push_raw_channel_cards(
+        **_push_kwargs(ch, tmp_path, sender), topic_gate=gate)
+    assert n == 1 and len(sender.media) == 1        # gate failure never blocks media
+    assert gate.refs == []                          # assess never called
+    assert gate.prepared == []                      # nothing to embed for an empty body
+
+
+def test_public_media_only_send_media_raises_falls_back_to_placeholder(
+        tmp_path, monkeypatch):
+    """Media downloaded fine but the bot upload fails → placeholder card keeps
+    the delivery (a pure-photo post must never be dropped silently)."""
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [_row(content="", msg_id=4242)]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+    monkeypatch.setattr(pm, "dump_messages_by_ids",
+                        _fake_media_dump({4242: [("p.jpg", "photo")]}))
+
+    class FailingMediaSender(_MediaSender):
+        def send_media(self, path, kind, caption=""):
+            raise RuntimeError("bot upload failed")
+
+    sender = FailingMediaSender()
+    n = raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender))
+    assert n == 1
+    assert len(sender.cards) == 1 and "媒体" in sender.cards[0][0]
+    assert SeenStore.key(ch.id, 4242) in SeenStore(tmp_path / "seen.txt")
+
+
+
 def test_filtered_public_post_is_not_sent_and_is_marked_seen(tmp_path, monkeypatch):
     from chat_daily_tg import dedup_journal, raw_channels
     from chat_daily_tg.raw_seen import SeenStore

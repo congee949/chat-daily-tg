@@ -34,12 +34,10 @@ fi
 guard_setup_env
 
 # Normal run — caffeinate holds off sleep, same as the original plist.
-# --wait-for-wake gates delivery on the Watch sleep episode syncing in (5-min
-# polls from 07:05, forced delivery at the 13:00 deadline), which also replaces
-# the old 0–15 min cosmetic jitter: the send moment now follows the user's
-# actual wake-up, not the trigger minute.
-# CHAT_DAILY_WAKE_DEADLINE (optional): injected by schedule.py into the agent
-# plist's EnvironmentVariables. Absent → run_daily's built-in 13:00 default.
+# --wait-for-wake probes once for this morning's Watch sleep episode so the
+# health card can use a real wake time when already synced; if sleep data is
+# missing/unreadable, the digest delivers immediately (no 13:00 spin).
+# CHAT_DAILY_WAKE_DEADLINE kept for plist compat; wait_for_wake_signal no longer waits.
 /usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --skip-if-done --wait-for-wake \
   ${CHAT_DAILY_WAKE_DEADLINE:+--wake-deadline "$CHAT_DAILY_WAKE_DEADLINE"}
 rc=$?

@@ -1,8 +1,8 @@
 """Entry point for chat-daily-tg.
 
 Serves all four pipelines; flags pick one (see --help). Scheduling lives in the launchd
-plists, not here — the daily summary fires 07:05, then --wait-for-wake holds it (5-min
-polls) until the Watch sleep episode syncs in, capped by --wake-deadline. The `schedule`
+plists, not here — the daily summary fires 07:05; --wait-for-wake probes once for the
+Watch sleep episode (use real wake time when synced; if no sleep data, deliver now). The `schedule`
 block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
 (health briefing day-boundary + wake deadline) — do not delete the block.
 """
@@ -466,6 +466,71 @@ def run_bilibili(no_push: bool = False) -> int:
         return 1
 
 
+
+def run_youtube(no_push: bool = False) -> int:
+    """Entry point for the hourly YouTube digest (--youtube-only). Polls
+    whitelisted channels via RSS (+ one Data API call for durations), pushes
+    new-video cards to the youtube forum topic. Idempotent via the video_id
+    SeenStore (marked seen only after a successful send); a failed/missed run
+    is caught up by the next one thanks to the 48h lookback window.
+
+    Cards are grouped by each channel's effective topic key (per-channel
+    override → digest.topic default), one sender per topic — the hook for the
+    planned non-tech clusters (英语学习 / 运动康复) to route elsewhere later."""
+    tag = date.today().isoformat()
+    configure_logging(log_file_for(f"youtube-{tag}"))
+    try:
+        from chat_daily_tg.paths import YOUTUBE_SEEN_PATH
+        from chat_daily_tg.raw_seen import SeenStore
+        from chat_daily_tg.tg_sender import TelegramSender
+        from chat_daily_tg.youtube_digest import build_summarizer, push_digest
+        from chat_daily_tg.youtube_fetcher import fetch_new_videos
+
+        load_env_file(DATA_DIR / ".env")
+        cfg = load_config(CONFIG_PATH)
+        src = cfg.sources.youtube
+        if not src.enabled or not src.fetch.whitelist:
+            log.info("youtube source disabled or whitelist empty, nothing to do")
+            return 0
+
+        seen = SeenStore(YOUTUBE_SEEN_PATH)
+        videos = fetch_new_videos(src, seen, api_key=os.environ.get(src.api_key_env))
+        log.info("youtube new videos: %d", len(videos))
+        if not videos:
+            return 0
+
+        by_topic: dict[str, list] = {}
+        for v in videos:
+            by_topic.setdefault(v.topic or src.digest.topic, []).append(v)
+
+        workdir = prepare_archive_day(tag)
+        summarizer = build_summarizer(cfg)
+        sent = 0
+        for topic_key, group in by_topic.items():
+            sender = None
+            if not no_push:
+                dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+                chat_id, thread_id = resolve_tg_target(topic_key, dm_chat_id)
+                sender = TelegramSender(
+                    bot_token=os.environ[cfg.telegram.bot_token_env],
+                    chat_id=chat_id, message_thread_id=thread_id,
+                    retry_max_attempts=cfg.retry.max_attempts,
+                    retry_backoff_seconds=cfg.retry.backoff_seconds,
+                )
+                log.info("youtube digest target: %s/thread=%s (topic=%s, %d cards)",
+                         chat_id, thread_id, topic_key, len(group))
+            sent += push_digest(group, sender=sender, seen=seen, cfg=cfg,
+                                summarizer=summarizer, workdir=workdir,
+                                no_push=no_push)
+        log.info("✓ youtube digest complete: %d/%d cards sent (no_push=%s)",
+                 sent, len(videos), no_push)
+        return 0
+    except Exception as e:
+        log.exception("youtube digest failed: %s", e)
+        notify_failure("chat-daily-tg YouTube digest失败", f"{type(e).__name__}: {e}")
+        return 1
+
+
 def _llm_from_block(cfg, m):
     return LLMClient(
         endpoint=m.endpoint, model=m.model, api_key=os.environ[m.api_key_env],
@@ -844,10 +909,9 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         return 1
 
     if wait_for_wake:
-        # Hold the WHOLE pipeline (export → summary → push) until the user's
-        # morning sleep episode syncs in, so the health card carries the real
-        # wake time and everything lands in one delivery. Any failure here must
-        # degrade to an immediate run, never block it (rather deliver than drop).
+        # Single probe for this morning's sleep episode. If already synced, the
+        # health card gets a real wake time; if missing, deliver the digest now
+        # (sleep is optional — never spin until --wake-deadline).
         try:
             from chat_daily_tg.health_briefing import wait_for_wake_signal
             got = wait_for_wake_signal(
@@ -857,8 +921,7 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 deadline=wake_deadline,
             )
             if not got:
-                log.info("proceeding without wake signal (disabled or deadline %s)",
-                         wake_deadline)
+                log.info("proceeding without wake signal (no sleep data or disabled)")
         except Exception as e:
             log.warning("wake-signal wait failed (non-fatal, running now): %s", e)
 
@@ -1360,15 +1423,17 @@ if __name__ == "__main__":
                    help="Exit 0 immediately if this date's run already completed "
                         "(re-fired/coalesced launchd trigger, manual re-run)")
     p.add_argument("--wait-for-wake", action="store_true",
-                   help="Poll the Watch sleep sync every 5 min and hold the daily summary "
-                        "until this morning's wake episode lands (or --wake-deadline)")
+                   help="Probe once for this morning's Watch sleep episode; if already "
+                        "synced use it for the health card, otherwise deliver immediately")
     p.add_argument("--wake-deadline", metavar="HH:MM", default="13:00",
-                   help="With --wait-for-wake: stop waiting at this local time and "
-                        "deliver anyway (default 13:00)")
+                   help="Deprecated (no-wait policy); kept for launchd EnvironmentVariables "
+                        "compat (default 13:00)")
     p.add_argument("--channels-only", action="store_true",
                    help="Run only the 2-hourly verbatim channel forwarder (no summary)")
     p.add_argument("--bilibili-only", action="store_true",
                    help="Run only the hourly Bilibili subscription digest (no summary)")
+    p.add_argument("--youtube-only", action="store_true",
+                   help="Run only the hourly YouTube subscription digest (no summary)")
     p.add_argument("--growth-only", action="store_true",
                    help="Run only the daily growth mining + card push")
     p.add_argument("--growth-mine-day", metavar="YYYY-MM-DD", default=None,
@@ -1390,6 +1455,8 @@ if __name__ == "__main__":
         sys.exit(run_channels(no_push=args.no_push))
     if args.bilibili_only:
         sys.exit(run_bilibili(no_push=args.no_push))
+    if args.youtube_only:
+        sys.exit(run_youtube(no_push=args.no_push))
     if args.growth_only or args.growth_mine_day:
         sys.exit(run_growth(no_push=args.no_push, dm_test=args.dm_test,
                             model_alias=args.model, mine_date=args.growth_mine_day))

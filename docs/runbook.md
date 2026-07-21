@@ -6,26 +6,35 @@
 
 | 机器 | 跑什么 | 出口 |
 |---|---|---|
-| **Mac**（本机） | 日报、频道转发、成长挖掘 —— launchd 4 个 label | http 代理 `127.0.0.1:1082`（Shadowrocket） |
-| **r4s**（OpenWrt 主路由） | B站 digest —— cron 每小时 `:30` | TG/Gemini 经 bwg tinyproxy over tailscale；B站直连 |
+| **Mac**（本机） | 日报、频道转发、成长挖掘、ledger-sync —— launchd 5 个 label | http 代理 `127.0.0.1:1082`（Shadowrocket） |
+| **r4s**（OpenWrt 主路由） | B站 / YouTube digest —— cron | TG/Gemini 经 bwg tinyproxy over tailscale；B站直连 |
 | **bwg**（美国 VPS） | tinyproxy 出口 `100.87.113.14:8888` | —— |
 
 代码在 Mac 的 `~/Projects/chat-daily-tg`，launchd **直接跑工作树源码**（不是安装副本），改完源码下次触发即生效，无需重装。r4s 上是 `/root/chat-daily-tg` 的独立副本。
 
 数据与配置在 `~/chat-daily/`，独立于仓库，含密钥，不进版本控制。
 
+### 订阅卡 ledger（Podcast 👍）
+
+B站 / YouTube 订阅卡在 **r4s** 推送成功后 write-after-send 写入  
+`/root/chat-daily/state/media_sent_ledger.jsonl`（`chat_id`+`message_id` → canonical URL）。  
+**Mac** 侧 Podcast4bot 只读 `~/chat-daily/state/media_sent_ledger.jsonl`。  
+拉取脚本：`scripts/sync_media_ledger.sh`（rsync，scp 回退；远端不存在则 skip exit 0）。  
+launchd label：`com.chat-daily-tg.ledger-sync`（`StartInterval` 60s，`run_ledger_sync_guarded.sh`）。
+
 ### launchd label
 
 | label | 时间 | wrapper |
 |---|---|---|
-| `com.chat-daily-tg.agent` | 7:05 起等起床信号（`--wait-for-wake` 5 分钟轮询，13:00 兜底强制发） | `run_daily_guarded.sh` |
+| `com.chat-daily-tg.agent` | 7:05 触发，`--wait-for-wake` 单次探测 Watch 睡眠；无数据则立刻发总结 | `run_daily_guarded.sh` |
 | `com.chat-daily-tg.channels` | 6,10,12,14,16,18,20,22 | `run_channels_guarded.sh` |
 | `com.chat-daily-tg.growth` | 9:30 / 15:30 / 21:30 | `run_growth_guarded.sh` |
 | `com.chat-daily-tg.growth-weekly` | 周六 9:45 | `run_growth_weekly_guarded.sh` |
+| `com.chat-daily-tg.ledger-sync` | 每 60s（`StartInterval`） | `run_ledger_sync_guarded.sh` |
 
-**永远经 guard wrapper 跑，不要让 plist 直调 python。** wrapper 负责 venv 预检（`.venv` 被 uv prune 时会静默 `exit 127`）、导出 http 代理、清 `ALL_PROXY`、开 `CHAT_DAILY_TG_ALERTS=1` 让告警能发出去、以及失败时 osascript + TG 双通道告警。2026-07-03 就发现过 channels 的 plist 是旧版、绕过了 wrapper。
+**永远经 guard wrapper 跑，不要让 plist 直调 python。** wrapper 负责 venv 预检（`.venv` 被 uv prune 时会静默 `exit 127`）、导出 http 代理、清 `ALL_PROXY`、开 `CHAT_DAILY_TG_ALERTS=1` 让告警能发出去、以及失败时 osascript + TG 双通道告警。2026-07-03 就发现过 channels 的 plist 是旧版、绕过了 wrapper。ledger-sync 例外：无 venv、不发 TG 告警（短 rsync，失败多半是瞬时 SSH）。
 
-`install-launchd.sh` 只装上表这 4 个，**不装** B站的 label（已迁 r4s，脚本内有注释说明）。跑 installer 不会把它带回来，但也不要手动加。
+`install-launchd.sh` 装上表这 5 个，**不装** B站 / YouTube 的 label（已迁 r4s，脚本内有注释说明）。跑 installer 不会把它带回来，但也不要手动加。
 
 ### LaunchDaemon（root 级，install-launchd.sh 装不了）
 

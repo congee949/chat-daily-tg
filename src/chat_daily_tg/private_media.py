@@ -56,26 +56,52 @@ class Post:
     msg_ids: list[int] = field(default_factory=list)
 
 
-def dump_channel(chat_id: str, since: str, until: str, out_dir: Path, limit: int,
-                 min_id: int = 0) -> list[dict]:
-    """Run the telethon downloader and return its message manifest (oldest→newest).
-    min_id>0 fetches only messages newer than that id (incremental forwarder)."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Fail fast with a clear cause when the kabi-tg-cli interpreter is gone (uv
-    # prune/upgrade can break this path the same way it broke .venv). Without
-    # this, every private channel dies with an opaque errno buried in stderr
-    # (review finding #20).
+def _require_tg_cli() -> None:
+    """Fail fast with a clear cause when the kabi-tg-cli interpreter is gone (uv
+    prune/upgrade can break this path the same way it broke .venv). Without
+    this, every media dump dies with an opaque errno buried in stderr
+    (review finding #20)."""
     if not os.access(TG_CLI_PYTHON, os.X_OK):
         raise RuntimeError(
             f"kabi-tg-cli python not executable at {TG_CLI_PYTHON} — reinstall with "
             "`uv tool install kabi-tg-cli` or set CHAT_DAILY_TG_CLI_PYTHON"
         )
+
+
+def dump_channel(chat_id: str, since: str, until: str, out_dir: Path, limit: int,
+                 min_id: int = 0) -> list[dict]:
+    """Run the telethon downloader and return its message manifest (oldest→newest).
+    min_id>0 fetches only messages newer than that id (incremental forwarder)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _require_tg_cli()
     cmd = [TG_CLI_PYTHON, str(_DUMP_SCRIPT), str(chat_id), since, until, str(out_dir),
            str(limit), str(min_id)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
         raise RuntimeError(f"tg_media_dump failed for {chat_id}: {proc.stderr or proc.stdout}")
     return json.loads(proc.stdout or "[]")
+
+
+def dump_messages_by_ids(chat_id: str, msg_ids: list[int], out_dir: Path) -> list[dict]:
+    """Targeted variant of dump_channel: fetch EXACTLY these message ids (any date).
+    The public-channel media-only path knows the ids from messages.db and only
+    needs their media. since/until are dummies — the script ignores the window
+    when only_ids is set."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _require_tg_cli()
+    cmd = [TG_CLI_PYTHON, str(_DUMP_SCRIPT), str(chat_id), "2000-01-01", "2100-01-01",
+           str(out_dir), str(len(msg_ids)), "0", ",".join(str(i) for i in msg_ids)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"tg_media_dump ids failed for {chat_id}: {proc.stderr or proc.stdout}")
+    return json.loads(proc.stdout or "[]")
+
+
+def media_by_msg_id(manifest: list[dict]) -> dict[int, list[tuple[str, str]]]:
+    """{msg_id: [(path, kind), …]} for manifest entries that carry downloaded media."""
+    return {e["msg_id"]: [(m["path"], m["kind"]) for m in e.get("media", [])]
+            for e in manifest if e.get("media")}
 
 
 def group_posts(manifest: list[dict]) -> list[Post]:

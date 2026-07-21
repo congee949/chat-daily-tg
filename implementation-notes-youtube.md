@@ -87,3 +87,12 @@
 - **已知残留**：`GOOGLE_API_KEY` 仍 403（console 限制在 Gemini API，见
   `_enrich_via_watch_page` docstring），enrichment 走 watch-page 兜底，Shorts
   过滤不受影响。
+
+## 2026-07-21 补丁 2：YOUTUBE_API_KEY 拆分，Data API enrichment 上线
+
+- 用户新建只放行 YouTube Data API v3 的 key；r4s `config.yaml`
+  `sources.youtube.api_key_env: GOOGLE_API_KEY → YOUTUBE_API_KEY`，`.env` 新增
+  `YOUTUBE_API_KEY`（旧 `GOOGLE_API_KEY` 保留给 Gemini vision，两 key 不互换）。
+- 验证：3Blue1Brown《But what is cross-entropy?》走真实管线推送测试卡——
+  API enrichment 命中（33m51s / 392,919 views，与 videos.list 直连结果一致），
+  TG 卡片发送成功并写 seen。watch-page 兜底保留作降级。

@@ -82,6 +82,19 @@ _HEADERS = {
 # low-frequency; the spacing just avoids a burst profile.
 _CALL_SPACING_SECONDS = 0.5
 
+# Per-channel feed retry: since 2025-12 YouTube's /feeds/videos.xml flakes
+# platform-side — the SAME channel 404s (or 500s) then 200s on a retry
+# seconds later, with random channels affected each window (RSS-Bridge#2113,
+# FreeTube#8443, n8n community threads; first hit here 2026-07-21, an all-11
+# channels 404 storm that the all-fail guard correctly escalated). A 404 is
+# therefore NOT proof of a deleted channel until retries are exhausted; the
+# attempts below ride out the flake windows instead of alarming on them.
+_FEED_ATTEMPTS = 3
+_FEED_RETRY_BACKOFF_SECONDS = 3.0
+# Statuses worth retrying: the flake presents as 404/500, rate limiting as
+# 429; other 4xx (403 etc.) fail through immediately.
+_FEED_RETRYABLE_STATUSES = {404, 429, 500, 502, 503, 504}
+
 _NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "yt": "http://www.youtube.com/xml/schemas/2015",
@@ -164,6 +177,28 @@ def _parse_entry(entry: ET.Element, channel, seen: SeenStore,
     )
 
 
+def _fetch_feed_with_retry(client: httpx.Client, channel) -> ET.Element:
+    """One channel's RSS fetch with retries over the 2025-12+ flake statuses
+    (see _FEED_RETRYABLE_STATUSES). Transport blips (httpx.HTTPTransport's own
+    retries=2 only covers CONNECT-level failures) retry here too."""
+    last_err: Exception | None = None
+    for attempt in range(1, _FEED_ATTEMPTS + 1):
+        try:
+            r = client.get(_FEED_URL, params={"channel_id": channel.channel_id})
+            r.raise_for_status()
+            return ET.fromstring(r.content)
+        except httpx.HTTPStatusError as e:
+            last_err = e
+            if e.response.status_code not in _FEED_RETRYABLE_STATUSES:
+                raise
+        except Exception as e:  # transport error, XML parse error
+            last_err = e
+        if attempt < _FEED_ATTEMPTS:
+            time.sleep(_FEED_RETRY_BACKOFF_SECONDS * attempt)
+    assert last_err is not None
+    raise last_err
+
+
 def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
                  *, cutoff: datetime) -> list[YtVideo]:
     """One RSS call per whitelisted channel. A single channel failing only
@@ -176,9 +211,7 @@ def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
         if i:
             time.sleep(_CALL_SPACING_SECONDS)
         try:
-            r = client.get(_FEED_URL, params={"channel_id": channel.channel_id})
-            r.raise_for_status()
-            root = ET.fromstring(r.content)
+            root = _fetch_feed_with_retry(client, channel)
         except Exception as e:
             log.warning("feed failed for %s (%s): %s",
                         channel.channel_id, channel.name or "?", e)

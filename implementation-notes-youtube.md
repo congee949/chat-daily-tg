@@ -62,3 +62,28 @@
   `english` topic（同运动康复计划），建话题 + 路由表加 key + 该频道 config 加
   `topic: english` 三步即可。
 - 运动康复簇（订阅里 ~15 个 PT 频道）未筛未入白名单，等用户点名再加。
+
+## 2026-07-21 补丁：YouTube RSS 平台侧抖动 → 每频道 feed 重试
+
+- **现象**：10:50 / 12:40 / 13:10 三波 `YoutubeFetchError: all 11 channel feed
+  fetches failed — transport dead?`，几分钟后自愈。r4s 日志显示真实错误是
+  **404 Not Found（偶发 500）**，不是 TLS/代理断——同一频道直连 404、走 bwg
+  代理 200，重试几次即恢复 200，且 404 响应有时仍带合法 feed body。
+- **定性**：YouTube `/feeds/videos.xml` 自 2025-12 起的平台侧间歇故障
+  （RSS-Bridge#2113、FreeTube#8443、n8n/Google AI 论坛多帖；高峰时段、
+  数据中心出口 IP 更容易中招），随机频道、随机时间窗 404/500。
+- **修复**（`youtube_fetcher.py`）：新增 `_fetch_feed_with_retry`——每频道
+  最多 `_FEED_ATTEMPTS=3` 次，退避 3s/6s，仅对
+  `_FEED_RETRYABLE_STATUSES = {404, 429, 500, 502, 503, 504}` 与传输层异常重试；
+  其他 4xx（如 403）立即失败。单频道重试耗尽才算 failure，all-fail 告警语义
+  不变。最坏情况多耗时 ~100s，flock 保证不与下一轮重叠；漏抓的视频由
+  lookback 窗口在下一轮补回，不丢。
+- **测试**：`test_single_channel_failure_does_not_kill_run` /
+  `test_all_channels_failing_raises` 改 `is_reusable=True` + monkeypatch 退避为
+  0；新增 `test_flaky_feed_recovers_on_retry`（首试 404、重试 200 必须正常出片）。
+  全套 563 passed。
+- **验证**：r4s 实跑 `run_daily.py --youtube-only` exit=0——坏窗口内仍有个别
+  频道三次全 404/500（单频道降级跳过，符合设计），但整体不再硬失败、不告警。
+- **已知残留**：`GOOGLE_API_KEY` 仍 403（console 限制在 Gemini API，见
+  `_enrich_via_watch_page` docstring），enrichment 走 watch-page 兜底，Shorts
+  过滤不受影响。

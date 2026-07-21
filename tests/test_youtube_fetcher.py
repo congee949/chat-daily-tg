@@ -6,6 +6,7 @@ from pytest_httpx import HTTPXMock
 
 from chat_daily_tg.config import YoutubeSource
 from chat_daily_tg.raw_seen import SeenStore
+import chat_daily_tg.youtube_fetcher as yt
 from chat_daily_tg.youtube_fetcher import (
     YoutubeFetchError,
     _fmt_duration,
@@ -205,9 +206,13 @@ def test_no_api_key_goes_straight_to_watch_page(httpx_mock: HTTPXMock, tmp_path)
     assert all("googleapis" not in str(r.url) for r in httpx_mock.get_requests())
 
 
-def test_single_channel_failure_does_not_kill_run(httpx_mock: HTTPXMock, tmp_path):
+def test_single_channel_failure_does_not_kill_run(httpx_mock: HTTPXMock, tmp_path,
+                                                  monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    # 500 is retryable (YouTube flake) — must persist across all attempts.
     httpx_mock.add_response(
-        url=re.compile(rf".*channel_id={CH_A}.*"), status_code=500)
+        url=re.compile(rf".*channel_id={CH_A}.*"), status_code=500,
+        is_reusable=True)
     _mock_feed(httpx_mock, CH_B, _feed(
         _entry("freshvid001", author="频道乙"), title="频道乙"))
     _mock_videos_api(httpx_mock, {"freshvid001": "PT10M"})
@@ -215,11 +220,26 @@ def test_single_channel_failure_does_not_kill_run(httpx_mock: HTTPXMock, tmp_pat
     assert [v.video_id for v in videos] == ["freshvid001"]
 
 
-def test_all_channels_failing_raises(httpx_mock: HTTPXMock, tmp_path):
+def test_flaky_feed_recovers_on_retry(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    """The 2025-12+ YouTube flake: first attempt 404s, retry succeeds — the
+    channel must NOT count as failed and its videos must ship."""
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
     httpx_mock.add_response(
-        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500)
+        url=re.compile(rf".*channel_id={CH_A}.*"), status_code=404)
+    _mock_feed(httpx_mock, CH_A, _feed(
+        _entry("retryvid001", author="频道甲"), title="频道甲"))
+    _mock_feed(httpx_mock, CH_B, _feed(title="频道乙"))
+    _mock_videos_api(httpx_mock, {"retryvid001": "PT10M"})
+    videos = fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
+    assert [v.video_id for v in videos] == ["retryvid001"]
+
+
+def test_all_channels_failing_raises(httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    # Retries exhausted on every channel (is_reusable covers all attempts).
     httpx_mock.add_response(
-        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500)
+        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
+        is_reusable=True)
     with pytest.raises(YoutubeFetchError, match="all 2 channel"):
         fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
 

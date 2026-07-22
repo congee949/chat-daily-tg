@@ -1,11 +1,15 @@
 """Fetch new videos from whitelisted YouTube channels.
 
-Transport: per-channel RSS (`youtube.com/feeds/videos.xml?channel_id=UC…`) —
-no login, no cookies, no API quota, works headless anywhere. RSS carries no
-duration, so NEW candidates are enriched in two tiers: batched `videos.list`
-(YouTube Data API v3, 1 quota unit per 50 ids) first, then a per-video
-watch-page scrape (`"lengthSeconds"`) for whatever the API didn't answer —
-duration + view count power the Shorts filter (长视频 digest 的定位).
+Transport normally uses per-channel RSS
+(`youtube.com/feeds/videos.xml?channel_id=UC…`) — no login, no cookies, no
+API quota, works headless anywhere. If every RSS feed is unavailable, the
+same YouTube Data API key discovers recent uploads through `channels.list` +
+`playlistItems.list`; this prevents a transient RSS outage from turning into
+a failed digest. RSS carries no duration, so candidates are enriched in two
+tiers: batched `videos.list` (YouTube Data API v3, 1 quota unit per 50 ids)
+first, then a per-video watch-page scrape (`"lengthSeconds"`) for whatever
+the API didn't answer — duration + view count power the Shorts filter
+(长视频 digest 的定位).
 
 Proxy contract is the OPPOSITE of bilibili_fetcher: YouTube / googleapis /
 i.ytimg.com are unreachable from a China exit, so every request here MUST
@@ -73,6 +77,8 @@ def seen_key_for(video_id: str) -> str:
 
 
 _FEED_URL = "https://www.youtube.com/feeds/videos.xml"
+_CHANNELS_API_URL = "https://www.googleapis.com/youtube/v3/channels"
+_PLAYLIST_ITEMS_API_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
 _VIDEOS_API_URL = "https://www.googleapis.com/youtube/v3/videos"
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -100,6 +106,7 @@ _FEED_WAVE_BACKOFF_SECONDS = 45.0
 # Statuses worth retrying: the flake presents as 404/500, rate limiting as
 # 429; other 4xx (403 etc.) fail through immediately.
 _FEED_RETRYABLE_STATUSES = {404, 429, 500, 502, 503, 504}
+_API_UPLOADS_PAGE_SIZE = 50
 
 _NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -183,6 +190,55 @@ def _parse_entry(entry: ET.Element, channel, seen: SeenStore,
     )
 
 
+def _active_channels(src: YoutubeSource) -> list:
+    """Return whitelisted channels after the immutable-ID blacklist gate."""
+    blacklist_ids = {c.channel_id for c in src.fetch.blacklist}
+    return [c for c in src.fetch.whitelist if c.channel_id not in blacklist_ids]
+
+
+def _api_thumbnail(snippet: dict) -> str | None:
+    thumbnails = snippet.get("thumbnails")
+    if not isinstance(thumbnails, dict):
+        return None
+    for size in ("maxres", "standard", "high", "medium", "default"):
+        thumb = thumbnails.get(size)
+        if isinstance(thumb, dict) and isinstance(thumb.get("url"), str):
+            return thumb["url"]
+    return None
+
+
+def _parse_api_playlist_item(item, channel, seen: SeenStore,
+                             cutoff: datetime) -> YtVideo | None:
+    """One Data API playlist item → YtVideo, matching RSS eligibility rules."""
+    if not isinstance(item, dict):
+        return None
+    content = item.get("contentDetails")
+    snippet = item.get("snippet")
+    content = content if isinstance(content, dict) else {}
+    snippet = snippet if isinstance(snippet, dict) else {}
+    video_id = str(content.get("videoId") or "").strip()
+    if not re.fullmatch(r"[0-9A-Za-z_-]{11}", video_id):
+        return None
+    pub = _parse_published(
+        str(content.get("videoPublishedAt") or snippet.get("publishedAt") or ""))
+    if seen_key_for(video_id) in seen or (pub is not None and pub < cutoff):
+        return None
+    title = str(snippet.get("title") or "").strip() or video_id
+    author = (str(snippet.get("channelTitle") or "").strip()
+              or (channel.name or ""))
+    return YtVideo(
+        video_id=video_id,
+        title=title,
+        author=author,
+        channel_id=channel.channel_id,
+        url=f"https://www.youtube.com/watch?v={video_id}",
+        cover=_api_thumbnail(snippet),
+        publish_time=pub,
+        description=str(snippet.get("description") or "").strip(),
+        topic=channel.topic,
+    )
+
+
 def _fetch_feed_with_retry(client: httpx.Client, channel) -> ET.Element:
     """One channel's RSS fetch with retries over the 2025-12+ flake statuses
     (see _FEED_RETRYABLE_STATUSES). Transport blips (httpx.HTTPTransport's own
@@ -238,8 +294,7 @@ def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
     (deleted channel / transient error). ALL channels failing on the first
     wave triggers a delayed second wave; only total failure across all
     waves raises (dead transport or sustained YouTube RSS outage)."""
-    blacklist_ids = {c.channel_id for c in src.fetch.blacklist}
-    channels = [c for c in src.fetch.whitelist if c.channel_id not in blacklist_ids]
+    channels = _active_channels(src)
     if not channels:
         return []
 
@@ -260,6 +315,86 @@ def _fetch_feeds(src: YoutubeSource, seen: SeenStore, client: httpx.Client,
     if not videos and failures >= len(channels):
         raise YoutubeFetchError(
             f"all {len(channels)} channel feed fetches failed — transport dead?")
+    return videos
+
+
+def _fetch_uploads_via_api(src: YoutubeSource, seen: SeenStore,
+                           client: httpx.Client, *, cutoff: datetime,
+                           api_key: str) -> list[YtVideo]:
+    """Discover recent uploads through Data API after a total RSS outage.
+
+    A single batched `channels.list` resolves each channel's immutable uploads
+    playlist, then one `playlistItems.list` call per channel supplies the
+    recent videos. Any individual channel is soft-failed like RSS; the whole
+    fallback is considered unavailable only when none of those playlists can
+    be read. It is deliberately invoked *only* after total RSS failure, so a
+    healthy poll retains RSS's zero-quota normal path.
+    """
+    channels = _active_channels(src)
+    if not channels:
+        return []
+    try:
+        response = client.get(_CHANNELS_API_URL, params={
+            "part": "contentDetails",
+            "id": ",".join(channel.channel_id for channel in channels),
+            "key": api_key,
+        })
+        response.raise_for_status()
+        items = response.json().get("items") or []
+    except Exception as e:
+        raise YoutubeFetchError(f"YouTube Data API uploads lookup failed: {e}") from e
+
+    uploads_by_channel: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        channel_id = item.get("id")
+        content_details = item.get("contentDetails")
+        if not isinstance(content_details, dict):
+            continue
+        related = content_details.get("relatedPlaylists") or {}
+        uploads = related.get("uploads") if isinstance(related, dict) else None
+        if isinstance(channel_id, str) and isinstance(uploads, str) and uploads:
+            uploads_by_channel[channel_id] = uploads
+
+    videos: list[YtVideo] = []
+    successful_channels = 0
+    for i, channel in enumerate(channels):
+        if i:
+            time.sleep(_CALL_SPACING_SECONDS)
+        uploads = uploads_by_channel.get(channel.channel_id)
+        if not uploads:
+            log.warning("Data API fallback has no uploads playlist for %s (%s)",
+                        channel.channel_id, channel.name or "?")
+            continue
+        try:
+            response = client.get(_PLAYLIST_ITEMS_API_URL, params={
+                "part": "snippet,contentDetails",
+                "playlistId": uploads,
+                "maxResults": _API_UPLOADS_PAGE_SIZE,
+                "key": api_key,
+            })
+            response.raise_for_status()
+            items = response.json().get("items") or []
+            successful_channels += 1
+        except Exception as e:
+            log.warning("Data API fallback failed for %s (%s): %s",
+                        channel.channel_id, channel.name or "?", e)
+            continue
+        for item in items:
+            try:
+                video = _parse_api_playlist_item(item, channel, seen, cutoff)
+            except Exception as e:
+                log.warning("bad Data API playlist item for %s skipped: %s",
+                            channel.channel_id, e)
+                continue
+            if video is not None:
+                videos.append(video)
+
+    if not successful_channels:
+        raise YoutubeFetchError("YouTube Data API uploads fallback failed for every channel")
+    log.info("YouTube Data API uploads fallback succeeded for %d/%d channels; %d candidates",
+             successful_channels, len(channels), len(videos))
     return videos
 
 
@@ -386,7 +521,18 @@ def fetch_new_videos(src: YoutubeSource, seen: SeenStore, *,
                       follow_redirects=True,
                       transport=httpx.HTTPTransport(retries=2,
                                                     proxy=_proxy_from_env())) as client:
-        videos = _fetch_feeds(src, seen, client, cutoff=cutoff)
+        try:
+            videos = _fetch_feeds(src, seen, client, cutoff=cutoff)
+        except YoutubeFetchError as rss_error:
+            if not api_key:
+                raise
+            log.warning("all YouTube RSS feeds failed; trying Data API uploads fallback")
+            try:
+                videos = _fetch_uploads_via_api(
+                    src, seen, client, cutoff=cutoff, api_key=api_key)
+            except YoutubeFetchError as api_error:
+                raise YoutubeFetchError(
+                    f"{rss_error}; YouTube Data API fallback also failed") from api_error
         videos = _enrich_durations(videos, client, api_key)
     kept = [v for v in videos if not _is_short(v, src.fetch.min_duration_seconds)]
     if len(kept) < len(videos):

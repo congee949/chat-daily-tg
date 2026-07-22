@@ -1,5 +1,16 @@
 # Implementation Notes
 
+## 2026-07-22 YouTube RSS Outage Fallback
+
+### Design Decisions
+
+- RSS remains the normal, zero-quota discovery path. Only a total all-channel RSS failure invokes the already-configured YouTube Data API, resolving immutable uploads playlists with one batched `channels.list` request and reading each playlist's recent items.
+- A Data API fallback is successful when at least one configured upload playlist can be read, even when it contains no new videos. Per-channel failures remain soft, matching the existing RSS semantics; only total failure across RSS and the fallback remains an alerting failure.
+
+### Tradeoffs
+
+- The rare fallback costs one `channels.list` plus one `playlistItems.list` call per active channel, rather than assuming the undocumented `UC…` to `UU…` playlist-ID transformation. This favors correctness if YouTube changes that convention.
+
 ## 2026-07-22 Architecture Refactor
 
 ### Design Decisions

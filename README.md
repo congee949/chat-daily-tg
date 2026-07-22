@@ -103,7 +103,7 @@
 │   ├── growth_weekly.py            # 成长挖掘：周报与 rubric 合并
 │   ├── bilibili_fetcher.py         # B站抓取（api / opencli 双 transport）
 │   ├── bilibili_digest.py          # B站卡片编排
-│   ├── youtube_fetcher.py          # YouTube RSS / 元数据抓取
+│   ├── youtube_fetcher.py          # YouTube RSS / Data API 备用源 / 元数据抓取
 │   ├── youtube_digest.py           # YouTube 卡片编排
 │   ├── tg_sender.py                # Telegram 发送（含富消息）
 │   ├── notifier.py                 # 通知封装

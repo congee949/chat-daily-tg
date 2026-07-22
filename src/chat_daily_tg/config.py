@@ -229,12 +229,13 @@ class YoutubeDigest(BaseModel):
 
 
 class YoutubeSource(BaseModel):
-    """YouTube subscription digest. Transport is per-channel RSS (no login, no
-    quota) + one YouTube Data API v3 videos.list call for durations — see
-    youtube_fetcher. Network contract is the OPPOSITE of bilibili: every
-    request must ride the wrapper's HTTP(S)_PROXY (bwg tinyproxy on r4s)."""
+    """YouTube subscription digest. Per-channel RSS is the normal zero-quota
+    path; the YouTube Data API discovers uploads only when every RSS feed is
+    unavailable, and also enriches duration/views — see youtube_fetcher.
+    Network contract is the OPPOSITE of bilibili: every request must ride the
+    wrapper's HTTP(S)_PROXY (bwg tinyproxy on r4s)."""
     enabled: bool = False
-    api_key_env: str = "GOOGLE_API_KEY"   # YouTube Data API v3 (duration/views)
+    api_key_env: str = "GOOGLE_API_KEY"   # YouTube Data API v3 (fallback + duration/views)
     fetch: YoutubeFetch = Field(default_factory=YoutubeFetch)
     digest: YoutubeDigest = Field(default_factory=YoutubeDigest)
 

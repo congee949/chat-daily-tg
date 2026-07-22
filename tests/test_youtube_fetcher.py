@@ -82,6 +82,40 @@ def _mock_videos_api(httpx_mock, durations: dict[str, str],
         json={"items": items})
 
 
+def _mock_uploads_playlists(httpx_mock, uploads: dict[str, str]):
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.googleapis\.com/youtube/v3/channels\?.*"),
+        json={"items": [
+            {"id": channel_id,
+             "contentDetails": {"relatedPlaylists": {"uploads": playlist_id}}}
+            for channel_id, playlist_id in uploads.items()
+        ]})
+
+
+def _mock_uploads_items(httpx_mock, playlist_id: str, *items: dict):
+    httpx_mock.add_response(
+        url=re.compile(rf"https://www\.googleapis\.com/youtube/v3/playlistItems\?.*playlistId={playlist_id}.*"),
+        json={"items": list(items)})
+
+
+def _uploads_item(video_id: str, *, title="API 视频", author="频道甲",
+                  local_pub: datetime = datetime(2026, 7, 2, 8, 0),
+                  desc="API 简介", cover="https://i.ytimg.com/vi/x/hqdefault.jpg") -> dict:
+    return {
+        "contentDetails": {
+            "videoId": video_id,
+            "videoPublishedAt": _published(local_pub),
+        },
+        "snippet": {
+            "title": title,
+            "channelTitle": author,
+            "description": desc,
+            "publishedAt": _published(local_pub),
+            "thumbnails": {"high": {"url": cover}},
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
     monkeypatch.setattr("chat_daily_tg.youtube_fetcher.time.sleep", lambda s: None)
@@ -243,6 +277,82 @@ def test_all_channels_failing_raises(httpx_mock: HTTPXMock, tmp_path, monkeypatc
         url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
         is_reusable=True)
     with pytest.raises(YoutubeFetchError, match="all 2 channel"):
+        fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key=None, now=NOW)
+
+
+def test_all_rss_fail_uses_data_api_uploads_fallback(
+        httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
+        is_reusable=True)
+    _mock_uploads_playlists(httpx_mock, {CH_A: "UU_A", CH_B: "UU_B"})
+    _mock_uploads_items(httpx_mock, "UU_A", _uploads_item("apifallback", title="RSS 故障备用"))
+    _mock_uploads_items(httpx_mock, "UU_B")
+    _mock_videos_api(httpx_mock, {"apifallback": "PT10M"})
+
+    videos = fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
+
+    assert [v.video_id for v in videos] == ["apifallback"]
+    assert videos[0].title == "RSS 故障备用"
+    assert videos[0].duration_seconds == 600
+    requests = [str(request.url) for request in httpx_mock.get_requests()]
+    assert any("/channels?" in url for url in requests)
+    assert sum("/playlistItems?" in url for url in requests) == 2
+
+
+def test_data_api_uploads_fallback_requires_one_readable_playlist(
+        httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
+        is_reusable=True)
+    _mock_uploads_playlists(httpx_mock, {CH_A: "UU_A", CH_B: "UU_B"})
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.googleapis\.com/youtube/v3/playlistItems\?.*playlistId=UU_A.*"),
+        status_code=500)
+    _mock_uploads_items(httpx_mock, "UU_B")
+
+    assert fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW) == []
+
+
+def test_data_api_uploads_fallback_skips_malformed_channel_item(
+        httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
+        is_reusable=True)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.googleapis\.com/youtube/v3/channels\?.*"),
+        json={"items": [
+            {"id": CH_A, "contentDetails": []},
+            {"id": CH_B,
+             "contentDetails": {"relatedPlaylists": {"uploads": "UU_B"}}},
+        ]})
+    _mock_uploads_items(httpx_mock, "UU_B", _uploads_item(
+        "apiformat01", author="频道乙"))
+    _mock_videos_api(httpx_mock, {"apiformat01": "PT10M"})
+
+    videos = fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
+
+    assert [v.video_id for v in videos] == ["apiformat01"]
+
+
+def test_data_api_uploads_fallback_all_fail_still_alerts(
+        httpx_mock: HTTPXMock, tmp_path, monkeypatch):
+    monkeypatch.setattr(yt, "_FEED_RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(yt, "_FEED_WAVE_BACKOFF_SECONDS", 0)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.youtube\.com/feeds/.*"), status_code=500,
+        is_reusable=True)
+    httpx_mock.add_response(
+        url=re.compile(r"https://www\.googleapis\.com/youtube/v3/channels\?.*"),
+        status_code=500)
+
+    with pytest.raises(YoutubeFetchError, match="Data API fallback also failed"):
         fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
 
 

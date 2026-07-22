@@ -21,6 +21,9 @@ dev = [
     "pytest-mock>=3.12",
 ]
 
+[project.scripts]
+chat-daily = "chat_daily_tg.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

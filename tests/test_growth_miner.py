@@ -130,6 +130,29 @@ def test_second_mine_day_on_mined_day_is_noop(tmp_path: Path):
     assert second.calls == []  # short-circuits before touching the LLM
 
 
+def test_overlap_dedup_does_not_leave_orphan_slice_file(tmp_path: Path):
+    db = tmp_path / "m.db"
+    _make_db(db, _STD_ROWS)
+    store, seg_dir = _paths(tmp_path)
+    existing = growth_store.GrowthSegment(
+        id=f"{DATE}-1782518", chat_id=CHAT_ID, chat_name=NAME, date=DATE,
+        start_msg_id=1782518, end_msg_id=1782522, start_hm="22:20", end_hm="22:25",
+        msg_count=5, theme="旧段落", points=["旧要点"], quotes=[], participants="A K",
+        score=8.0,
+    )
+    assert growth_store.insert_segments(store, [existing])
+    llm = FakeLLM([_llm_json(_seg(1782518, 1782522, quotes=[
+        {"msg_id": 1782520, "sender": "A K", "text": "价值是创造出来的 不是节省出来的"},
+    ]))])
+
+    inserted, candidates = mine_day(
+        llm, _make_cfg(db), DATE, store_db=store, segments_dir=seg_dir, messages_db=db
+    )
+
+    assert candidates == 1 and inserted == []
+    assert not (seg_dir / "2026" / "07" / "11-1782518.md").exists()
+
+
 def test_empty_day_marks_mined_without_llm(tmp_path: Path):
     db = tmp_path / "m.db"
     _make_db(db, [])  # no messages at all

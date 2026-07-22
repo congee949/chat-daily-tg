@@ -1,5 +1,6 @@
 from pathlib import Path
 from chat_daily_tg.db import PermanentDB, PermanentEntry, compute_fingerprint
+from chat_daily_tg.sqlite_util import Database
 
 
 def _make(title: str, url=None, category="bank_product", content="c", captured_at="2026-04-17T10:00:00") -> PermanentEntry:
@@ -127,3 +128,43 @@ def test_upsert_collapses_utm_duplicates(tmp_path: Path):
     assert action == "updated"
     assert saved.mention_count == 2
     assert len(list(db.read_all())) == 1
+
+
+def test_database_initializes_once_and_records_schema_version(tmp_path: Path):
+    database = Database(tmp_path / "shared.db")
+    database.initialize()
+    conn = database.connect()
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list('growth_segments')")}
+    finally:
+        conn.close()
+    assert version == 3
+    assert "idx_growth_claimable" in indexes
+
+
+def test_database_resumes_partially_applied_growth_claim_migration(tmp_path: Path):
+    """An interrupted v3 migration may have committed its first ALTER only."""
+    import sqlite3
+    from chat_daily_tg import sqlite_util
+
+    path = tmp_path / "partial-v3.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(sqlite_util._BASE_SCHEMA)
+        conn.executescript(sqlite_util._INDEX_SCHEMA)
+        conn.execute("ALTER TABLE growth_segments ADD COLUMN claim_run_id TEXT")
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    Database(path).initialize()
+    conn = Database(path).connect()
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(growth_segments)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    assert {"claim_run_id", "claim_until"}.issubset(columns)
+    assert version == 3

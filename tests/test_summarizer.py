@@ -175,7 +175,7 @@ def test_run_summary_passes_embedding_evidence_context_to_verifier(tmp_path):
     run_summary(
         llm_client=llm,
         date="2026-05-06",
-        groups_with_content=[("Telegram / G1", "content")],
+        groups_with_content=[("Telegram / G1", "full raw chat must not be repeated")],
         detail_path=str(tmp_path / "summary.md"),
         evidence_context_builder=lambda output: "### Claim 查询：Claude 4.3\n- [1.000] G1 / 14:15 / A: 4.3出了哦",
     )
@@ -183,6 +183,9 @@ def test_run_summary_passes_embedding_evidence_context_to_verifier(tmp_path):
     verifier_prompt = llm.calls[1][0]
     assert "## Embedding 检索证据" in verifier_prompt
     assert "4.3出了哦" in verifier_prompt
+    assert "仅可依据下面的检索证据" in verifier_prompt
+    assert "full raw chat must not be repeated" not in verifier_prompt
+    assert "## 日报初稿" in verifier_prompt
 
 
 def test_run_summary_skips_verifier_when_no_high_risk_claims(tmp_path):

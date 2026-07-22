@@ -7,6 +7,7 @@ from chat_daily_tg.growth_store import (
     LOCAL_TZ,
     GrowthSegment,
     ab_stats,
+    claim_next,
     day_already_mined,
     insert_segments,
     latest_ab_pair,
@@ -15,6 +16,8 @@ from chat_daily_tg.growth_store import (
     mark_sent,
     mined_days_summary,
     pick_next,
+    release_claim,
+    renew_claim,
     queue_stats,
     recent_sent,
     segment_id,
@@ -84,6 +87,74 @@ def test_mark_sent_and_daily_quota_guard(tmp_path: Path):
     assert sent_count_on(db, "2026-07-12") == 0
     got = pick_next(db, prefer_date="2026-07-10")
     assert got is None  # sent segments leave the queue
+
+
+def test_claim_next_reserves_quota_and_can_be_released(tmp_path: Path):
+    db = tmp_path / "t.db"
+    insert_segments(db, [
+        _seg("2026-07-10", 100, 200, score=8.0),
+        _seg("2026-07-10", 300, 400, score=7.0),
+    ])
+    first = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="run-a", lease_seconds=300,
+    )
+    assert first is not None and first.id == "2026-07-10-100"
+    # An active claim counts toward the quota, so an overlapping invocation
+    # cannot reserve a different card and exceed the day's limit.
+    assert claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="run-b", lease_seconds=300,
+    ) is None
+    assert not mark_sent(db, first.id, style="A", run_id="wrong-run")
+    assert release_claim(db, first.id, "run-a")
+    again = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="run-b", lease_seconds=300,
+    )
+    assert again is not None and again.id == first.id
+    assert mark_sent(
+        db, again.id, style="B", sent_at="2026-07-11T09:31:00+08:00", run_id="run-b"
+    )
+    assert sent_count_on(db, "2026-07-11") == 1
+
+
+def test_expired_growth_claim_becomes_retryable(tmp_path: Path):
+    from chat_daily_tg.sqlite_util import connect
+
+    db = tmp_path / "t.db"
+    insert_segments(db, [_seg("2026-07-10", 100, 200)])
+    claimed = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="abandoned", lease_seconds=300,
+    )
+    assert claimed is not None
+    conn = connect(db)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE growth_segments SET claim_until = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+08:00", claimed.id),
+            )
+    finally:
+        conn.close()
+    recovered = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="recovery", lease_seconds=300,
+    )
+    assert recovered is not None and recovered.id == claimed.id
+
+
+def test_renew_claim_requires_current_lease_owner(tmp_path: Path):
+    db = tmp_path / "t.db"
+    insert_segments(db, [_seg("2026-07-10", 100, 200)])
+    claimed = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="owner", lease_seconds=1,
+    )
+    assert claimed is not None
+    assert not renew_claim(db, claimed.id, "not-owner")
+    assert renew_claim(db, claimed.id, "owner")
 
 
 def test_mined_days_guard_and_summary(tmp_path: Path):

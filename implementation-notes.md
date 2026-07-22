@@ -1,5 +1,25 @@
 # Implementation Notes
 
+## 2026-07-22 Architecture Refactor
+
+### Design Decisions
+
+- The first migration slice exposes a feature-first command tree while retaining the proven orchestration in `chat_daily_tg.application`. Feature entrypoints delegate to it temporarily, so launchd/R4S behavior, markers, and delivery ordering remain unchanged while ownership moves in later slices.
+- `run_daily.py` is an import alias to the package application module rather than a simple re-export. This preserves existing scripts and tests that monkeypatch its module-level dependencies during the transition.
+- The historical flags now reject multiple pipeline selectors instead of silently preferring the first branch. Existing single-pipeline wrappers remain compatible.
+
+### Deviations
+
+- Dependency injection and physical extraction of each pipeline are deferred until the compatible CLI boundary is verified; changing routing, network lifecycle, and business orchestration in one edit would make delivery regressions difficult to isolate.
+
+### Tradeoffs
+
+- `LLMClient` and `TelegramSender` own one lazy synchronous `httpx.Client` each, rather than a global client. This reuses pools across retries/chunks while preserving the project’s existing per-service proxy behavior and allowing explicit injection later.
+- The verifier keeps its four-fence output contract. When the existing embedding evidence builder is enabled, it now receives only high-risk evidence windows plus the draft, not all raw messages; a patch-only verifier is deferred because it would change the user-visible renderer and recovery format in the same release.
+- SQLite uses in-place, versioned migrations through `PRAGMA user_version` rather than a new ORM. The compatible `connect()` path initializes old databases once, so standalone scripts do not need a coordinated deployment cutover.
+- Growth delivery uses a finite lease, yielding at-least-once delivery rather than an impossible SQLite-plus-Telegram exactly-once claim. An external send that succeeds just as a lease expires can still duplicate; the state model makes that window explicit and recoverable.
+- Commit review added a send-time lease renewal and resumable v3 schema migration. This closes the avoidable window where a slow Card B/judge call consumed the initial lease, and makes a process interruption between the two new SQLite columns recover on its next start.
+
 ## Design Decisions
 
 - The official-X instant-push design uses five named account policies rather than a global keyword filter. Pure retweets are rejected deterministically before semantic classification, while quotes require substantive account-authored commentary.

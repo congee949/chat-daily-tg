@@ -132,43 +132,50 @@ class PermanentDB:
             data,
         )
 
-    @staticmethod
-    def _merge_one(existing: PermanentEntry, new: PermanentEntry) -> PermanentEntry:
-        existing.mention_count += 1
-        existing.last_mentioned_at = new.captured_at
-        for attr in ("title", "content", "notes", "url", "source_sender", "source_group"):
-            val = getattr(new, attr)
-            if val:
-                setattr(existing, attr, val)
-        return existing
-
     def upsert_many(
         self, new_entries: list[PermanentEntry]
     ) -> list[tuple[Literal["inserted", "updated"], PermanentEntry]]:
-        """Merge N entries in a single transaction, matching by fingerprint."""
+        """Merge N entries in one transaction, matching by SQLite's fingerprint key.
+
+        The former implementation first loaded every historic row into Python
+        and rebuilt its fingerprint before processing a batch.  That turned a
+        one-item daily update into O(total history).  ``fingerprint`` is already
+        a UNIQUE database constraint, so use it as the conflict arbiter and
+        read back only the rows touched by this call.
+        """
         if not new_entries:
             return []
         conn = self._conn()
         try:
-            by_fp: dict[str, PermanentEntry] = {}
-            for row in conn.execute("SELECT * FROM permanent"):
-                e = _row_to_entry(row)
-                by_fp[e.fingerprint()] = e
             results: list[tuple[Literal["inserted", "updated"], PermanentEntry]] = []
-            touched: list[PermanentEntry] = []
-            for new in new_entries:
-                fp = new.fingerprint()
-                if fp in by_fp:
-                    merged = self._merge_one(by_fp[fp], new)
-                    results.append(("updated", merged))
-                    touched.append(merged)
-                else:
-                    by_fp[fp] = new
-                    results.append(("inserted", new))
-                    touched.append(new)
             with conn:
-                for entry in touched:
-                    self._write(conn, entry)
+                for new in new_entries:
+                    fingerprint = new.fingerprint()
+                    existed = conn.execute(
+                        "SELECT 1 FROM permanent WHERE fingerprint = ?", (fingerprint,)
+                    ).fetchone() is not None
+                    data = asdict(new)
+                    data["fingerprint"] = fingerprint
+                    cols = list(_FIELDS) + ["fingerprint"]
+                    placeholders = ", ".join(f":{c}" for c in cols)
+                    conn.execute(
+                        f"INSERT INTO permanent ({', '.join(cols)}) VALUES ({placeholders}) "
+                        "ON CONFLICT(fingerprint) DO UPDATE SET "
+                        "mention_count = permanent.mention_count + 1, "
+                        "last_mentioned_at = excluded.captured_at, "
+                        "title = COALESCE(NULLIF(excluded.title, ''), permanent.title), "
+                        "content = COALESCE(NULLIF(excluded.content, ''), permanent.content), "
+                        "url = COALESCE(NULLIF(excluded.url, ''), permanent.url), "
+                        "notes = COALESCE(NULLIF(excluded.notes, ''), permanent.notes), "
+                        "source_sender = COALESCE(NULLIF(excluded.source_sender, ''), permanent.source_sender), "
+                        "source_group = COALESCE(NULLIF(excluded.source_group, ''), permanent.source_group)",
+                        data,
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM permanent WHERE fingerprint = ?", (fingerprint,)
+                    ).fetchone()
+                    assert row is not None
+                    results.append(("updated" if existed else "inserted", _row_to_entry(row)))
             return results
         finally:
             conn.close()

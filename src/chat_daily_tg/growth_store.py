@@ -39,7 +39,7 @@ class GrowthSegment:
     quotes: list[dict] = field(default_factory=list)
     participants: str = ""       # comma-joined display names
     score: float = 0.0
-    status: str = "pending"      # pending | sent | rejected
+    status: str = "pending"      # pending | sending | sent | rejected
     mined_at: str = ""
     sent_at: str | None = None
     sent_style: str | None = None
@@ -177,13 +177,118 @@ def pick_next(db_path: Path, prefer_date: str) -> GrowthSegment | None:
         conn.close()
 
 
-def mark_sent(db_path: Path, seg_id: str, style: str, sent_at: str | None = None) -> None:
+def claim_next(db_path: Path, *, prefer_date: str, sent_date: str, quota: int,
+               run_id: str, lease_seconds: int = 900) -> GrowthSegment | None:
+    """Atomically reserve the next card while enforcing the daily quota.
+
+    Telegram delivery cannot share a transaction with SQLite, so this provides
+    at-least-once semantics: a live lease prevents concurrent runs from sending
+    the same segment; an expired lease becomes retryable.  In-flight leases
+    count toward the quota, preventing two overlapping jobs from each reserving
+    a different card when the quota is one.
+    """
+    if quota <= 0:
+        return None
+    conn = connect(db_path)
+    now = _now_iso()
+    claim_until = (datetime.now(LOCAL_TZ) + timedelta(seconds=lease_seconds)).isoformat(
+        timespec="seconds"
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        reserved = conn.execute(
+            "SELECT COUNT(*) AS n FROM growth_segments "
+            "WHERE (status = 'sent' AND sent_at LIKE ?) "
+            "OR (status = 'sending' AND claim_until > ?)",
+            (f"{sent_date}%", now),
+        ).fetchone()["n"]
+        if reserved >= quota:
+            conn.commit()
+            return None
+        row = conn.execute(
+            "SELECT * FROM growth_segments "
+            "WHERE status = 'pending' "
+            "OR (status = 'sending' AND (claim_until IS NULL OR claim_until < ?)) "
+            "ORDER BY CASE WHEN date = ? THEN 0 ELSE 1 END, "
+            "score DESC, date DESC, start_msg_id ASC LIMIT 1",
+            (now, prefer_date),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        seg_id = row["id"]
+        conn.execute(
+            "UPDATE growth_segments SET status = 'sending', claim_run_id = ?, claim_until = ? "
+            "WHERE id = ?",
+            (run_id, claim_until, seg_id),
+        )
+        claimed = conn.execute("SELECT * FROM growth_segments WHERE id = ?", (seg_id,)).fetchone()
+        conn.commit()
+        assert claimed is not None
+        return _row_to_segment(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def release_claim(db_path: Path, seg_id: str, run_id: str) -> bool:
+    """Make a failed pre-delivery claim immediately retryable when still owned."""
     conn = connect(db_path)
     try:
         with conn:
-            conn.execute(
-                "UPDATE growth_segments SET status = 'sent', sent_at = ?, sent_style = ? "
-                "WHERE id = ?", (sent_at or _now_iso(), style, seg_id))
+            cur = conn.execute(
+                "UPDATE growth_segments SET status = 'pending', claim_run_id = NULL, claim_until = NULL "
+                "WHERE id = ? AND status = 'sending' AND claim_run_id = ?",
+                (seg_id, run_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def renew_claim(db_path: Path, seg_id: str, run_id: str,
+                lease_seconds: int = 900) -> bool:
+    """Extend a live lease immediately before the irreversible Telegram send.
+
+    Card generation and judging can take longer than the initial lease on a
+    slow provider.  Renewing by owner prevents another run from recovering an
+    expired reservation between card creation and delivery; failure means this
+    run must not send because ownership has already moved elsewhere.
+    """
+    conn = connect(db_path)
+    claim_until = (datetime.now(LOCAL_TZ) + timedelta(seconds=lease_seconds)).isoformat(
+        timespec="seconds"
+    )
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE growth_segments SET claim_until = ? "
+                "WHERE id = ? AND status = 'sending' AND claim_run_id = ?",
+                (claim_until, seg_id, run_id),
+            )
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def mark_sent(db_path: Path, seg_id: str, style: str, sent_at: str | None = None,
+              *, run_id: str | None = None) -> bool:
+    """Commit post-delivery state, optionally requiring ownership of a lease."""
+    conn = connect(db_path)
+    try:
+        with conn:
+            sql = (
+                "UPDATE growth_segments SET status = 'sent', sent_at = ?, sent_style = ?, "
+                "claim_run_id = NULL, claim_until = NULL WHERE id = ?"
+            )
+            params: tuple = (sent_at or _now_iso(), style, seg_id)
+            if run_id is not None:
+                sql += " AND status = 'sending' AND claim_run_id = ?"
+                params += (run_id,)
+            cur = conn.execute(sql, params)
+            return cur.rowcount > 0
     finally:
         conn.close()
 

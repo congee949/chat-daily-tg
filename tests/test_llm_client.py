@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from unittest.mock import patch
 from pytest_httpx import HTTPXMock
 from chat_daily_tg.llm_client import LLMClient
 
@@ -105,3 +106,33 @@ def test_chat_completion_merges_provider_extra_body(httpx_mock: HTTPXMock):
     assert '"model":"deepseek-v4-pro"' in compact
     assert '"thinking":{"type":"enabled"}' in compact
     assert '"reasoning_effort":"max"' in compact
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+def test_chat_does_not_retry_non_retryable_400(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url="http://127.0.0.1:8317/v1/chat/completions",
+        method="POST", status_code=400,
+    )
+    client = LLMClient(
+        endpoint="http://127.0.0.1:8317/v1", model="m", api_key="k",
+        retry_max_attempts=3, retry_backoff_seconds=[0],
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        client.chat("bad request")
+    assert len(httpx_mock.get_requests()) == 1
+
+
+def test_client_reuses_one_pool_and_closes_it():
+    with patch("chat_daily_tg.llm_client.httpx.Client") as client_cls:
+        http = client_cls.return_value.__enter__.return_value
+        response = http.post.return_value
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        response.headers = {}
+        response.raise_for_status.return_value = None
+        client = LLMClient(endpoint="http://x", model="m", api_key="secret")
+        assert client.chat("one")[0] == "ok"
+        assert client.chat("two")[0] == "ok"
+        assert client_cls.call_count == 1
+        client.close()
+        client_cls.return_value.__exit__.assert_called_once()

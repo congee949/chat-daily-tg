@@ -2,6 +2,7 @@ from pytest_httpx import HTTPXMock
 import json
 import pytest
 import httpx
+from unittest.mock import patch
 from chat_daily_tg.tg_sender import (
     TelegramSender,
     split_message,
@@ -413,3 +414,17 @@ def test_send_multichunk_resumes_after_partial_failure(tmp_path, httpx_mock, moc
     assert ids == [2]
     # Total POSTs = chunk1(ok) + chunk2(fail) + chunk2(ok) = 3, NOT 4 (no first-half resend).
     assert len(httpx_mock.get_requests()) == 3
+
+
+def test_sender_reuses_one_pool_and_closes_it():
+    with patch("chat_daily_tg.tg_sender.httpx.Client") as client_cls:
+        http = client_cls.return_value.__enter__.return_value
+        response = http.post.return_value
+        response.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        response.raise_for_status.return_value = None
+        sender = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+        sender.send("one")
+        sender.send("two")
+        assert client_cls.call_count == 1
+        sender.close()
+        client_cls.return_value.__exit__.assert_called_once()

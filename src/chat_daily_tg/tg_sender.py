@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -199,6 +200,49 @@ class TelegramSender:
     timeout: float = 30.0
     retry_max_attempts: int = 3
     retry_backoff_seconds: list = field(default_factory=lambda: [5, 15, 60])
+    client: httpx.Client | None = field(default=None, repr=False)
+    _owned_client_context: httpx.Client | None = field(default=None, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def _http_client(self) -> httpx.Client:
+        """Return this sender's reusable client without changing its route policy.
+
+        Telegram intentionally keeps httpx's default ``trust_env=True`` so the
+        guarded jobs use their configured HTTP(S) proxy.  The client is created
+        lazily because ``--no-push`` must not touch the network stack at all.
+        """
+        if self._closed:
+            raise RuntimeError("TelegramSender is closed")
+        if self.client is None:
+            self._owned_client_context = httpx.Client(timeout=self.timeout)
+            self.client = self._owned_client_context.__enter__()
+        return self.client
+
+    @contextmanager
+    def _client_session(self):
+        yield self._http_client()
+
+    def close(self) -> None:
+        """Release an internally-created client pool (safe to call repeatedly)."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._owned_client_context is not None:
+            self._owned_client_context.__exit__(None, None, None)
+        self._owned_client_context = None
+        self.client = None
+
+    def __enter__(self) -> "TelegramSender":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - legacy callers may not close
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _send_one(self, payload: str, parse_mode: str | None = None) -> int:
         """Send a single, already-formatted payload chunk. No further formatting here."""
@@ -207,7 +251,7 @@ class TelegramSender:
         attempts = 0
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     data = {"chat_id": self.chat_id, "text": payload}
                     if parse_mode is not None:
                         data["parse_mode"] = parse_mode
@@ -347,7 +391,7 @@ class TelegramSender:
         rl_hits = 0
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     if media:
                         handles = []
                         try:
@@ -408,7 +452,7 @@ class TelegramSender:
         degraded = False
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     r = c.post(url, json=payload)
                     if r.status_code == 429:
                         rl_hits += 1
@@ -455,7 +499,7 @@ class TelegramSender:
         attempts = 0
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     with open(photo_path, "rb") as fh:
                         files = {"photo": fh}
                         data = {"chat_id": self.chat_id}
@@ -501,7 +545,7 @@ class TelegramSender:
         rl_hits = 0
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     with open(file_path, "rb") as fh:
                         files = {field_name: fh}
                         data = {"chat_id": self.chat_id}
@@ -551,7 +595,7 @@ class TelegramSender:
         rl_hits = 0
         while attempts < self.retry_max_attempts:
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                with self._client_session() as c:
                     handles = []
                     try:
                         media = []

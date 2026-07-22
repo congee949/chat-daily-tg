@@ -380,15 +380,22 @@ def mine_day(llm, cfg, date_str: str, *, sync: bool = False,
             if result is not None:
                 validated.append(result)
 
-    # 只有 pending 段落写归档切片（且必须在入库前写好路径）。
+    # Store a prospective path before insertion so the persisted segment points
+    # at its future archive, but only write the file AFTER overlap/exact-span
+    # dedup tells us this candidate actually entered the queue.  Otherwise a
+    # re-mine leaves an orphan slice that never appears in the DB index.
+    spans_by_id: dict[str, list] = {}
     for seg, span_rows in validated:
         if seg.status == "pending":
             y, m, d = date_str.split("-")
             slice_path = Path(segments_dir) / y / m / f"{d}-{seg.start_msg_id}.md"
             seg.slice_path = str(slice_path)
-            growth_store.write_slice_file(seg, span_rows, slice_path)
+            spans_by_id[seg.id] = span_rows
 
     inserted = growth_store.insert_segments(store_db, [seg for seg, _ in validated])
+    for seg in inserted:
+        if seg.status == "pending" and seg.slice_path:
+            growth_store.write_slice_file(seg, spans_by_id[seg.id], Path(seg.slice_path))
     if any(seg.slice_path for seg in inserted):  # 只有落了切片才有索引可更新
         growth_store.regenerate_slice_index(store_db, segments_dir)
 

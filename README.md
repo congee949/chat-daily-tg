@@ -2,7 +2,7 @@
 
 每天自动导出微信和 Telegram 群消息，整理成统一日报推送到 Telegram，同时本地归档。
 
-在日报之外还有三条独立管线：**频道转发**（选定频道原文逐条转成卡片，跳过 LLM）、**成长内容挖掘**（从群聊里挖个人成长素材、A/B 择优推送）、**B站订阅 digest**（白名单 UP 新视频卡片，已迁至 r4s 运行）。四条管线共用同一套配置、路由表和归档目录。
+在日报之外还有四条独立管线：**频道转发**（选定频道原文逐条转成卡片，跳过 LLM）、**成长内容挖掘**（从群聊里挖个人成长素材、A/B 择优推送）、**B站订阅 digest** 与 **YouTube 订阅 digest**（白名单创作者的新视频卡片，均在 r4s 运行）。五条管线共用配置、Telegram 路由表和归档/状态目录。
 
 ## 日报示例
 
@@ -16,7 +16,18 @@
 
 ![chat-daily-tg 架构](chat-daily-architecture.png)
 
-<sub>源文件 `diagram/chat-daily-architecture.svg`，改完用 headless Chrome 截图重渲：`chrome --headless=new --force-device-scale-factor=2 --window-size=940,660 --screenshot=chat-daily-architecture.png file://$PWD/diagram/chat-daily-architecture.svg`</sub>
+<sub>架构图反映当前 CLI、feature application 与共享运行时的迁移边界；调整架构时请同步更新本 PNG 和本节说明。</sub>
+
+当前是渐进式的模块化单体：新的命令和 feature application 已经按业务边界拆开，原有编排逻辑暂留在运行时模块中，避免一次重构改变已验证的调度与归档行为。
+
+| 层 | 责任 |
+|---|---|
+| `chat-daily` / `cli.py` | 唯一的日常 CLI；显式子命令避免互相冲突的 flag 静默择一 |
+| `features/<feature>/application.py` | daily、channels、growth、media digest 的应用入口 |
+| `application.py` | 兼容期运行时与既有编排逻辑；供 feature application 调用 |
+| `run_daily.py` | 仅保留给现有 launchd / r4s wrapper 的兼容 shim，仍支持旧 flag |
+| `llm_client.py` / `tg_sender.py` | 单次管线运行内复用 HTTP 连接；关闭时统一释放连接池 |
+| `sqlite_util.py` / `db.py` | SQLite WAL、`PRAGMA user_version` 迁移、索引与业务数据访问 |
 
 ## 功能清单
 
@@ -26,9 +37,9 @@
 |---|---|
 | 微信群导出 | 通过 [wx-cli](https://github.com/jackwener/wx-cli) 解密读取本地微信消息库，导出指定群前一天聊天 |
 | Telegram 群导出 | 通过 [tg-cli](https://github.com/public-clis/tg-cli) 本地 SQLite 读取 |
-| LLM 摘要 | 生成适合手机阅读的统一简报（默认经本机 CLIProxyAPI 调 Gemini，见「模型配置」） |
-| 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合 |
-| Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，注入 verifier |
+| LLM 摘要 | 生成适合手机阅读的统一简报（当前默认是 VibeKey 上的 `gpt-5.6-sol`，见「模型配置」） |
+| 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合；核验输入优先使用高风险 claim 的局部证据，而不是重复拼接整天聊天 |
+| Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，作为 verifier 的局部事实输入 |
 | 图片理解（可选） | 开启后用多模态模型分析聊天中的图片，高分图并入日报 |
 | 富消息内嵌图 | 日报正文、健康图与引用配图合成**单条** Telegram 富消息（Bot API 10.2 `sendRichMessage`）；媒体随请求直接上传，无需公网图片中转。任一环失败自动回落「健康图 + 全文 + 引用尾图」 |
 | Telegram 推送 | 通过 Bot API 推到路由表指定的话题 |
@@ -48,12 +59,24 @@
 
 白名单 UP 新视频卡片（封面 + 一句话摘要 + 观看按钮）。**已迁至 r4s cron 运行**，Mac 侧的 launchd label 已移除、`install-launchd.sh` 不再安装它（防双跑），代码仍在本仓库。
 
+### YouTube 订阅 digest
+
+白名单频道的新视频卡片（封面 + 一句话摘要 + 观看按钮）。与 B 站一样在 **r4s cron** 上运行，`due_gate.sh` 每 10–15 分钟放行一次，发送后写入 media ledger 以避免重复推送。
+
 ## 项目结构
 
 ```
 .
-├── run_daily.py                    # 全部四条管线的统一入口（靠 flag 分流）
+├── pyproject.toml                  # 安装 `chat-daily` CLI
+├── run_daily.py                    # 旧 flag 入口的兼容 shim（供已有 wrapper 使用）
 ├── src/chat_daily_tg/
+│   ├── cli.py                      # 显式子命令入口：daily / channels / growth / bilibili / youtube
+│   ├── application.py              # 兼容期运行时与既有编排
+│   ├── features/
+│   │   ├── daily/application.py    # 日报 feature 入口
+│   │   ├── channels/application.py # 频道转发与单条重发入口
+│   │   ├── growth/application.py   # growth run / mine / backfill / weekly 入口
+│   │   └── media_digest/application.py # B站 / YouTube digest 入口
 │   ├── wx_exporter.py              # 微信聊天导出（含图片按分下载）
 │   ├── telegram_exporter.py        # Telegram 聊天导出
 │   ├── telegram_media.py           # TG 图片旁路下载（tg-cli 不存媒体）
@@ -76,15 +99,17 @@
 │   ├── raw_seen.py                 # 已推送去重与增量高水位
 │   ├── growth_miner.py             # 成长挖掘：切片与素材提取
 │   ├── growth_cards.py             # 成长挖掘：A/B 构卡与评审
-│   ├── growth_store.py             # 成长挖掘：存储与 rubric
+│   ├── growth_store.py             # 成长挖掘：存储、quota 与原子 claim lease
 │   ├── growth_weekly.py            # 成长挖掘：周报与 rubric 合并
 │   ├── bilibili_fetcher.py         # B站抓取（api / opencli 双 transport）
 │   ├── bilibili_digest.py          # B站卡片编排
+│   ├── youtube_fetcher.py          # YouTube RSS / 元数据抓取
+│   ├── youtube_digest.py           # YouTube 卡片编排
 │   ├── tg_sender.py                # Telegram 发送（含富消息）
 │   ├── notifier.py                 # 通知封装
-│   ├── llm_client.py               # LLM API 客户端
+│   ├── llm_client.py               # 可复用连接池、分类重试与调用指标的 LLM 客户端
 │   ├── db.py                       # SQLite 数据访问
-│   ├── sqlite_util.py              # 连接与 schema 初始化
+│   ├── sqlite_util.py              # 连接、WAL pragma 与版本化 schema migration
 │   ├── archive.py                  # 归档与媒体保留期清理
 │   ├── sanitize.py                 # 文本清洗
 │   ├── media.py                    # 媒体候选打分
@@ -98,6 +123,8 @@
 │   ├── guard_common.sh             # guard 共享逻辑
 │   ├── sync_tg_targets.sh          # 路由表同步到 r4s / bwg
 │   ├── run_bilibili_r4s.sh         # B站 digest（在 r4s 上跑）
+│   ├── run_youtube_r4s.sh          # YouTube digest（在 r4s 上跑）
+│   ├── due_gate.sh                 # r4s 上 B站 / YouTube 的随机间隔门控
 │   ├── tg_media_dump.py            # telethon 媒体下载（借 kabi-tg-cli 解释器）
 │   ├── migrate_jsonl_to_sqlite.py  # 一次性迁移脚本（2026-06-29 已执行）
 │   └── weekly_media_rules_review.py # 周媒体规则回顾
@@ -127,9 +154,11 @@
 | `permanent` | 长期机会库，按 `fingerprint` 唯一（URL 会先剥离 utm_* 等跟踪参数再算指纹） |
 | `hot_leads` | 短期热点 |
 | `repeat_topics` | 近 7 天重复话题 |
-| `growth_segments` / `growth_mined_days` / `growth_ab_log` | 成长挖掘的切片、天级幂等标记、A/B 判决记录 |
+| `growth_segments` / `growth_mined_days` / `growth_ab_log` | 成长挖掘的切片、天级幂等标记、A/B 判决记录；segment 使用 `pending → sending → sent` 的 claim lease，避免重叠任务选中同一素材 |
 
 > 数据目录里残留的 `permanent.jsonl` / `repeat_topics.jsonl` 是迁移前的旧文件，**已不是事实源**，代码不再读取。
+
+数据库 schema 由 SQLite 的 `PRAGMA user_version` 管理；首次打开旧库时会迁移到当前版本，普通连接只设置 WAL、busy timeout 等连接级参数。growth 的 claim lease 降低并发重复发送风险，但 Telegram 外部发送不能与 SQLite 同事务，因此投递语义是可恢复的 **at-least-once**，不是严格 exactly-once。
 
 ## 配置
 
@@ -259,17 +288,23 @@ Embedding 证据检索也是可选功能。开启 `models.embedding.enabled` 后
 
 ```bash
 cd <repo>
-source .venv/bin/activate
+uv sync --extra dev
 
-python run_daily.py                      # 跑昨天的日报
-python run_daily.py --date 2026-04-17    # 补跑指定日期
-python run_daily.py --no-push            # 干跑，不推送
-python run_daily.py --channels-only      # 只跑频道转发
-python run_daily.py --growth-only        # 只跑成长挖掘
-python run_daily.py --bilibili-only      # 只跑 B站 digest（正常在 r4s 上跑）
+uv run chat-daily daily run                         # 跑昨天的日报
+uv run chat-daily daily run --date 2026-04-17       # 补跑指定日期
+uv run chat-daily daily run --no-push               # 干跑，不推送
+uv run chat-daily daily run --skip-if-done          # 已成功推送时不重复运行
+uv run chat-daily channels run                       # 转发未处理频道消息
+uv run chat-daily channels resend -1001234567890:42 # 重发一条频道消息
+uv run chat-daily growth run                         # 挖掘并推送下一张成长卡
+uv run chat-daily growth mine --date 2026-04-17     # 只挖指定日期，加入队列但不推送
+uv run chat-daily growth backfill                    # 回填配置的历史日期
+uv run chat-daily growth weekly                      # 发送周度 A/B 报告
+uv run chat-daily bilibili run                       # B站 digest（正常在 r4s 上跑）
+uv run chat-daily youtube run                        # YouTube digest（正常在 r4s 上跑）
 ```
 
-完整 flag 见 `python run_daily.py --help`。
+完整命令见 `uv run chat-daily --help`。现有 launchd / r4s wrapper 仍调用 `python run_daily.py` 和旧 flag；它们通过兼容 shim 保持可用，迁移到新 CLI 时无需停机。
 
 ### 安装 launchd 定时任务（macOS）
 

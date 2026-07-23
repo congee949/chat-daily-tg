@@ -73,3 +73,15 @@
 ## Open Questions
 
 - Whether to build the deferred second stage (structured classifier fallback, event-index dedup, specialized renderers, thread idle bundling) is pending user decision; the deterministic first stage stands until a missed-event or noise incident argues otherwise.
+
+## 2026-07-23 Bilibili Article Subscription
+
+### Design Decisions
+
+- Article subscription is an explicit `BilibiliUp.articles` opt-in.  It reuses the existing polling, seen store, Bilibili topic, sender, and append-only ledger while retaining a distinct article model and renderer, so existing video-only UPs have unchanged behavior.
+- Discovery reads only the serial, bounded `x/space/article` list API using direct (`trust_env=False`) requests.  It fetches neither article pages nor article details on a timer; full text remains a user-driven Podcast4Bot operation.
+- A successful article card is ledgered with its canonical `https://www.bilibili.com/read/cv<ID>` URL before the existing seen write.  Ledger failure is an error-level operational fault but does not resend an already visible card.
+
+### Tradeoffs
+
+- Videos and opted-in articles are merged only at the final ordering/cap stage.  This gives the topic a chronological view while preserving each source's independent failure semantics; a total outage of every configured discovery path remains alertable.

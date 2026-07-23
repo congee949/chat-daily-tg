@@ -409,7 +409,7 @@ def run_bilibili(no_push: bool = False) -> int:
     try:
         from chat_daily_tg.bilibili_digest import build_summarizer, push_digest
         from chat_daily_tg.bilibili_fetcher import (
-            BridgeUnavailableError, fetch_new_videos, probe_bridge,
+            BridgeUnavailableError, fetch_new_content, probe_bridge,
         )
         from chat_daily_tg.paths import BILIBILI_SEEN_PATH
         from chat_daily_tg.raw_seen import SeenStore
@@ -435,13 +435,15 @@ def run_bilibili(no_push: bool = False) -> int:
                 return 1
 
         seen = SeenStore(BILIBILI_SEEN_PATH)
-        videos = fetch_new_videos(
+        contents = fetch_new_content(
             src, seen,
             retry_max_attempts=cfg.retry.max_attempts,
             retry_backoff_seconds=cfg.retry.backoff_seconds,
         )
-        log.info("bilibili new videos: %d", len(videos))
-        if not videos:
+        video_count = sum(content.kind == "video" for content in contents)
+        article_count = sum(content.kind == "article" for content in contents)
+        log.info("bilibili new content: videos=%d articles=%d", video_count, article_count)
+        if not contents:
             return 0
 
         sender = None
@@ -456,11 +458,11 @@ def run_bilibili(no_push: bool = False) -> int:
             )
             log.info("bilibili digest target: %s/thread=%s", chat_id, thread_id)
         workdir = prepare_archive_day(tag)
-        sent = push_digest(videos, sender=sender, seen=seen, cfg=cfg,
+        sent = push_digest(contents, sender=sender, seen=seen, cfg=cfg,
                            summarizer=build_summarizer(cfg), workdir=workdir,
                            no_push=no_push)
         log.info("✓ bilibili digest complete: %d/%d cards sent (no_push=%s)",
-                 sent, len(videos), no_push)
+                 sent, len(contents), no_push)
         return 0
     except Exception as e:
         log.exception("bilibili digest failed: %s", e)

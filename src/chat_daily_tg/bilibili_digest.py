@@ -17,7 +17,7 @@ from typing import Callable
 
 import httpx
 
-from chat_daily_tg.bilibili_fetcher import BiliVideo
+from chat_daily_tg.bilibili_fetcher import BiliArticle, BiliVideo, BilibiliContent
 from chat_daily_tg.config import Config
 from chat_daily_tg.raw_seen import SeenStore
 from chat_daily_tg.sent_ledger import append_message_ids
@@ -128,66 +128,100 @@ def card_caption(video: BiliVideo, summary: str | None) -> str:
     return "\n".join(lines)
 
 
-def push_digest(videos: list[BiliVideo], *, sender: TelegramSender | None,
+def article_card_caption(article: BiliArticle) -> str:
+    """Article card text uses list metadata only; never invent a preview."""
+    meta = [escape_html(article.author)] if article.author else []
+    if article.publish_time is not None:
+        meta.append(article.publish_time.strftime("%m-%d %H:%M"))
+    lines = ["📄 专栏", f"<b>{escape_html(article.title)}</b>"]
+    if meta:
+        lines.append("👤 " + " · ".join(meta))
+    if article.summary:
+        lines.append(f"📝 {escape_html(article.summary)}")
+    lines.append("❤️ 标记后发送到 Podcast4Bot 分析")
+    return "\n".join(lines)
+
+
+def _message_ids(value) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, int):
+        return [value]
+    return [int(mid) for mid in value if mid is not None]
+
+
+def push_digest(contents: list[BilibiliContent], *, sender: TelegramSender | None,
                 seen: SeenStore, cfg: Config, summarizer: Summarizer | None,
                 workdir: Path, no_push: bool = False) -> int:
-    """Send one card per video, oldest first (topic reads chronologically).
+    """Send one card per content item, oldest first (topic reads chronologically).
     Returns the number of cards actually sent. no_push logs the would-be cards
     WITHOUT marking them seen, so a later real run still pushes them."""
     digest = cfg.sources.bilibili.digest
     sent = 0
-    for video in reversed(videos):
+    for content in reversed(contents):
         if no_push or sender is None:
             # Dry-run short-circuits before cover download / LLM spend.
-            log.info("[no-push] %s %s (%s)", video.bvid, video.title, video.author)
+            log.info("[no-push] %s %s (%s)", content.seen_key, content.title, content.author)
             continue
         cover_path: Path | None = None
-        if digest.cover_enabled and video.cover:
-            cover_path = download_cover(video.cover, workdir / f"bili-{video.bvid}.jpg")
-        summary = summarizer(video, cover_path) if summarizer else None
-        caption = card_caption(video, summary)
-        # 按钮走自有域名跳转页而非 video.url：TG 按钮只收 http(s)，跳转页
-        # 把 iOS 端交给 bilibili:// 唤起 PiliPlus，3s 未唤起自动回退 B 站网页。
-        button = (
-            ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{video.bvid}")
-            if digest.link_enabled else None
-        )
+        if digest.cover_enabled and content.cover:
+            cover_path = download_cover(
+                content.cover, workdir / f"bili-{content.kind}-{content.content_id}.jpg"
+            )
+        if isinstance(content, BiliVideo):
+            summary = summarizer(content, cover_path) if summarizer else None
+            caption = card_caption(content, summary)
+            # 视频 CTA 继续走自有跳转页，保持既有 PiliPlus 唤起体验。
+            button = (
+                ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{content.bvid}")
+                if digest.link_enabled else None
+            )
+        else:
+            caption = article_card_caption(content)
+            button = ("📖 阅读全文", content.url) if digest.link_enabled else None
         msg_ids: list[int] = []
         try:
             if cover_path is not None:
                 try:
                     mid = sender.send_photo(cover_path, caption=caption, parse_mode="HTML",
                                             button=button)
-                    if mid is not None:
-                        msg_ids = [mid] if isinstance(mid, int) else list(mid)
+                    msg_ids = _message_ids(mid)
                 except Exception as e:
                     log.warning("sendPhoto failed for %s, falling back to text: %s",
-                                video.bvid, e)
-                    ids = sender.send_card(caption, link=video.url if digest.link_enabled else None,
+                                content.content_id, e)
+                    ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
                                            button=button)
-                    msg_ids = list(ids or [])
+                    msg_ids = _message_ids(ids)
             else:
-                ids = sender.send_card(caption, link=video.url if digest.link_enabled else None,
+                ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
                                        button=button)
-                msg_ids = list(ids or [])
+                msg_ids = _message_ids(ids)
         except Exception as e:
             # This card failed both paths — leave it unseen so the next run
             # retries it, and keep going with the rest of the digest.
-            log.error("card push failed for %s: %s", video.bvid, e)
+            log.error("card push failed for %s: %s", content.content_id, e)
+            continue
+        if not msg_ids:
+            log.error("card push returned no message id for %s; leaving unseen", content.content_id)
             continue
         # Write-after-send: message_id → canonical URL for Podcast thumbs-up handoff.
         try:
-            append_message_ids(
+            written = append_message_ids(
                 msg_ids,
                 chat_id=sender.chat_id,
                 thread_id=getattr(sender, "message_thread_id", None),
-                url=video.url,
+                url=content.url,
                 producer="bilibili",
-                content_id=video.seen_key,
+                content_id=content.seen_key,
             )
+            if written != len(msg_ids):
+                log.error("sent_ledger incomplete for %s: %s/%s message ids", content.content_id,
+                          written, len(msg_ids))
         except Exception as e:
-            log.warning("sent_ledger write failed for %s: %s", video.bvid, e)
-        seen.add(video.seen_key)
+            # The visible card already exists.  Do not resend it, but make the
+            # reaction-routing loss highly visible.
+            log.error("sent_ledger write failed for %s: %s", content.content_id, e)
+        seen.add(content.seen_key)
         sent += 1
         time.sleep(digest.card_delay_seconds)
     return sent

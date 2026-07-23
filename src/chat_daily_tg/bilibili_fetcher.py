@@ -31,6 +31,7 @@ import logging
 import re
 import subprocess
 import time
+from typing import Literal
 
 import httpx
 
@@ -76,6 +77,49 @@ class BiliVideo:
     @property
     def seen_key(self) -> str:
         return f"bilibili:{self.bvid}"
+
+    @property
+    def kind(self) -> Literal["video"]:
+        return "video"
+
+    @property
+    def content_id(self) -> str:
+        return self.bvid
+
+
+@dataclass(frozen=True)
+class BiliArticle:
+    """Normalized Bilibili column article.
+
+    It deliberately has no media-only fields (duration/view/ASR hints).  The
+    delivery layer can treat it together with ``BiliVideo`` through the small
+    shared content surface below, while article retrieval remains isolated.
+    """
+
+    article_id: int
+    title: str
+    author: str
+    uid: int
+    url: str
+    publish_time: datetime | None
+    summary: str = ""
+    cover: str | None = None
+    description: str = ""
+
+    @property
+    def kind(self) -> Literal["article"]:
+        return "article"
+
+    @property
+    def content_id(self) -> str:
+        return f"cv{self.article_id}"
+
+    @property
+    def seen_key(self) -> str:
+        return f"bilibili:article:{self.article_id}"
+
+
+BilibiliContent = BiliVideo | BiliArticle
 
 
 def seen_key_for(bvid: str) -> str:
@@ -163,6 +207,7 @@ _API_HEADERS = {
 }
 _MEDIALIST_URL = "https://api.bilibili.com/x/v2/medialist/resource/list"
 _VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
+_ARTICLE_LIST_URL = "https://api.bilibili.com/x/space/article"
 # Pause between per-UP list calls: 23 UPs hourly is already low-frequency, the
 # spacing just avoids a burst profile (触发限流降频，不绕过).
 _API_CALL_SPACING_SECONDS = 1.0
@@ -312,6 +357,175 @@ def _finalize(videos: list[BiliVideo], max_per_digest: int) -> list[BiliVideo]:
         log.info("digest capped: %d -> %d videos", len(videos), max_per_digest)
         videos = videos[:max_per_digest]
     return videos
+
+
+def _article_cover(row: dict) -> str | None:
+    """Extract the best available cover across observed article-list shapes."""
+    for key in ("cover", "image_url", "banner_url"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("covers", "image_urls"):
+        values = row.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+def _article_publish_time(value) -> datetime | None:
+    ts = _as_int(value)
+    # Bilibili publishes seconds.  Reject milliseconds/negative/far-future
+    # values rather than letting one poisoned row make pagination unbounded.
+    if ts is None or ts <= 0 or ts > 4_102_444_800:  # 2100-01-01 UTC
+        return None
+    try:
+        return datetime.fromtimestamp(ts)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _article_rows(data: dict) -> list[dict]:
+    """The endpoint has used both ``articles`` and ``list`` in responses."""
+    for key in ("articles", "list"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _parse_article_item(row: dict, up, seen: SeenStore, cutoff: datetime) -> BiliArticle | None:
+    article_id = _as_int(row.get("id") or row.get("article_id"))
+    title = str(row.get("title") or "").strip()
+    publish_time = _article_publish_time(row.get("publish_time") or row.get("ctime"))
+    if article_id is None or article_id <= 0 or not title or publish_time is None:
+        return None
+    article = BiliArticle(
+        article_id=article_id,
+        title=title,
+        author=str(row.get("author_name") or row.get("uname") or up.name or "").strip(),
+        uid=up.uid,
+        url=f"https://www.bilibili.com/read/cv{article_id}",
+        publish_time=publish_time,
+        summary=str(row.get("summary") or row.get("desc") or "").strip(),
+        cover=_article_cover(row),
+        description=str(row.get("summary") or row.get("desc") or "").strip(),
+    )
+    if article.seen_key in seen or publish_time < cutoff:
+        return None
+    return article
+
+
+def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
+                       now: datetime | None = None) -> list[BiliArticle]:
+    """Discover recent articles for UPs which explicitly opted in.
+
+    This is intentionally a low-frequency, serial list fetch.  It never fetches
+    full article bodies: those are demand-driven by Podcast4Bot after a ❤️.
+    """
+    now = now or datetime.now()
+    cutoff = now - timedelta(hours=src.fetch.lookback_hours)
+    blacklist_uids = {up.uid for up in src.fetch.blacklist}
+    ups = [up for up in src.fetch.whitelist if up.articles and up.uid not in blacklist_uids]
+    if not ups:
+        return []
+
+    articles: list[BiliArticle] = []
+    failures = 0
+    with httpx.Client(timeout=src.opencli.timeout_seconds, headers=_API_HEADERS,
+                      trust_env=False,
+                      transport=httpx.HTTPTransport(retries=2)) as client:
+        for up_index, up in enumerate(ups):
+            if up_index:
+                time.sleep(_API_CALL_SPACING_SECONDS)
+            page = 1
+            try:
+                while page <= src.fetch.article_max_pages:
+                    data = _api_get(client, _ARTICLE_LIST_URL, params={
+                        "mid": up.uid,
+                        "pn": page,
+                        "ps": src.fetch.article_per_page,
+                        "sort": "publish_time",
+                    })
+                    rows = _article_rows(data)
+                    oldest: datetime | None = None
+                    for row in rows:
+                        try:
+                            pub = _article_publish_time(row.get("publish_time") or row.get("ctime"))
+                            if pub is not None and (oldest is None or pub < oldest):
+                                oldest = pub
+                            article = _parse_article_item(row, up, seen, cutoff)
+                        except Exception as e:
+                            log.warning("bad article item for uid=%s skipped: %s", up.uid, e)
+                            continue
+                        if article is not None:
+                            articles.append(article)
+
+                    has_more = bool(data.get("has_more"))
+                    # Continue only while this page might still contain in-window
+                    # items. Empty/bad pages stop rather than probing indefinitely.
+                    if not rows or not has_more or oldest is None or oldest < cutoff:
+                        break
+                    page += 1
+                    time.sleep(_API_CALL_SPACING_SECONDS)
+            except BiliApiError as e:
+                failures += 1
+                if "code=-352" in str(e):
+                    log.warning("article list hit -352 for uid=%s; stopping article round", up.uid)
+                    break
+                log.warning("article list failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+            except Exception as e:
+                failures += 1
+                log.warning("article list failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+    if failures == len(ups):
+        raise BiliApiError(f"all {len(ups)} opted-in UP article lists failed")
+    return _finalize_content(articles, src.fetch.max_per_digest)
+
+
+def _finalize_content(contents: list[BilibiliContent], max_per_digest: int) -> list[BilibiliContent]:
+    unique: dict[tuple[str, str], BilibiliContent] = {}
+    for content in contents:
+        unique.setdefault((content.kind, content.content_id), content)
+    result = list(unique.values())
+    result.sort(key=lambda content: content.publish_time or datetime.min, reverse=True)
+    return result[:max_per_digest]
+
+
+def fetch_new_content(src: BilibiliSource, seen: SeenStore, *,
+                      now: datetime | None = None,
+                      retry_max_attempts: int = 3,
+                      retry_backoff_seconds: list[int] | None = None) -> list[BilibiliContent]:
+    """Fetch both video and article candidates without coupling their failures.
+
+    A video transport outage must not suppress a configured article catch-up (or
+    vice versa).  Only when every configured discovery path fails do we surface
+    an error to the normal alerting path.
+    """
+    videos: list[BiliVideo] = []
+    articles: list[BiliArticle] = []
+    video_error: FetchError | None = None
+    article_error: FetchError | None = None
+    try:
+        videos = fetch_new_videos(
+            src, seen, now=now, retry_max_attempts=retry_max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
+    except FetchError as e:
+        video_error = e
+        log.warning("video discovery failed; article discovery will continue: %s", e)
+    try:
+        articles = fetch_new_articles(src, seen, now=now)
+    except FetchError as e:
+        article_error = e
+        log.warning("article discovery failed; video delivery will continue: %s", e)
+
+    if not videos and not articles:
+        if video_error and (not any(up.articles for up in src.fetch.whitelist) or article_error):
+            raise video_error
+        if article_error:
+            raise article_error
+    return _finalize_content([*videos, *articles], src.fetch.max_per_digest)
 
 
 def _fetch_via_opencli(src: BilibiliSource, seen: SeenStore, *, now: datetime,

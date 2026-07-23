@@ -153,6 +153,9 @@ class BilibiliUp(BaseModel):
     mutable, so `name` is a human-readable annotation, never a match key."""
     uid: int
     name: str | None = None
+    # Articles are intentionally opt-in per UP.  A creator being whitelisted for
+    # video must never silently subscribe the user to a second content stream.
+    articles: bool = False
 
 
 class BilibiliOpencli(BaseModel):
@@ -168,6 +171,10 @@ class BilibiliFetch(BaseModel):
     # run is caught up by the next one instead of losing videos (design doc §12).
     lookback_hours: int = 48
     per_up_limit: int = 8            # user-videos --limit per whitelisted UP
+    # Article discovery uses the documented space/article list endpoint.  The
+    # bounds keep the 48h catch-up useful without turning one UP into a crawler.
+    article_per_page: int = Field(default=30, ge=1, le=50)
+    article_max_pages: int = Field(default=3, ge=1, le=10)
 
 
 class BilibiliDigest(BaseModel):

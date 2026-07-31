@@ -263,6 +263,7 @@ def test_api_fetch_builds_videos_with_desc(httpx_mock: HTTPXMock, tmp_path):
     v = videos[0]
     assert v.description == "视频简介A" and v.duration == "9m53s" and v.view == 1000
     assert v.author == "UP甲" and v.cover == "http://i0.hdslb.com/BV1aaaaaaaaa.jpg"
+    assert v.subscription_name == "UP甲" and v.publisher_uid == 111
 
 
 def test_api_fetch_skips_seen_without_view_call(httpx_mock: HTTPXMock, tmp_path):
@@ -374,3 +375,5 @@ def test_finalize_dedupes_co_published_bvid(httpx_mock: HTTPXMock, tmp_path):
     _mock_view(httpx_mock, "BV1sharedvid")
     videos = fetch_new_videos(_src("api"), SeenStore(tmp_path / "s.txt"), now=NOW)
     assert [v.bvid for v in videos] == ["BV1sharedvid"]
+    # whitelist order decides the provenance retained for a shared BV.
+    assert videos[0].uid == 111 and videos[0].subscription_name == "UP甲"

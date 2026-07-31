@@ -21,6 +21,9 @@ class LLM(BaseModel):
     endpoint: str
     model: str
     api_key_env: str
+    # A local proxy can keep its credential outside chat-daily's data .env.
+    # The key is loaded only when this model is selected.
+    api_key_file: Path | None = None
     max_tokens: int = 16000
     timeout: float = 300.0
     extra_body: dict[str, Any] = Field(default_factory=dict)
@@ -52,6 +55,9 @@ class VisionModel(OptionalModel):
 
 class Models(BaseModel):
     summary: LLM
+    # Ordered aliases used when the complete summary pipeline (generation,
+    # repair, or verification) fails on the preceding model.
+    summary_fallback_models: list[str] = Field(default_factory=list)
     vision: VisionModel | None = None
     image: ImageModel | None = None
     embedding: EmbeddingModel | None = None
@@ -316,8 +322,9 @@ class Growth(BaseModel):
     chunk_chars: int = 60000         # transcript chunk budget per LLM call
     min_segment_msgs: int = 6
     max_segment_msgs: int = 300
-    judge_model: str | None = None   # top-level LLM alias (e.g. "grok") for the A/B
+    judge_model: str | None = None   # top-level LLM alias (e.g. "opus") for the A/B
                                      # judge; None = judge with the miner's model.
+    judge_fallback_model: str | None = None  # secondary alias after primary retries fail
     weekly: GrowthWeekly = Field(default_factory=GrowthWeekly)
 
 
@@ -329,7 +336,10 @@ class Config(BaseModel):
     hot_leads: HotLeads = Field(default_factory=HotLeads)
     llm: LLM | None = None
     gemini: LLM | None = None
+    qwenproxy: LLM | None = None
     grok: LLM | None = None
+    opus: LLM | None = None
+    sonnet: LLM | None = None
     vibekey: LLM | None = None
     models: Models | None = None
     telegram: Telegram
@@ -356,6 +366,14 @@ class Config(BaseModel):
             self.llm = self.models.summary
         if self.models is None or self.llm is None:
             raise ValueError("configure a summary model with models.summary or legacy llm")
+
+        for alias in self.models.summary_fallback_models:
+            try:
+                self.resolve_model_alias(alias)
+            except KeyError:
+                raise ValueError(
+                    f"models.summary_fallback_models contains unknown model alias {alias!r}"
+                )
 
         if self.groups is not None and not self.sources.wechat.groups:
             self.sources.wechat.groups = self.groups

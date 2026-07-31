@@ -387,6 +387,24 @@ def test_send_rich_message_uploads_media_in_same_multipart_request(
     assert "health.png" in body
 
 
+def test_send_rich_message_rejects_undeclared_media_before_http(tmp_path):
+    image = tmp_path / "citation.jpg"
+    image.write_bytes(b"jpg")
+    sender = TelegramSender(bot_token="-TOKEN-", chat_id="12345")
+
+    with pytest.raises(
+        ValueError,
+        match=r"references undeclared media id\(s\): health_chart",
+    ):
+        sender.send_rich_message(
+            markdown=(
+                "![](tg://photo?id=health_chart)\n\n"
+                "![](tg://photo?id=citation_1)"
+            ),
+            media=[("citation_1", str(image), "photo")],
+        )
+
+
 def test_send_multichunk_resumes_after_partial_failure(tmp_path, httpx_mock, mocker):
     """A 2-chunk push whose 2nd chunk fails must, on the next run, resume from the
     2nd chunk instead of re-sending the first half (review finding #42)."""

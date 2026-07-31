@@ -72,6 +72,18 @@ def test_card_caption_omits_summary_when_absent():
     assert "https://www.bilibili.com/video/" not in cap
 
 
+def test_card_caption_labels_copublished_subscription_source():
+    cap = card_caption(_video(author="老蒋巨靠谱", uid=3546799388232614,
+                              subscription_name="毕英杰Johnathan", publisher_uid=119801456), None)
+    assert "👤 老蒋巨靠谱" in cap
+    assert "🔖 来自订阅：毕英杰Johnathan（联合投稿）" in cap
+
+
+def test_card_caption_does_not_label_the_subscribed_uploader_as_copublished():
+    cap = card_caption(_video(subscription_name="毕英杰Johnathan", publisher_uid=111), None)
+    assert "联合投稿" not in cap
+
+
 # --- push_digest -------------------------------------------------------------
 
 def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):

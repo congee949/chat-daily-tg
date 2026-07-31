@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible defect using synthetic or redacted data
+title: "[Bug]: "
+labels: [bug]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include tokens, private chat IDs, route tables, real messages, databases or archives. Report security-sensitive issues privately as described in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: State the failing pipeline, command and visible result.
+      placeholder: "Running `chat-daily channels run --no-push` ..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data and exact commands.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+      description: Remove tokens, identifiers, URLs containing tokens and message content.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release
+      placeholder: "git rev-parse HEAD"
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - macOS manual run
+        - macOS launchd
+        - Linux manual run
+        - r4s/OpenWrt cron
+        - GitHub Actions
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence_level
+    attributes:
+      label: Reproduction level
+      options:
+        - Unit test
+        - Hermetic E2E
+        - Real integration with test credentials
+        - Production observation
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction check
+      options:
+        - label: I removed secrets and private user data.
+          required: true

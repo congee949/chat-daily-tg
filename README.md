@@ -1,351 +1,327 @@
 # chat-daily-tg
 
-每天自动导出微信和 Telegram 群消息，整理成统一日报推送到 Telegram，同时本地归档。
+把本机已经拥有的微信、Telegram、Bilibili 和 YouTube 内容整理成简报或卡片，再投递到 Telegram，并把过程材料保存在本地。
 
-在日报之外还有四条独立管线：**频道转发**（选定频道原文逐条转成卡片，跳过 LLM）、**成长内容挖掘**（从群聊里挖个人成长素材、A/B 择优推送）、**B站订阅 digest** 与 **YouTube 订阅 digest**（白名单创作者的新视频卡片，均在 r4s 运行）。五条管线共用配置、Telegram 路由表和归档/状态目录。
-
-## 日报示例
-
-推送到 Telegram 的富文本日报，按话题分区、`今日总览 / AI·工具 / 风险` 分节（示意图，内容脱敏）：
-
-<img src="daily-report-example.png" width="480" alt="每日日报推送示例">
-
-## 架构
-
-数据流、设计取舍与横切关注点见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**；部署、日志与故障排查见 **[docs/runbook.md](docs/runbook.md)**。
+> 这不是“一键部署的云服务”。它是一个 Python 3.11+ 模块化单体，需要你自行准备数据源、模型接口和 Telegram Bot。第一次使用应先跑无密钥的隔离测试，再用测试群验证，最后才考虑定时运行。
 
 ![chat-daily-tg 架构](chat-daily-architecture.png)
 
-<sub>架构图反映当前 CLI、feature application 与共享运行时的迁移边界；调整架构时请同步更新本 PNG 和本节说明。</sub>
+## 30 秒理解
 
-当前是渐进式的模块化单体：新的命令和 feature application 已经按业务边界拆开，原有编排逻辑暂留在运行时模块中，避免一次重构改变已验证的调度与归档行为。
-
-| 层 | 责任 |
+| 问题 | 回答 |
 |---|---|
-| `chat-daily` / `cli.py` | 唯一的日常 CLI；显式子命令避免互相冲突的 flag 静默择一 |
-| `features/<feature>/application.py` | daily、channels、growth、media digest 的应用入口 |
-| `application.py` | 兼容期运行时与既有编排逻辑；供 feature application 调用 |
-| `run_daily.py` | 仅保留给现有 launchd / r4s wrapper 的兼容 shim，仍支持旧 flag |
-| `llm_client.py` / `tg_sender.py` | 单次管线运行内复用 HTTP 连接；关闭时统一释放连接池 |
-| `sqlite_util.py` / `db.py` | SQLite WAL、`PRAGMA user_version` 迁移、索引与业务数据访问 |
+| 它做什么？ | 读取你已有的消息或订阅，整理后发到 Telegram，同时保留本地归档。 |
+| 什么在 Mac 上跑？ | `daily` 日报、`channels` 频道转发、`growth` 成长内容挖掘。 |
+| 什么在 r4s 上跑？ | Bilibili 和 YouTube digest；仓库中的 wrapper 是现有环境脚本，不是通用安装器。 |
+| 会把数据上传到哪里？ | 只有你启用的 LLM、Telegram 和内容平台接口。原始归档和状态默认留在 `~/chat-daily/`。 |
+| 增强功能失败会怎样？ | 设计目标是“正文优先”：图片、富消息、持久化等失败时应降级，不能阻塞正文。 |
+| 测试会真的发 Telegram 吗？ | `tests/e2e` 不会。它用临时 SQLite、临时目录和 HTTP mock，是 hermetic E2E，不是真实生产 E2E。 |
 
-## 功能清单
+## 最短安全试跑：无密钥、不发消息
 
-### 每日日报（主管线）
+这一步只确认代码能安装、CLI 能启动，并验证“CLI → 配置 → SQLite → 归档 → Telegram HTTP 边界”的隔离链路。它不会连接 Telegram、LLM、微信、B站或 YouTube。
 
-| 功能 | 说明 |
-|---|---|
-| 微信群导出 | 通过 [wx-cli](https://github.com/jackwener/wx-cli) 解密读取本地微信消息库，导出指定群前一天聊天 |
-| Telegram 群导出 | 通过 [tg-cli](https://github.com/public-clis/tg-cli) 本地 SQLite 读取 |
-| LLM 摘要 | 生成适合手机阅读的统一简报（当前默认是 VibeKey 上的 `gpt-5.6-sol`，见「模型配置」） |
-| 二次事实核验 | summary 初稿后再跑 verifier，修正无证据实体补全、主语错贴、跨消息缝合；核验输入优先使用高风险 claim 的局部证据，而不是重复拼接整天聊天 |
-| Embedding 证据检索（可选） | 用 Gemini embedding 为高风险 claim 从当天原文检索候选证据，作为 verifier 的局部事实输入 |
-| 图片理解（可选） | 开启后用多模态模型分析聊天中的图片，高分图并入日报 |
-| 富消息内嵌图 | 日报正文、健康图与引用配图合成**单条** Telegram 富消息（Bot API 10.2 `sendRichMessage`）；媒体随请求直接上传，无需公网图片中转。任一环失败自动回落「健康图 + 全文 + 引用尾图」 |
-| Telegram 推送 | 通过 Bot API 推到路由表指定的话题 |
-| 本地归档 | 每天的原始导出、详细总结、核验记录、图片分析存到 `~/chat-daily/archive/` |
-| 重复话题降权 | 近 7 天重复话题自动降权，避免旧闻反复出现 |
-| 短期热点跟踪 | 近 14 天内还活着的短期机会（存 SQLite，派生 `hot-leads/` 视图） |
+```bash
+git clone "REPOSITORY_URL_HERE"
+cd chat-daily-tg
 
-### 频道转发
-
-选定 Telegram 频道的消息**逐条原样**转成卡片，完全跳过 LLM 总结。公开频道文字帖走链接预览卡，纯媒体帖（无文字）用登录 session 下载媒体、经 bot 重新上传（失败回落占位卡，投递不丢）；私有频道全部走下载重传（媒体推送后即删，不留二进制）。6–22 点共 9 档触发（含 09:00，缩短 06→10 空窗），每档实际发送 = 墙钟 + 0–15min 随机 jitter（避免整点对齐），靠 msg_id 高水位只抓新消息。
-
-### 成长内容挖掘（growth mining）
-
-从指定群聊里挖掘个人成长相关片段，生成 A/B 两种风格的卡片（确定性模板 vs LLM 叙事），由**异源 judge**（grok-4.5）择优推送，原文切片存本地 `growth/segments/`。用户 DM 反馈经 `getUpdates` 每日轮询收集，周六合并进 rubric。
-
-### B站订阅 digest
-
-白名单 UP 新视频卡片（封面 + 一句话摘要 + 观看按钮）。**已迁至 r4s cron 运行**，Mac 侧的 launchd label 已移除、`install-launchd.sh` 不再安装它（防双跑），代码仍在本仓库。
-
-### YouTube 订阅 digest
-
-白名单频道的新视频卡片（封面 + 一句话摘要 + 观看按钮）。与 B 站一样在 **r4s cron** 上运行，`due_gate.sh` 每 10–15 分钟放行一次，发送后写入 media ledger 以避免重复推送。
-
-## 项目结构
-
-```
-.
-├── pyproject.toml                  # 安装 `chat-daily` CLI
-├── run_daily.py                    # 旧 flag 入口的兼容 shim（供已有 wrapper 使用）
-├── src/chat_daily_tg/
-│   ├── cli.py                      # 显式子命令入口：daily / channels / growth / bilibili / youtube
-│   ├── application.py              # 兼容期运行时与既有编排
-│   ├── features/
-│   │   ├── daily/application.py    # 日报 feature 入口
-│   │   ├── channels/application.py # 频道转发与单条重发入口
-│   │   ├── growth/application.py   # growth run / mine / backfill / weekly 入口
-│   │   └── media_digest/application.py # B站 / YouTube digest 入口
-│   ├── wx_exporter.py              # 微信聊天导出（含图片按分下载）
-│   ├── telegram_exporter.py        # Telegram 聊天导出
-│   ├── telegram_media.py           # TG 图片旁路下载（tg-cli 不存媒体）
-│   ├── context_builder.py          # 上下文拼装
-│   ├── summarizer.py               # LLM 摘要和二次事实核验
-│   ├── evidence_index.py           # Embedding 证据索引和检索
-│   ├── vision.py                   # 图片理解、引用池、[IMGn] 解析
-│   ├── img_relay.py                # [已退役] Cloudflare KV 图片中转（富消息已改多部分直传）
-│   ├── card_renderer.py            # PNG 卡片渲染（headless Chrome）
-│   ├── prompts.py                  # Prompt 模板
-│   ├── post_process.py             # 后处理
-│   ├── repeat_topics.py            # 重复话题降权
-│   ├── cross_group_cluster.py      # 跨群聚类
-│   ├── death_signals.py            # 失效信号检测
-│   ├── research_loop.py            # 长期追踪循环
-│   ├── hot_leads.py                # 短期热点管理
-│   ├── permanent_md.py             # 长期机会库维护
-│   ├── raw_channels.py             # 频道转发：公开频道卡片
-│   ├── private_media.py            # 频道转发：媒体下载与重传（私有全量 / 公开纯媒体帖）
-│   ├── raw_seen.py                 # 已推送去重与增量高水位
-│   ├── growth_miner.py             # 成长挖掘：切片与素材提取
-│   ├── growth_cards.py             # 成长挖掘：A/B 构卡与评审
-│   ├── growth_store.py             # 成长挖掘：存储、quota 与原子 claim lease
-│   ├── growth_weekly.py            # 成长挖掘：周报与 rubric 合并
-│   ├── bilibili_fetcher.py         # B站抓取（api / opencli 双 transport）
-│   ├── bilibili_digest.py          # B站卡片编排
-│   ├── youtube_fetcher.py          # YouTube RSS / Data API 备用源 / 元数据抓取
-│   ├── youtube_digest.py           # YouTube 卡片编排
-│   ├── tg_sender.py                # Telegram 发送（含富消息）
-│   ├── notifier.py                 # 通知封装
-│   ├── llm_client.py               # 可复用连接池、分类重试与调用指标的 LLM 客户端
-│   ├── db.py                       # SQLite 数据访问
-│   ├── sqlite_util.py              # 连接、WAL pragma 与版本化 schema migration
-│   ├── archive.py                  # 归档与媒体保留期清理
-│   ├── sanitize.py                 # 文本清洗
-│   ├── media.py                    # 媒体候选打分
-│   ├── paths.py                    # 路径常量
-│   ├── env.py                      # 环境变量加载、代理清洗
-│   ├── config.py                   # 配置解析
-│   └── logging_setup.py            # 日志初始化与脱敏
-├── scripts/
-│   ├── install-launchd.sh          # launchd 安装（agent + channels + growth ×2）
-│   ├── run_*_guarded.sh            # 各管线 guard wrapper（venv 预检 + 代理 + 告警）
-│   ├── guard_common.sh             # guard 共享逻辑
-│   ├── sync_tg_targets.sh          # 路由表同步到 r4s / bwg
-│   ├── run_bilibili_r4s.sh         # B站 digest（在 r4s 上跑）
-│   ├── run_youtube_r4s.sh          # YouTube digest（在 r4s 上跑）
-│   ├── due_gate.sh                 # r4s 上 B站 / YouTube 的随机间隔门控
-│   ├── tg_media_dump.py            # telethon 媒体下载（借 kabi-tg-cli 解释器）
-│   ├── migrate_jsonl_to_sqlite.py  # 一次性迁移脚本（2026-06-29 已执行）
-│   └── weekly_media_rules_review.py # 周媒体规则回顾
-├── launchd/                        # plist 模板（由 install-launchd.sh 渲染）
-├── docs/spark/                     # 设计文档
-└── tests/
+uv sync --extra dev --locked
+uv run chat-daily --help
+uv run pytest -q -m e2e tests/e2e
 ```
 
-数据目录（独立于代码仓库）：
+预期结果：CLI 显示 `daily / channels / growth / bilibili / youtube` 子命令；E2E 测试通过。这里的“通过”只证明本地契约和交付不变量，没有证明真实凭据、代理、Telegram 权限或生产调度可用。
 
+## 前置条件
+
+必需：
+
+- macOS 或 Linux；生产拓扑中的 daily/channels/growth 面向 macOS。
+- Python 3.11 或更高版本。
+- [uv](https://docs.astral.sh/uv/)；依赖由 `uv.lock` 固定。
+- Git。
+
+按功能选装：
+
+- 微信日报：可在本机读取微信数据的 `wx-cli`。
+- Telegram 消息导出：维护本地 `messages.db` 的 `tg-cli`。
+- 真实投递：Telegram Bot token 和目标 chat ID。
+- 日报或摘要：一个与 OpenAI Chat Completions 兼容的模型端点及密钥。
+- Bilibili/YouTube：只建议在理解 `scripts/run_*_r4s.sh` 的机器路径、代理和 cron 前提后启用。
+
+## 安装
+
+```bash
+git clone "REPOSITORY_URL_HERE"
+cd chat-daily-tg
+uv sync --extra dev --locked
+uv run chat-daily --help
+mkdir -p ~/chat-daily
 ```
-~/chat-daily/
-├── config.yaml          # 主配置
-├── .env                 # 环境变量（权限 600）
-├── chat-daily.db        # SQLite 主库（见下表）
-├── permanent.md         # 长期机会库（由 DB 派生的 Markdown 视图）
-├── hot-leads/           # 近 14 天短期热点（由 DB 派生的视图）
-├── growth/segments/     # 成长挖掘的原文切片 + INDEX.md 快查索引
-├── archive/             # 每天的原始导出、详细总结、核验证据、图片分析
-└── logs/                # 运行日志（日报 / channels / growth 分开）
-```
 
-`chat-daily.db` 的表（2026-06-29 从 JSONL 迁移而来）：
-
-| 表 | 内容 |
-|---|---|
-| `permanent` | 长期机会库，按 `fingerprint` 唯一（URL 会先剥离 utm_* 等跟踪参数再算指纹） |
-| `hot_leads` | 短期热点 |
-| `repeat_topics` | 近 7 天重复话题 |
-| `growth_segments` / `growth_mined_days` / `growth_ab_log` | 成长挖掘的切片、天级幂等标记、A/B 判决记录；segment 使用 `pending → sending → sent` 的 claim lease，避免重叠任务选中同一素材 |
-
-> 数据目录里残留的 `permanent.jsonl` / `repeat_topics.jsonl` 是迁移前的旧文件，**已不是事实源**，代码不再读取。
-
-数据库 schema 由 SQLite 的 `PRAGMA user_version` 管理；首次打开旧库时会迁移到当前版本，普通连接只设置 WAL、busy timeout 等连接级参数。growth 的 claim lease 降低并发重复发送风险，但 Telegram 外部发送不能与 SQLite 同事务，因此投递语义是可恢复的 **at-least-once**，不是严格 exactly-once。
+项目代码与运行数据分开：代码留在仓库；配置、密钥、日志、归档和状态放在 `~/chat-daily/`。不要把 `~/chat-daily/` 复制进仓库。
 
 ## 配置
 
-### 微信导出前置（wx-cli）
+### 1. 创建密钥文件
 
-微信侧依赖 [wx-cli](https://github.com/jackwener/wx-cli) 读取本机微信客户端的本地消息库：
+仓库故意不提供带真实值的 `.env`。密钥只能写在 `~/chat-daily/.env`：
 
 ```bash
-npm install -g @jackwener/wx-cli
-wx init                # 检测微信数据目录并扫描解密密钥
-wx export "<群名>" --since 2026-06-10 --until 2026-06-11 --limit 10   # 验证能导出
+install -m 600 /dev/null ~/chat-daily/.env
+${EDITOR:-nano} ~/chat-daily/.env
+```
+
+按你启用的功能填写占位符：
+
+```dotenv
+TG_BOT_TOKEN=<TELEGRAM_BOT_TOKEN>
+TG_CHAT_ID=<TELEGRAM_CHAT_OR_TEST_GROUP_ID>
+SUMMARY_API_KEY=<OPENAI_COMPATIBLE_API_KEY>
+```
+
+保存后确认权限：
+
+```bash
+chmod 600 ~/chat-daily/.env
+ls -l ~/chat-daily/.env
+```
+
+不要把真实密钥贴进 issue、PR、截图、日志或仓库中的示例文件。若密钥曾提交到 Git，删除文件并不等于安全；应立即吊销并轮换。
+
+### 2. 创建最小 `config.yaml`
+
+下面示例使用 Telegram 本地 SQLite 生成日报。先把所有 `<...>` 替换成你的值：
+
+```bash
+cat > ~/chat-daily/config.yaml <<'YAML'
+models:
+  summary:
+    endpoint: "<OPENAI_COMPATIBLE_BASE_URL>"
+    model: "<MODEL_NAME>"
+    api_key_env: "SUMMARY_API_KEY"
+    max_tokens: 16000
+    timeout: 300
+
+telegram:
+  bot_token_env: "TG_BOT_TOKEN"
+  chat_id_env: "TG_CHAT_ID"
+
+sources:
+  telegram:
+    enabled: true
+    db_path: "~/Library/Application Support/tg-cli/messages.db"
+    sync_before_export: false
+    chats:
+      - id: "<SOURCE_TELEGRAM_CHAT_ID>"
+        name: "<DISPLAY_NAME>"
+        limit: 500
+YAML
 ```
 
 说明：
 
-- `wx_exporter` 优先调用 PATH 上的 `wx`，找不到时回退 `/opt/homebrew/bin/wx`
-- 只能读取本机已登录微信桌面客户端同步下来的消息，换机或重装后需重新 `wx init`
-- 只用 Telegram 侧时可以不装：`sources.wechat.groups` 留空即可
+- `endpoint`、`model` 和 `api_key_env` 必须与实际模型服务匹配。
+- `db_path` 是输入消息数据库，不是本项目自己的状态库。
+- `sync_before_export: false` 表示只读取现有 SQLite；改成 `true` 前先单独确认 `tg-cli` 可用。
+- 至少配置一个实际数据源。只有 `raw_channels` 时可以跑 `channels`，但不能生成 `daily` 日报。
+- 图片理解、embedding、growth、Bilibili 和 YouTube 都是可选项；首次安装不要同时开启。
 
-### 环境变量
-
-写到 `~/chat-daily/.env`，建议权限 `600`：
-
-| 变量 | 必需 | 说明 | 获取方式 |
-|---|---|---|---|
-| `TG_BOT_TOKEN` | Yes | Telegram bot token | [@BotFather](https://t.me/BotFather) |
-| `TG_CHAT_ID` | Yes | 推送目标 chat_id | [@userinfobot](https://t.me/userinfobot) 或 API |
-| `VIBEKEY_API_KEY` | Yes | VibeKey 的 key；当前日报 summary 与 verifier 走它 | VibeKey 控制台 |
-| `CLIPROXY_API_KEY` | Yes | 本机 CLIProxyAPI 的 key；当前 vision / judge 走它 | 本机 CLIProxyAPI 配置 |
-| `DEEPSEEK_API_KEY` | No | `llm` 别名用（成长挖掘默认走它）；日报摘要已不用 | [api-docs.deepseek.com](https://api-docs.deepseek.com/) |
-| `GOOGLE_API_KEY` | No | Gemini embedding API key（开启 `models.embedding.enabled` 时需要） | Google AI Studio / Gemini API |
-| `CF_KV_API_TOKEN` | No | 已退役：富消息媒体改 Bot API 多部分直传，KV 中转仅旧 config 兼容保留 | Cloudflare dashboard |
-| `VISION_API_KEY` | No | 旧 vision 后端（qwenproxy）的 key，当前配置未使用 | 自行准备 OpenAI 兼容接口 |
-
-必需性取决于开了哪些管线：只跑纯文本日报需要 `TG_BOT_TOKEN`、`TG_CHAT_ID` 和 `VIBEKEY_API_KEY`；开启图片理解还需 `CLIPROXY_API_KEY`；成长挖掘另需 `DEEPSEEK_API_KEY`。Bot API 10.2 富消息媒体直接上传，不再需要 `CF_KV_API_TOKEN`。
-
-### config.yaml
-
-主配置文件在 `~/chat-daily/config.yaml`：
+要使用微信日报，可把 Telegram `chats` 留空并添加：
 
 ```yaml
 sources:
   wechat:
     groups:
-      - "<wechat-group-name>"
-  telegram:
-    enabled: true
-    db_path: "~/Library/Application Support/tg-cli/messages.db"
-    sync_before_export: true
-    chats:
-      - id: "<telegram-chat-id>"
-        name: "<telegram-chat-name>"
-        limit: 500
-
-models:
-  summary:
-    endpoint: "https://api.vibekey.cn/v1"
-    model: "gpt-5.6-sol"
-    api_key_env: "VIBEKEY_API_KEY"
-    max_tokens: 32000
-    timeout: 600.0
-  vision:
-    enabled: true
-    endpoint: "http://127.0.0.1:8317/v1"
-    model: "gemini-3.5-flash-low"
-    api_key_env: "CLIPROXY_API_KEY"
-    timeout: 120.0
-  embedding:
-    enabled: true
-    endpoint: "https://generativelanguage.googleapis.com/v1beta"
-    model: "gemini-embedding-2"
-    api_key_env: "GOOGLE_API_KEY"
-    dimension: 768
-    top_k: 8
-    min_similarity: 0.35
-
-telegram:
-  bot_token_env: "TG_BOT_TOKEN"
-  chat_id_env: "TG_CHAT_ID"
+      - "<WECHAT_GROUP_NAME>"
 ```
 
-旧版顶层 `groups:` 仍可读取，会自动当作 `sources.wechat.groups`。
+先在终端单独验证 `wx` 能导出该群。项目无法替你获取微信解密密钥或绕过系统权限。
 
-图片理解是可选功能。开启 `models.vision.enabled` 后，脚本会先用聊天上下文筛选可能有价值的图片，再把有本地路径且通过预筛的图片交给多模态模型。图片理解结果会作为额外来源进入日报；失败时只记录 warning，不影响文本日报发送。
+### 3. 可选：频道原文转发
 
-Embedding 证据检索也是可选功能。开启 `models.embedding.enabled` 后，脚本会把当天导出的消息切成带来源的 chunk，调用 Gemini embedding 建立当天本地 `evidence.sqlite`，再从 summary 初稿中抽取高风险 claim（版本号、发布、封禁、涨价、额度变化、榜单、金额等）检索 top-k 原文证据。检索结果会写入 `evidence-context.md` 并注入二次 verifier；verifier 仍以原始聊天为准，embedding 结果只是候选证据，不能替代事实判断。
+频道转发跳过 LLM，但配置模型块仍是当前配置模型的必填结构。把以下内容放到 `sources.telegram` 下：
 
-不要把真实 API key 写进 `config.yaml` 或提交到仓库；只写 `api_key_env` 变量名，真实值放在 `~/chat-daily/.env`。
+```yaml
+raw_card_delay_seconds: 1
+raw_channels:
+  - id: "<SOURCE_CHANNEL_ID>"
+    name: "<DISPLAY_NAME>"
+    username: "<PUBLIC_CHANNEL_USERNAME_WITHOUT_AT>"
+    topic: "channels_news"
+```
 
-### 模型配置
+公开频道有 `username` 时使用链接预览；私有频道或纯媒体消息需要本地 Telegram session 下载媒体。媒体增强失败应回落到文本或占位卡，不应让其他正文停止投递。
 
-除了 `models.*`，配置里还有几个顶层**模型别名**，供不同管线按名引用：
+## 第一次验证
 
-| 别名 | 当前指向 | 谁在用 |
-|---|---|---|
-| `models.summary` | gpt-5.6-sol @ VibeKey | 日报摘要与核验 |
-| `models.vision` | gemini-3.5-flash-low @ CLIProxyAPI | 图片理解 |
-| `models.embedding` | gemini-embedding-2 @ Google | 证据检索 |
-| `llm` | deepseek-v4-pro @ api.deepseek.com | 成长挖掘与 B 卡（wrapper 固定传 `--model llm`） |
-| `grok` | grok-4.5 @ CLIProxyAPI | 成长 A/B judge |
-| `vibekey` | gpt-5.6-sol @ api.vibekey.cn | 日报默认模型，也可用 `--model vibekey` 显式选择 |
+### 第 1 层：隔离 E2E
 
-成长挖掘的 judge 刻意与作者**异源**（B 卡由 `llm` 写、judge 用 `grok`），避免 LLM 自评的自偏好。`Growth.judge_model` 设为空即回落同源。
+```bash
+uv run pytest -q -m e2e tests/e2e
+```
 
-日报正文与核验走 VibeKey；CLIProxyAPI（`127.0.0.1:8317`）继续服务 vision / judge。CLIProxyAPI 不可用时图片理解会降级，但日报正文仍可由 VibeKey 生成。跑在代理环境下时 `NO_PROXY` 必须放行 `127.0.0.1`。
+它覆盖：
 
-## 归档产物
+- 真实 `chat-daily channels run` CLI 和 feature application；
+- YAML 配置、临时 SQLite、归档写入和 seen 状态；
+- 成功响应后才写 seen；
+- Telegram HTML 400 后降级为纯文本，且降级成功前不写 seen；
+- `ALL_PROXY/all_proxy` 在入口处被清除；
+- HTTP 只到 `httpx.MockTransport`，没有真实网络。
 
-每天的归档目录位于 `~/chat-daily/archive/YYYY/MM/DD/`，常见文件：
+### 第 2 层：真实数据、禁止 Telegram 投递
 
-| 文件 | 说明 |
+日报：
+
+```bash
+uv run chat-daily daily run --no-push
+```
+
+频道：
+
+```bash
+uv run chat-daily channels run --no-push
+```
+
+`--no-push` 仍可能读取真实数据、调用 LLM、写本地归档或状态；它只保证不做 Telegram 正文投递。它不代表交付成功，也不会因为一次 dry run 就写日报 `.run-complete`。
+
+检查：
+
+```bash
+find ~/chat-daily/archive -type f | tail -30
+find ~/chat-daily/logs -type f -print
+```
+
+### 第 3 层：首次真实投递
+
+使用专门的测试 Bot 和测试聊天，不要直接用正式群。确认 Bot 已加入目标聊天，并具备发消息权限，然后运行：
+
+```bash
+uv run chat-daily daily run
+```
+
+验收时同时检查 Telegram、日志和当天归档。日报只有在真实推送路径完成后才应出现 `.run-complete`：
+
+```bash
+find ~/chat-daily/archive -name .run-complete -print
+```
+
+频道投递使用 write-after-send：消息发送失败时不应写 seen，下一轮可重试；相册的每个消息 ID 都必须写入 seen。外部 Telegram API、代理、权限和真实数据的行为只能由这一步人工确认，不能由 mock 测试代替。
+
+## 日常命令
+
+```bash
+uv run chat-daily daily run
+uv run chat-daily channels run
+uv run chat-daily channels resend -- "-1001234567890:42"
+uv run chat-daily growth run
+uv run chat-daily growth weekly
+uv run chat-daily bilibili run
+uv run chat-daily youtube run
+```
+
+查看完整参数：
+
+```bash
+uv run chat-daily --help
+uv run chat-daily daily run --help
+```
+
+`run_daily.py` 是旧 launchd/r4s wrapper 的兼容入口。新的人工作业和新自动化应优先使用 `chat-daily` 显式子命令。
+
+## Mac 定时运行
+
+只有在手动真实验证成功后再启用 launchd。先阅读 `launchd/*.plist`、`scripts/run_*_guarded.sh` 和 `scripts/install-launchd.sh`；安装脚本会写入并重载真实的 `~/Library/LaunchAgents`，不是无副作用预览。
+
+查看四个日历调度的计划：
+
+```bash
+uv run python scripts/schedule.py list
+```
+
+安装现有 Mac labels：
+
+```bash
+bash scripts/install-launchd.sh
+launchctl list | grep chat-daily-tg
+```
+
+当前 installer 加载 5 个 label：daily agent、channels、growth、growth-weekly 和 ledger-sync。`scripts/schedule.py` 只管理前 4 个日历型 label；ledger-sync 使用固定间隔。Bilibili 和 YouTube 不应再添加到 Mac launchd，以免与 r4s 双跑。
+
+修改时间前先 dry-run：
+
+```bash
+uv run python scripts/schedule.py apply -n
+```
+
+不要在任务运行中无条件 reload。工具默认会避开有活跃 PID 的 label；`--force` 可能向正在运行的任务发送 SIGTERM，只适合明确接受中断时使用。
+
+## r4s 边界
+
+仓库中的 `scripts/run_bilibili_r4s.sh`、`scripts/run_youtube_r4s.sh` 和 `scripts/due_gate.sh` 是现有 FriendlyWrt/OpenWrt 拓扑的参考实现，包含固定路径、代理地址、锁和 cron 假设。公开复用时必须逐项审查后复制，不能承诺一键部署。
+
+必须保持的网络边界：
+
+- Bilibili API 与封面 CDN 使用 `httpx` 的 `trust_env=False`，直接连接，不继承代理。
+- Telegram 与 Gemini/YouTube 可以按运行环境使用 `HTTP_PROXY/HTTPS_PROXY`。
+- Python 入口在创建 HTTP client 前清除 `ALL_PROXY` 和 `all_proxy`，避免 socks 环境污染。
+- OpenWrt/musl 上若没有 IANA 时区数据库，现有 wrapper 使用 POSIX `TZ=CST-8`。
+- cron 必须有非重叠锁；成功后再推进 due gate，失败时保持可重试。
+
+r4s 的配置和 `.env` 应留在机器的数据目录，不随代码归档发布。Mac 上同步回来的 media ledger 是只读派生副本；不要让公开复用改动把它变成第二写入源。
+
+## 常见错误
+
+| 现象 | 检查 |
 |---|---|
-| `wechat-*.md` / `telegram-*.md` | 当天原始导出 |
-| `concise.md` | 最终 Telegram 精简版 |
-| `summary.md` | 最终本地详细版 |
-| `verification.json` | verifier 检查过的 claim、状态、理由、证据和置信度 |
-| `evidence.sqlite` | 当天消息 chunk 的本地 embedding 索引（开启 embedding 时生成） |
-| `evidence-context.md` | 从初稿 claim 检索出的候选证据（开启 embedding 时生成） |
-| `vision.md` / `vision.jsonl` | 图片理解结果（**仅入选的**，开启 vision 且有高价值图片时生成） |
-| `vision-audit.jsonl` | 图片理解全量留痕（含落选与失败），供事后校准入选阈值 |
-| `media_candidates.jsonl` | 图片/媒体候选记录 |
-| `tg_media/` / `wx_media/` | 当天下载的图片，默认保留 14 天后自动清理 |
+| `configure at least one source` | `config.yaml` 中没有启用且非空的数据源。 |
+| `no daily-summary sources configured` | 只配置了 `raw_channels`；请跑 `channels`，或给 daily 添加微信/Telegram chat。 |
+| 找不到 API key | `.env` 必须位于 `~/chat-daily/.env`，变量名要与 `api_key_env` 一致。 |
+| `No module named socksio` 或代理构造失败 | 不要绕过 CLI 入口；手动测试可用 `env -u ALL_PROXY -u all_proxy ...`。 |
+| `tg sync` / `wx export` 失败 | 先在项目外单独运行对应 CLI，确认路径、登录、系统权限和数据库。 |
+| 内容落到 DM 而非话题 | 路由表缺失、不可读或没有相应 topic key；回落是为了不丢正文，但必须修复路由。 |
+| Bilibili `-352` | 视为 IP 风控；确认 Bilibili 请求未继承代理，降频，不要用重试风暴绕过。 |
+| `--no-push` 后没有 `.run-complete` | 这是正确行为；dry run 不算真实交付。 |
+| mock E2E 通过但真实发送失败 | E2E 不覆盖真实 token、Bot 权限、代理、平台限流和生产数据。按“首次真实投递”分层排查。 |
 
-## 使用
+更详细的运行故障见 [docs/runbook.md](docs/runbook.md)，测试边界见 [docs/testing.md](docs/testing.md)，架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-### 手动运行
+## 交付与数据不变量
 
-```bash
-cd <repo>
-uv sync --extra dev
+贡献者不得破坏以下规则：
 
-uv run chat-daily daily run                         # 跑昨天的日报
-uv run chat-daily daily run --date 2026-04-17       # 补跑指定日期
-uv run chat-daily daily run --no-push               # 干跑，不推送
-uv run chat-daily daily run --skip-if-done          # 已成功推送时不重复运行
-uv run chat-daily channels run                       # 转发未处理频道消息
-uv run chat-daily channels resend -1001234567890:42 # 重发一条频道消息
-uv run chat-daily growth run                         # 挖掘并推送下一张成长卡
-uv run chat-daily growth mine --date 2026-04-17     # 只挖指定日期，加入队列但不推送
-uv run chat-daily growth backfill                    # 回填配置的历史日期
-uv run chat-daily growth weekly                      # 发送周度 A/B 报告
-uv run chat-daily bilibili run                       # B站 digest（正常在 r4s 上跑）
-uv run chat-daily youtube run                        # YouTube digest（正常在 r4s 上跑）
-```
+1. 图片、富消息、持久化和去重增强失败时，正文仍应尽量投递。
+2. seen 只在发送成功后写入；相册每个消息 ID 都写入；失败保持可重试。
+3. `.run-complete` 只代表真实推送完成；`--no-push` 不等于交付。
+4. LLM 输出必须在代码中解析、归一化、校验并回退，不能只依赖 prompt 遵守格式。
+5. Bilibili 直连；Telegram/Gemini 可用环境代理；入口清除 `ALL_PROXY/all_proxy`。
+6. 密钥只在数据目录 `.env` 中，不能进入仓库、示例或日志。
+7. hermetic E2E 与真实生产验证必须分开命名和报告。
 
-完整命令见 `uv run chat-daily --help`。现有 launchd / r4s wrapper 仍调用 `python run_daily.py` 和旧 flag；它们通过兼容 shim 保持可用，迁移到新 CLI 时无需停机。
-
-### 安装 launchd 定时任务（macOS）
+## 测试与性能测量
 
 ```bash
-./scripts/install-launchd.sh
+# 单元测试
+uv run pytest -q -m "not e2e" --ignore=tests/e2e
+
+# hermetic CLI-to-HTTP E2E
+uv run pytest -q -m e2e tests/e2e
+
+# 全部测试
+uv run pytest -q
+
+# SeenStore 高水位 microbenchmark；只做本地测量，不作为 CI 时间门槛
+uv run python scripts/benchmark_seen_store.py
+
+# 构建 sdist 与 wheel
+uv build --no-sources
 ```
 
-装 4 个 label：日报（7:05 触发后 `--wait-for-wake` 等 Watch 睡眠同步、每 5 分钟一查，最晚 13:00 强制投递）、频道转发（6/9/10/12/14/16/18/20/22 共 9 档，每档 +0–15min wrapper jitter）、成长挖掘（9:30 / 15:30 / 21:30）、成长周报（周六 9:45）。**实际调度以 plist 为准**——`config.yaml` 里的 `schedule` 段当前没有代码读取。
+microbenchmark 同时报告墙钟时间和操作次数。性能结论应基于可复现输入、基线算法和断言；不要因为一次机器上的快慢就进行大型重构。
 
-脚本**不装** B站 digest 的 label（已迁 r4s，内有注释说明）。不要加回，会双跑。
+## 贡献与公开复用
 
-### 路由表同步
+开始修改前阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。PR 应说明改动属于 unit、hermetic E2E 还是真实人工验证，并列出未验证项。不要提交真实消息、数据库、归档、Bot token、模型 key、路由表或机器专用配置。
 
-TG 话题路由表的唯一事实源是 Mac 上的 `~/qwenproxy/.tg-notify-targets.json`。改完同步到 fleet：
-
-```bash
-./scripts/sync_tg_targets.sh --check     # 只看各机 diff
-./scripts/sync_tg_targets.sh             # 推送到 r4s / bwg
-```
-
-### 测试
-
-```bash
-uv run --extra dev pytest -q
-```
-
-测试依赖在 `pyproject.toml` 的 `[project.optional-dependencies].dev` 里，**不在默认 `.venv`**——直接跑 `pytest` 会报 `No module named pytest`。
-
-本机若有 socks 代理变量（Shadowrocket 会往环境里塞 `ALL_PROXY`），跑测试前加 `env -u ALL_PROXY -u all_proxy`；`tests/conftest.py` 已全局清代理，但 shell 层的污染仍会影响 uv 自身。
-
-## 依赖工具
-
-| 工具 | 用途 |
-|---|---|
-| [wx-cli](https://github.com/jackwener/wx-cli) | 微信本地消息库解密导出（`npm i -g @jackwener/wx-cli`） |
-| [tg-cli](https://github.com/public-clis/tg-cli) | Telegram 本地 SQLite 导出（**只存文本**，图片靠 telethon 旁路） |
-| kabi-tg-cli | 私有频道 / 图片下载借用它的 telethon 解释器与登录 session |
-| VibeKey | OpenAI 兼容日报摘要与核验 API（`gpt-5.6-sol`） |
-| CLIProxyAPI | 本机模型代理（`127.0.0.1:8317`），vision / judge 共用 |
-| [DeepSeek API](https://api-docs.deepseek.com/) | `llm` 别名，成长挖掘 |
-| Cloudflare Workers + KV | 旧版富消息图片中转；Bot API 10.2 路径已不再需要 |
-| [BotFather](https://t.me/BotFather) | 创建 Telegram bot |
-| [userinfobot](https://t.me/userinfobot) | 获取 Telegram chat_id |
-| headless Chrome | PNG 卡片渲染与架构图重渲 |
+本源码归档当前未包含 `LICENSE`。在仓库所有者明确选择许可证并确认版权归属前，公开可见不等于已授权复制、修改或再分发；这是正式公开复用前的发布阻断项。

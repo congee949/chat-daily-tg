@@ -36,3 +36,33 @@ def test_seen_max_msg_id_high_water_mark(tmp_path):
     assert s.max_msg_id("-100abc") == 42  # only this channel's ids
     assert s.max_msg_id("-999other") == 99
     assert s.max_msg_id("-100nope") == 0  # unknown channel → 0
+
+
+def test_seen_max_msg_id_ignores_non_numeric_media_keys(tmp_path):
+    path = tmp_path / "seen.txt"
+    path.write_text(
+        "youtube:video-id\n"
+        "bilibili:BV1example\n"
+        "-100abc:41\n"
+        "malformed\n",
+        encoding="utf-8",
+    )
+
+    store = SeenStore(path)
+
+    assert "youtube:video-id" in store
+    assert "bilibili:BV1example" in store
+    assert store.max_msg_id("-100abc") == 41
+
+
+def test_seen_max_msg_id_uses_index_without_iterating_seen_set(tmp_path):
+    class NonIterableSet(set):
+        def __iter__(self):
+            raise AssertionError("max_msg_id must not scan the full seen set")
+
+    store = SeenStore(tmp_path / "seen.txt")
+    store.add("-100abc:10")
+    store.add("-100abc:42")
+    store._seen = NonIterableSet(store._seen)
+
+    assert store.max_msg_id("-100abc") == 42

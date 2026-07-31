@@ -74,6 +74,23 @@
 
 - Whether to build the deferred second stage (structured classifier fallback, event-index dedup, specialized renderers, thread idle bundling) is pending user decision; the deterministic first stage stands until a missed-event or noise incident argues otherwise.
 
+## 2026-07-26 Growth Judge: Sonnet Primary, Gemini Fallback
+
+### Design Decisions
+
+- The growth judge uses `opus` first and `gemini` only after the primary call exhausts its own retry policy. Mining and B-card generation remain on their existing model.
+
+### Deviations
+
+- Opus currently returns Antigravity `MODEL_CAPACITY_EXHAUSTED`; Gemini provides continuity until capacity returns.
+
+### Tradeoffs
+
+- Fallback is deliberately judge-only because other pipeline stages have distinct output contracts.
+
+### Open Questions
+
+
 ## 2026-07-23 Bilibili Article Subscription
 
 ### Design Decisions
@@ -85,3 +102,19 @@
 ### Tradeoffs
 
 - Videos and opted-in articles are merged only at the final ordering/cap stage.  This gives the topic a chronological view while preserving each source's independent failure semantics; a total outage of every configured discovery path remains alertable.
+
+## 2026-07-30 Telegram Rich Digest Attachment Repair
+
+### Design Decisions
+
+- A catch-up run keeps the textual health section but removes its `health_chart` rich-media reference when `.health-card-sent` suppresses re-uploading the chart. The sender also rejects any undeclared `tg://...id=` reference before making an HTTP request.
+
+### Deviations
+
+- The multipart `InputRichMessageMedia` structure was retained because a real Telegram call with the same three JPEG attachments succeeded. The production 400 was reproduced only after adding the unbound `health_chart` reference.
+
+### Tradeoffs
+
+- Missing optional health media is omitted from the rich message instead of forcing the entire digest onto the text-plus-trailing-photo fallback.
+
+### Open Questions

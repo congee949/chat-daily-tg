@@ -2,6 +2,7 @@
 name = "chat-daily-tg"
 version = "0.4.0"
 description = "Daily multi-source chat summary to Telegram with local archive"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # [socks] pulls in socksio so httpx.Client() can build a transport for a
@@ -35,3 +36,20 @@ where = ["src"]
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "-v --tb=short"
+markers = [
+    "e2e: hermetic CLI-to-HTTP tests with no external credentials or network",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+ignore_missing_imports = true
+follow_imports = "skip"
+warn_unused_ignores = true

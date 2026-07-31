@@ -2,18 +2,98 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  quality:
+    name: Lint, format, and types
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.13"
-      - name: Install dependencies
-        run: uv sync --extra dev
-      - name: Run tests
-        run: uv run pytest -q
+          python-version: "3.11"
+          cache-dependency-glob: uv.lock
+      - name: Install locked project dependencies
+        run: uv sync --extra dev --locked
+      - name: Check incremental formatting boundary
+        run: >-
+          uvx --from ruff==0.11.13 ruff format --check
+          src/chat_daily_tg/raw_seen.py
+          tests/test_raw_seen.py
+          tests/e2e
+          scripts/benchmark_seen_store.py
+      - name: Lint incremental boundary
+        run: >-
+          uvx --from ruff==0.11.13 ruff check
+          src/chat_daily_tg/raw_seen.py
+          tests/test_raw_seen.py
+          tests/e2e
+          scripts/benchmark_seen_store.py
+      - name: Type-check public entry boundary
+        run: >-
+          uvx --from mypy==1.16.1 mypy
+          src/chat_daily_tg/cli.py
+          src/chat_daily_tg/features
+          src/chat_daily_tg/raw_seen.py
+
+  unit:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: uv.lock
+      - name: Install locked project dependencies
+        run: uv sync --extra dev --locked
+      - name: Run unit suite
+        run: uv run pytest -q -m "not e2e" --ignore=tests/e2e
+
+  e2e:
+    name: Hermetic E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          cache-dependency-glob: uv.lock
+      - name: Install locked project dependencies
+        run: uv sync --extra dev --locked
+      - name: Run CLI-to-HTTP E2E suite
+        run: uv run pytest -q -m e2e tests/e2e
+
+  build:
+    name: Build and install package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          cache-dependency-glob: uv.lock
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+      - name: Install the built wheel in a clean environment
+        run: |
+          uv venv --python 3.11 .venv-wheel
+          uv pip install --python .venv-wheel/bin/python dist/*.whl
+          .venv-wheel/bin/chat-daily --help

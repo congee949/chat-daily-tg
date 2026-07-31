@@ -174,7 +174,7 @@ health_briefing:
     assert cfg.health_briefing.min_baseline_samples == 5
 
 
-def test_resolve_model_alias_and_growth_judge_model(tmp_path: Path):
+def test_resolve_model_alias_and_growth_judge_models(tmp_path: Path):
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
         """
@@ -185,13 +185,18 @@ llm:
   endpoint: "https://api.deepseek.com"
   model: "deepseek-v4-pro"
   api_key_env: "DEEPSEEK_API_KEY"
-grok:
+sonnet:
   endpoint: "http://127.0.0.1:8317/v1"
-  model: "grok-4.5"
+  model: "claude-sonnet-4-6"
+  api_key_env: "CLIPROXY_API_KEY"
+gemini:
+  endpoint: "http://127.0.0.1:8317/v1"
+  model: "gemini-3.6-flash-high"
   api_key_env: "CLIPROXY_API_KEY"
 growth:
   enabled: true
-  judge_model: "grok"
+  judge_model: "sonnet"
+  judge_fallback_model: "gemini"
   source:
     id: "-1001162433032"
     name: "电丸朱氏会社"
@@ -202,8 +207,9 @@ telegram:
         encoding="utf-8",
     )
     cfg = load_config(cfg_file)
-    assert cfg.growth.judge_model == "grok"
-    assert cfg.resolve_model_alias("grok").model == "grok-4.5"
+    assert cfg.growth.judge_model == "sonnet"
+    assert cfg.growth.judge_fallback_model == "gemini"
+    assert cfg.resolve_model_alias("sonnet").model == "claude-sonnet-4-6"
     # judge alias must not touch the summary/miner model
     assert cfg.models.summary.model == "deepseek-v4-pro"
     with pytest.raises(KeyError):

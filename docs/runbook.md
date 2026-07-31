@@ -22,6 +22,11 @@ B站 / YouTube 订阅卡在 **r4s** 推送成功后 write-after-send 写入
 拉取脚本：`scripts/sync_media_ledger.sh`（rsync，scp 回退；远端不存在则 skip exit 0）。  
 launchd label：`com.chat-daily-tg.ledger-sync`（`StartInterval` 60s，`run_ledger_sync_guarded.sh`）。
 
+**人工补发例外：**Mac 上的 ledger 是由 r4s 每分钟原子覆盖的只读副本；手动从 Mac
+补发订阅卡后，不能只写本地 ledger。必须把同一条 `chat_id`、`message_id`、URL 的
+write-after-send 记录补到 r4s 的权威 ledger，再触发同步，否则 Podcast4Bot 会在下一轮
+同步后丢失该消息的 reaction→URL 映射。
+
 ### launchd label
 
 | label | 时间 | wrapper |

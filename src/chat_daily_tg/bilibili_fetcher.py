@@ -73,6 +73,10 @@ class BiliVideo:
     publish_time: datetime | None = None  # naive local time
     description: str = ""
     view: int | None = None
+    # The creator whose whitelist surfaced this video.  It can differ from the
+    # actual uploader for Bilibili co-published videos.
+    subscription_name: str | None = None
+    publisher_uid: int | None = None
 
     @property
     def seen_key(self) -> str:
@@ -307,10 +311,11 @@ def _parse_media_item(m: dict, up, seen: SeenStore, cutoff: datetime,
         desc = str(view.get("desc") or "")
     except Exception as e:
         log.warning("view failed for %s (desc omitted): %s", bvid, e)
+    upper = m.get("upper") if isinstance(m.get("upper"), dict) else {}
     return BiliVideo(
         bvid=bvid,
         title=str(m.get("title") or bvid),
-        author=str((m.get("upper") or {}).get("name") or up.name or ""),
+        author=str(upper.get("name") or up.name or ""),
         uid=up.uid,
         url=f"https://www.bilibili.com/video/{bvid}",
         cover=str(m.get("cover") or "") or None,
@@ -320,6 +325,8 @@ def _parse_media_item(m: dict, up, seen: SeenStore, cutoff: datetime,
         # int-coerce: 隐藏播放量等场景上游会给字符串，脏值透传会在
         # card_caption 的 f"{view:,}" 处炸掉整轮推送
         view=_as_int((m.get("cnt_info") or {}).get("play")),
+        subscription_name=up.name,
+        publisher_uid=_as_int(upper.get("mid")),
     )
 
 
@@ -580,6 +587,7 @@ def _fetch_via_opencli(src: BilibiliSource, seen: SeenStore, *, now: datetime,
             continue
         author = detail.get("author", "")
         m = _AUTHOR_MID_RE.match(author)
+        publisher_uid = _as_int(m.group(2)) if m else None
         if m:
             author = m.group(1)
         try:
@@ -597,6 +605,8 @@ def _fetch_via_opencli(src: BilibiliSource, seen: SeenStore, *, now: datetime,
             publish_time=pub,
             description=detail.get("description", ""),
             view=view,
+            subscription_name=next((up.name for up in ups if up.uid == uid), None),
+            publisher_uid=publisher_uid,
         ))
 
     return videos

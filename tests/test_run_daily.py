@@ -1,6 +1,71 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
+
+
+def _subscription_cfg(source_name):
+    fetch = SimpleNamespace(whitelist=[object()])
+    digest = SimpleNamespace(topic=source_name)
+    source = SimpleNamespace(
+        enabled=True,
+        fetch=fetch,
+        digest=digest,
+        transport="api",
+        api_key_env="YT_KEY",
+    )
+    return SimpleNamespace(
+        sources=SimpleNamespace(**{source_name: source}),
+        telegram=SimpleNamespace(bot_token_env="TG_TOKEN", chat_id_env="TG_CHAT"),
+        retry=SimpleNamespace(max_attempts=1, backoff_seconds=0),
+    )
+
+
+def test_run_bilibili_returns_failure_when_delivery_is_incomplete(tmp_path, monkeypatch):
+    import run_daily
+
+    cfg = _subscription_cfg("bilibili")
+    monkeypatch.setenv("TG_TOKEN", "fake")
+    monkeypatch.setenv("TG_CHAT", "123")
+    monkeypatch.setattr(run_daily, "configure_logging", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_env_file", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_config", lambda *_: cfg)
+    monkeypatch.setattr(run_daily, "prepare_archive_day", lambda *_: tmp_path)
+    monkeypatch.setattr(run_daily, "resolve_tg_target", lambda *_: ("123", 486))
+    monkeypatch.setattr("chat_daily_tg.bilibili_fetcher.fetch_new_content",
+                        lambda *_args, **_kwargs: [SimpleNamespace(kind="video")])
+    monkeypatch.setattr("chat_daily_tg.bilibili_digest.build_summarizer",
+                        lambda *_: None)
+    monkeypatch.setattr("chat_daily_tg.bilibili_digest.push_digest",
+                        lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr("chat_daily_tg.raw_seen.SeenStore", MagicMock)
+    monkeypatch.setattr("chat_daily_tg.tg_sender.TelegramSender", MagicMock)
+
+    assert run_daily.run_bilibili() == 1
+
+
+def test_run_youtube_returns_failure_when_delivery_is_incomplete(tmp_path, monkeypatch):
+    import run_daily
+
+    cfg = _subscription_cfg("youtube")
+    monkeypatch.setenv("TG_TOKEN", "fake")
+    monkeypatch.setenv("TG_CHAT", "123")
+    monkeypatch.setenv("YT_KEY", "fake")
+    monkeypatch.setattr(run_daily, "configure_logging", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_env_file", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_config", lambda *_: cfg)
+    monkeypatch.setattr(run_daily, "prepare_archive_day", lambda *_: tmp_path)
+    monkeypatch.setattr(run_daily, "resolve_tg_target", lambda *_: ("123", 2009))
+    monkeypatch.setattr("chat_daily_tg.youtube_fetcher.fetch_new_videos",
+                        lambda *_args, **_kwargs: [SimpleNamespace(topic=None)])
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.build_summarizer",
+                        lambda *_: None)
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.push_digest",
+                        lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr("chat_daily_tg.raw_seen.SeenStore", MagicMock)
+    monkeypatch.setattr("chat_daily_tg.tg_sender.TelegramSender", MagicMock)
+
+    assert run_daily.run_youtube() == 1
 
 
 def test_run_daily_pipeline_mocks(tmp_path, monkeypatch):
@@ -904,6 +969,63 @@ def test_push_rich_digest_uses_direct_media_upload(tmp_path):
     assert "[IMG1]" not in md
     assert tg.send_rich_message.call_args.kwargs["media"] == [
         ("citation_1", str(image), "photo")
+    ]
+
+
+def test_push_rich_digest_drops_already_sent_health_chart_reference(tmp_path):
+    """Catch-up runs retain health text but must not reference the chart after
+    .health-card-sent suppresses uploading that attachment."""
+    import run_daily
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"jpg")
+    cfg, citation_map = _rich_cfg_and_map(str(image))
+    tg = MagicMock()
+
+    ok = run_daily._push_rich_digest(
+        tg,
+        cfg,
+        "- 内容 [IMG1]",
+        citation_map,
+        health_rich_md=(
+            "### 个人晨报\n\n"
+            "![](tg://photo?id=health_chart)\n\n"
+            "<details><summary>详情</summary>数据</details>"
+        ),
+        health_chart_path=None,
+    )
+
+    assert ok is True
+    kwargs = tg.send_rich_message.call_args.kwargs
+    assert "tg://photo?id=health_chart" not in kwargs["markdown"]
+    assert "个人晨报" in kwargs["markdown"]
+    assert "详情" in kwargs["markdown"]
+    assert kwargs["media"] == [("citation_1", str(image), "photo")]
+
+
+def test_push_rich_digest_keeps_health_chart_when_attachment_is_uploaded(tmp_path):
+    import run_daily
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"jpg")
+    health_chart = tmp_path / "health.png"
+    health_chart.write_bytes(b"png")
+    cfg, citation_map = _rich_cfg_and_map(str(image))
+    tg = MagicMock()
+
+    ok = run_daily._push_rich_digest(
+        tg,
+        cfg,
+        "- 内容 [IMG1]",
+        citation_map,
+        health_rich_md="### 个人晨报\n\n![](tg://photo?id=health_chart)",
+        health_chart_path=health_chart,
+    )
+
+    assert ok is True
+    kwargs = tg.send_rich_message.call_args.kwargs
+    assert "tg://photo?id=health_chart" in kwargs["markdown"]
+    assert kwargs["media"] == [
+        ("health_chart", str(health_chart), "photo"),
+        ("citation_1", str(image), "photo"),
     ]
 
 

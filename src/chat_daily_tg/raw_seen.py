@@ -17,28 +17,43 @@ class SeenStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
         self._seen: set[str] = set()
+        # Incremental channel polling asks for the same high-water mark once per
+        # configured channel. Keep that lookup O(1) instead of rescanning every
+        # historical seen key for every channel on every run.
+        self._max_msg_ids: dict[str, int] = {}
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
-                k = line.strip()
-                if k:
-                    self._seen.add(k)
+                key = line.strip()
+                if key:
+                    self._seen.add(key)
+                    self._index_numeric_message_key(key)
 
     @staticmethod
     def key(chat_id: str | int, msg_id: int) -> str:
         return f"{chat_id}:{msg_id}"
 
+    def _index_numeric_message_key(self, key: str) -> None:
+        """Index channel-style ``chat_id:numeric_msg_id`` keys.
+
+        The same append-only file also stores Bilibili/YouTube identifiers whose
+        suffix is not numeric. Those keys remain valid membership entries but do
+        not participate in a Telegram channel high-water mark.
+        """
+        chat_id, separator, raw_msg_id = key.rpartition(":")
+        if not separator or not chat_id:
+            return
+        try:
+            msg_id = int(raw_msg_id)
+        except ValueError:
+            return
+        previous = self._max_msg_ids.get(chat_id, 0)
+        if msg_id > previous:
+            self._max_msg_ids[chat_id] = msg_id
+
     def max_msg_id(self, chat_id: str | int) -> int:
-        """Highest already-pushed msg_id for a channel (its high-water-mark), or 0.
+        """Highest already-pushed msg_id for a channel (its high-water mark), or 0.
         Used by the incremental forwarder to fetch only newer messages."""
-        prefix = f"{chat_id}:"
-        best = 0
-        for k in self._seen:
-            if k.startswith(prefix):
-                try:
-                    best = max(best, int(k[len(prefix):]))
-                except ValueError:
-                    continue
-        return best
+        return self._max_msg_ids.get(str(chat_id), 0)
 
     def __contains__(self, key: str) -> bool:
         return key in self._seen
@@ -47,6 +62,7 @@ class SeenStore:
         if key in self._seen:
             return
         self._seen.add(key)
+        self._index_numeric_message_key(key)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(key + "\n")

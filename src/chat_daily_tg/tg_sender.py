@@ -19,6 +19,9 @@ _MEDIA_METHOD = {
 }
 # media_group item type per kind (photos/videos can share one group).
 _GROUP_TYPE = {"photo": "photo", "video": "video", "audio": "audio", "document": "document"}
+_RICH_MEDIA_REF_RE = re.compile(
+    r"tg://(?:photo|video|audio)\?id=([A-Za-z0-9_-]+)"
+)
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -374,6 +377,14 @@ class TelegramSender:
         429 waits per retry_after; transport errors retry with backoff."""
         url = f"https://api.telegram.org/bot{self.bot_token}/sendRichMessage"
         media = media or []
+        referenced_ids = set(_RICH_MEDIA_REF_RE.findall(markdown))
+        declared_ids = {media_id for media_id, _path, _kind in media}
+        missing_ids = referenced_ids - declared_ids
+        if missing_ids:
+            missing = ", ".join(sorted(missing_ids))
+            raise ValueError(
+                f"rich message references undeclared media id(s): {missing}"
+            )
         rich_message: dict = {"markdown": markdown}
         if media:
             rich_message["media"] = [

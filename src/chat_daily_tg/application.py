@@ -463,6 +463,10 @@ def run_bilibili(no_push: bool = False) -> int:
                            no_push=no_push)
         log.info("✓ bilibili digest complete: %d/%d cards sent (no_push=%s)",
                  sent, len(contents), no_push)
+        if not no_push and sent != len(contents):
+            log.error("bilibili delivery incomplete: %d/%d cards sent",
+                      sent, len(contents))
+            return 1
         return 0
     except Exception as e:
         log.exception("bilibili digest failed: %s", e)
@@ -528,6 +532,10 @@ def run_youtube(no_push: bool = False) -> int:
                                 no_push=no_push)
         log.info("✓ youtube digest complete: %d/%d cards sent (no_push=%s)",
                  sent, len(videos), no_push)
+        if not no_push and sent != len(videos):
+            log.error("youtube delivery incomplete: %d/%d cards sent",
+                      sent, len(videos))
+            return 1
         return 0
     except Exception as e:
         log.exception("youtube digest failed: %s", e)
@@ -542,6 +550,8 @@ def run_youtube(no_push: bool = False) -> int:
 
 
 def _llm_from_block(cfg, m):
+    if m.api_key_file:
+        load_env_file(m.api_key_file)
     return LLMClient(
         endpoint=m.endpoint, model=m.model, api_key=os.environ[m.api_key_env],
         max_tokens=m.max_tokens, timeout=m.timeout,
@@ -551,9 +561,45 @@ def _llm_from_block(cfg, m):
     )
 
 
+def _run_summary_with_fallback(run_fn, candidates, **kwargs):
+    """Run the full summary pipeline through ordered model candidates.
+
+    A verifier failure invalidates the whole summary just as much as an initial
+    generation failure. Retrying from the next provider is therefore safer than
+    publishing an unchecked partial result from the previous provider.
+    """
+    last_error = None
+    for index, (alias, llm) in enumerate(candidates):
+        try:
+            return run_fn(llm_client=llm, **kwargs)
+        except Exception as error:
+            last_error = error
+            if index == len(candidates) - 1:
+                raise
+            next_alias = candidates[index + 1][0]
+            log.warning(
+                "summary model %s (%s) failed: %s; retrying full pipeline with %s",
+                alias, llm.model, error, next_alias,
+            )
+    raise last_error  # pragma: no cover - candidates always contains the primary model
+
+
 def _growth_llm(cfg):
     """Same construction main()'s _run uses for the summary model."""
     return _llm_from_block(cfg, cfg.models.summary)
+
+
+def _judge_growth_cards(judge_fn, primary_llm, fallback_llm,
+                        card_a: str, card_b: str, rubric_text: str) -> dict:
+    """Run the configured judge, retrying once with its explicit fallback."""
+    try:
+        return judge_fn(primary_llm, card_a, card_b, rubric_text)
+    except Exception as primary_error:
+        if fallback_llm is None:
+            raise
+        log.warning("growth primary judge failed (%s); trying fallback judge %s",
+                    primary_error, fallback_llm.model)
+        return judge_fn(fallback_llm, card_a, card_b, rubric_text)
 
 
 def run_growth(no_push: bool = False, dm_test: bool = False,
@@ -568,6 +614,7 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
     configure_logging(log_file_for(f"growth-{tag}"))
     llm = None
     judge_llm = None
+    judge_fallback_llm = None
     try:
         from chat_daily_tg import growth_store
         from chat_daily_tg.growth_cards import build_card_a, build_card_b, judge
@@ -587,8 +634,8 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
             log.info("growth mining disabled, nothing to do")
             return 0
         llm = _growth_llm(cfg)
-        # 异源 judge：B 卡作者与评审分属两厂（deepseek 写、grok 评），消除同源
-        # 自评偏好；别名/构造失败回落主模型，日卡永不因 judge 配置断供。
+        # 异源 judge：B 卡作者与评审分属两厂，消除同源自评偏好。评审可有
+        # 独立次选模型；矿工与 B 卡生成则始终保持主模型。
         judge_llm = llm
         if g.judge_model:
             try:
@@ -597,6 +644,15 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
             except Exception as e:
                 log.warning("growth judge alias %r unavailable (%s), judging with main model",
                             g.judge_model, e)
+        if g.judge_fallback_model:
+            try:
+                judge_fallback_llm = _llm_from_block(
+                    cfg, cfg.resolve_model_alias(g.judge_fallback_model))
+                log.info("growth fallback judge model: %s (%s)",
+                         g.judge_fallback_model, judge_fallback_llm.model)
+            except Exception as e:
+                log.warning("growth fallback judge alias %r unavailable (%s), disabled",
+                            g.judge_fallback_model, e)
         today = date.today().isoformat()
         target_day = mine_date or yesterday_iso()
 
@@ -636,7 +692,8 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
             card_b = ""
             try:
                 card_b = build_card_b(llm, seg)
-                verdict = judge(judge_llm, card_a, card_b, rubric_text)
+                verdict = _judge_growth_cards(
+                    judge, judge_llm, judge_fallback_llm, card_a, card_b, rubric_text)
             except Exception as e:
                 # Style A is the zero-fabrication-risk deterministic card.
                 log.warning("card B/judge unavailable (%s), falling back to A", e)
@@ -856,6 +913,10 @@ def run_growth_weekly(no_push: bool = False, model_alias: str | None = None) -> 
 
 
 _TIME_RE = re.compile(r"\d{2}:\d{2}")
+_RICH_MEDIA_LINK_RE = re.compile(
+    r'!\[[^\]]*\]\(tg://(?P<kind>photo|video|audio)\?id=(?P<id>[A-Za-z0-9_-]+)'
+    r'(?:\s+"[^"\n]*")?\)'
+)
 
 
 def _citation_caption(analysis) -> str:
@@ -865,6 +926,21 @@ def _citation_caption(analysis) -> str:
     m = _TIME_RE.search(c.timestamp)
     time_part = m.group(0) if m else c.timestamp
     return f"📷 {c.platform} · {c.group_name} · {time_part}"
+
+
+def _drop_rich_media_reference(markdown: str, media_id: str) -> str:
+    """Remove a rich-media block whose attachment is intentionally omitted.
+
+    Telegram rejects the whole sendRichMessage request with
+    RICH_MESSAGE_PHOTO_INVALID when markdown references an id that isn't present
+    in InputRichMessage.media. This occurs on a catch-up run after the health
+    chart was already delivered: the chart must not be sent twice, but the
+    textual health section should remain in the rich digest.
+    """
+    return _RICH_MEDIA_LINK_RE.sub(
+        lambda match: "" if match.group("id") == media_id else match.group(0),
+        markdown,
+    )
 
 
 def _push_rich_digest(
@@ -881,6 +957,14 @@ def _push_rich_digest(
     the multipart sendRichMessage call, avoiding the old public KV relay.
     Returns False on ANY failure so the caller falls back to text + photos."""
     try:
+        if health_rich_md and not health_chart_path:
+            cleaned = _drop_rich_media_reference(health_rich_md, "health_chart")
+            if cleaned != health_rich_md:
+                log.info(
+                    "health chart already sent; removing unbound health_chart "
+                    "reference from rich digest"
+                )
+            health_rich_md = cleaned
         # Rich messages consume MARKDOWN, so build from the RAW concise output
         # (post_process_concise would have converted [label](url) links into
         # Telegram-HTML <a> tags, which rich markdown must not receive).
@@ -1107,13 +1191,13 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 f"日报将无图（报告仍照常推送）。日志: {log_file_for(date_str)}")
 
     summary_model = cfg.models.summary
-    api_key = os.environ[summary_model.api_key_env]
-    llm = LLMClient(
-        endpoint=summary_model.endpoint, model=summary_model.model, api_key=api_key,
-        max_tokens=summary_model.max_tokens, timeout=summary_model.timeout,
-        retry_max_attempts=cfg.retry.max_attempts,
-        retry_backoff_seconds=cfg.retry.backoff_seconds,
-        extra_body=summary_model.extra_body,
+    summary_candidates = [("primary", _llm_from_block(cfg, summary_model))]
+    for alias in cfg.models.summary_fallback_models:
+        fallback = cfg.resolve_model_alias(alias)
+        summary_candidates.append((alias, _llm_from_block(cfg, fallback)))
+    log.info(
+        "summary model chain: %s",
+        " -> ".join(f"{alias} ({llm.model})" for alias, llm in summary_candidates),
     )
     detail_path = str(archive_dir / "summary.md")
     from chat_daily_tg.context_builder import (
@@ -1167,8 +1251,8 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
 
     log.info("calling LLM for summary…")
     try:
-        out = run_summary(
-            llm_client=llm, date=date_str,
+        out = _run_summary_with_fallback(
+            run_summary, summary_candidates, date=date_str,
             groups_with_content=groups_with_content, detail_path=detail_path,
             active_permanent_summary=perm_ctx,
             active_hot_leads_summary=hot_ctx,
@@ -1179,11 +1263,13 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     finally:
         if evidence_index is not None:
             evidence_index.close()
-        llm.close()
+        for _alias, client in summary_candidates:
+            client.close()
 
     health_plain = ""
     health_rich_md = ""
     health_chart_path: Path | None = None
+    health_card_marker = archive_dir / ".health-card-sent"
 
     # Personal Health/Watch context is deterministic and remains outside the LLM
     # trust boundary. Failure is isolated so stale iCloud sync never blocks the
@@ -1210,7 +1296,11 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                 )
                 health_rich_md = build_health_rich_markdown(
                     health_report,
-                    chart_media_id="health_chart" if health_chart_path else None,
+                    chart_media_id=(
+                        "health_chart"
+                        if health_chart_path and not health_card_marker.exists()
+                        else None
+                    ),
                 )
                 (archive_dir / "health-rich.md").write_text(
                     health_rich_md, encoding="utf-8"
@@ -1312,7 +1402,6 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
         # digest must still go out at most once.
         card_marker = archive_dir / ".card-sent"
         digest_marker = archive_dir / ".digest-sent"
-        health_card_marker = archive_dir / ".health-card-sent"
         image_sent = card_marker.exists()
         if image_sent:
             log.info("card already sent for %s, skipping (catch-up)", date_str)

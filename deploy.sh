@@ -35,7 +35,7 @@ require_clean_tree() {
 }
 
 update_code() {
-  echo "📥 拉取最新代码（分支 $BRANCH）..."
+  echo "📥 拉取最新代码（分支 ${BRANCH}）..."
   git fetch "$REMOTE"
   require_clean_tree
   git reset --hard "$REMOTE/$BRANCH"

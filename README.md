@@ -326,4 +326,4 @@ microbenchmark 同时报告墙钟时间和操作次数。性能结论应基于�
 
 开始修改前阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。PR 应说明改动属于 unit、hermetic E2E 还是真实人工验证，并列出未验证项。不要提交真实消息、数据库、归档、Bot token、模型 key、路由表或机器专用配置。
 
-本源码归档当前未包含 `LICENSE`。在仓库所有者明确选择许可证并确认版权归属前，公开可见不等于已授权复制、修改或再分发；这是正式公开复用前的发布阻断项。
+本项目以 [MIT License](LICENSE) 发布。提交前仍须确认你拥有新增内容的版权，并且不要把真实消息、密钥、数据库或机器专用配置加入仓库。

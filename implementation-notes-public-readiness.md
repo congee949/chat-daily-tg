@@ -16,3 +16,5 @@
 
 ## Tradeoffs
 - The public-readiness patch scopes Ruff/MyPy to the incremental boundary, avoiding a speculative whole-repository style/type migration.
+
+- Added a GPT Image 2 generated, non-sensitive overview diagram at the README entry point; it supplements the newcomer-oriented explanation without documenting operational secrets.

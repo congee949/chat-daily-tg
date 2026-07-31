@@ -4,7 +4,9 @@
 
 > 这不是“一键部署的云服务”。它是一个 Python 3.11+ 模块化单体，需要你自行准备数据源、模型接口和 Telegram Bot。第一次使用应先跑无密钥的隔离测试，再用测试群验证，最后才考虑定时运行。
 
-![chat-daily-tg 架构](chat-daily-architecture.png)
+![chat-daily-tg 数据流：本地数据经过整理、归档与安全投递后发送到 Telegram](docs/images/readme-data-flow.png)
+
+<sub>从本地已有内容到 Telegram 的四步流程：整理与筛选、本地归档、安全投递。图中不包含真实聊天、密钥或账号信息。</sub>
 
 ## 30 秒理解
 

@@ -10,6 +10,31 @@ import time
 log = logging.getLogger(__name__)
 
 
+class AmbiguousDeliveryError(RuntimeError):
+    """A Telegram write may have succeeded, but its response was not received.
+
+    Retrying a Bot API send after a read/write timeout is not idempotent: the
+    original request can already have created a message.  Callers with a source
+    identity must persist an ``ambiguous`` terminal state instead of replaying
+    the same POST automatically.
+    """
+
+    def __init__(self, method: str, cause: Exception):
+        super().__init__(f"{method} outcome unknown after transport timeout: {cause}")
+        self.method = method
+        self.cause = cause
+
+
+def _raise_if_ambiguous(method: str, exc: Exception) -> None:
+    if isinstance(exc, (
+        httpx.ReadTimeout, httpx.WriteTimeout,
+        httpx.ReadError, httpx.WriteError,
+        httpx.RemoteProtocolError,
+    )):
+        log.error("tg %s outcome ambiguous; refusing non-idempotent retry: %s", method, exc)
+        raise AmbiguousDeliveryError(method, exc) from exc
+
+
 # Telegram sendXxx method + multipart field name per media kind.
 _MEDIA_METHOD = {
     "photo": ("sendPhoto", "photo"),
@@ -64,6 +89,14 @@ def _html_to_plain(text: str) -> str:
 
 
 _CAPTION_LIMIT = 1024
+# Bot API media uploads can remain in-flight behind the configured Telegram
+# proxy after the small request body has been written.  A 30-second read
+# timeout produced a false ambiguous-delivery alert for source msg 43506: the
+# photo appeared in the target topic about 70 seconds later.  Keep ordinary
+# text sends responsive, but allow media responses enough time to come back so
+# a slow proxy does not turn a successful upload into an unnecessary manual
+# recovery incident.
+_MEDIA_RESPONSE_TIMEOUT_SECONDS = 120.0
 
 
 def _safe_caption(caption: str) -> tuple[str, str | None]:
@@ -225,6 +258,20 @@ class TelegramSender:
     def _client_session(self):
         yield self._http_client()
 
+    def _media_request_timeout(self) -> httpx.Timeout:
+        """Per-request timeout for non-idempotent media uploads.
+
+        Preserve the configured connect/pool budget while extending read and
+        write waits for uploads.  The sender still raises
+        ``AmbiguousDeliveryError`` if the longer request actually times out.
+        """
+        media_seconds = max(float(self.timeout), _MEDIA_RESPONSE_TIMEOUT_SECONDS)
+        return httpx.Timeout(
+            media_seconds,
+            connect=float(self.timeout),
+            pool=float(self.timeout),
+        )
+
     def close(self) -> None:
         """Release an internally-created client pool (safe to call repeatedly)."""
         if self._closed:
@@ -266,7 +313,8 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError) as e:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+                _raise_if_ambiguous("sendMessage", e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg send failed (attempt %d/%d): %s",
@@ -442,7 +490,8 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.TimeoutException, httpx.ConnectError, OSError) as e:
+            except (httpx.TransportError, OSError) as e:
+                _raise_if_ambiguous("sendRichMessage", e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg sendRichMessage transport failed (attempt %d/%d): %s",
@@ -483,7 +532,8 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError) as e:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+                _raise_if_ambiguous("sendMessage", e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg send_card failed (attempt %d/%d): %s",
@@ -525,13 +575,17 @@ class TelegramSender:
                             data["caption"] = caption[:1024]
                             if parse_mode is not None:
                                 data["parse_mode"] = parse_mode
-                        r = c.post(url, data=data, files=files)
+                        r = c.post(
+                            url, data=data, files=files,
+                            timeout=self._media_request_timeout(),
+                        )
                     r.raise_for_status()
                     body = r.json()
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError, OSError) as e:
+                _raise_if_ambiguous("sendPhoto", e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg sendPhoto failed (attempt %d/%d): %s",
@@ -567,7 +621,10 @@ class TelegramSender:
                             data["caption"] = cap
                             if cap_mode is not None:
                                 data["parse_mode"] = cap_mode
-                        r = c.post(url, data=data, files=files)
+                        r = c.post(
+                            url, data=data, files=files,
+                            timeout=self._media_request_timeout(),
+                        )
                     if r.status_code == 429:
                         rl_hits += 1
                         if rl_hits >= self.retry_max_attempts:
@@ -580,7 +637,8 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return body["result"]["message_id"]
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError, OSError) as e:
+                _raise_if_ambiguous(method, e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg %s failed (attempt %d/%d): %s",
@@ -593,14 +651,22 @@ class TelegramSender:
         raise last_exc
 
     def send_media_group(self, items: list[tuple[str, str]], *, caption: str = "") -> list[int]:
-        """Send up to 10 media files as one album (sendMediaGroup).
+        """Send media files as one or more albums (sendMediaGroup, max 10 each).
 
-        `items` is [(file_path, kind), …]; caption (HTML) goes on the first item.
-        Media groups do not support inline buttons, so callers that need an 打开原文
-        link embed it in the caption text. Mixed photo/document groups are the caller's
+        `items` is [(file_path, kind), …]; caption (HTML) goes on the first item of
+        the first batch only. Larger albums are split into successive groups so
+        tails are not silently dropped. Mixed photo/document groups are the caller's
         responsibility to avoid (Telegram 400s on them)."""
+        if not items:
+            return []
+        if len(items) > 10:
+            ids: list[int] = []
+            for i in range(0, len(items), 10):
+                chunk = items[i:i + 10]
+                cap = caption if i == 0 else ""
+                ids.extend(self.send_media_group(chunk, caption=cap))
+            return ids
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
-        items = items[:10]
         last_exc: Exception | None = None
         attempts = 0
         rl_hits = 0
@@ -627,7 +693,10 @@ class TelegramSender:
                         data = {"chat_id": self.chat_id, "media": json.dumps(media)}
                         if self.message_thread_id is not None:
                             data["message_thread_id"] = self.message_thread_id
-                        r = c.post(url, data=data, files=files)
+                        r = c.post(
+                            url, data=data, files=files,
+                            timeout=self._media_request_timeout(),
+                        )
                     finally:
                         for fh in handles:
                             fh.close()
@@ -643,7 +712,8 @@ class TelegramSender:
                     if not body.get("ok"):
                         raise RuntimeError(f"Telegram API error: {body}")
                     return [m["message_id"] for m in body["result"]]
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, RuntimeError, OSError) as e:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError, OSError) as e:
+                _raise_if_ambiguous("sendMediaGroup", e)
                 last_exc = e
                 attempts += 1
                 log.warning("tg sendMediaGroup failed (attempt %d/%d): %s",

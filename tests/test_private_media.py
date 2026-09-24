@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 from pytest_httpx import HTTPXMock
 
@@ -113,6 +114,44 @@ def test_push_private_channel_partial_media_loss_alerts_and_marks_seen(tmp_path,
     assert SeenStore.key("-100y", 30) in seen        # still marked seen (HWM consistency)
 
 
+def test_private_channel_ambiguous_upload_is_terminal_and_alerted(tmp_path, monkeypatch):
+    """An unknown remote outcome must not remain unseen for the next poll to replay."""
+    from chat_daily_tg import private_media
+    from chat_daily_tg.config import RawChannel
+    from chat_daily_tg.raw_seen import SeenStore
+    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+    import chat_daily_tg.dedup_journal as dj
+    import httpx
+
+    manifest = [{
+        "msg_id": 42927, "date": "2026-08-02T09:01:00+08:00",
+        "text": "Technology News", "grouped_id": None,
+        "media": [{"path": "/x/news.jpg", "kind": "photo"}],
+    }]
+    monkeypatch.setattr(private_media, "dump_channel", lambda *a, **k: manifest)
+    alerts = []
+    journal = []
+    monkeypatch.setattr("chat_daily_tg.notifier.notify_failure",
+                        lambda t, m: alerts.append((t, m)))
+    monkeypatch.setattr(dj, "record", lambda entry, path=None: journal.append(entry))
+
+    class FakeSender:
+        def send_media(self, path, kind, caption=""):
+            raise AmbiguousDeliveryError("sendPhoto", httpx.ReadTimeout("lost"))
+
+    seen = SeenStore(tmp_path / "seen.txt")
+    pushed = private_media.push_private_channel(
+        channel=RawChannel(id="-1001125107539", name="科技圈"),
+        since="2026-08-02", until="2026-08-03", out_dir=tmp_path / "dump",
+        sender=FakeSender(), limit=500, seen=seen, delay_seconds=0,
+    )
+    assert pushed == 0
+    assert SeenStore.key("-1001125107539", 42927) in seen
+    assert journal[0]["action"] == "ambiguous"
+    assert journal[0]["method"] == "sendPhoto"
+    assert len(alerts) == 1
+
+
 def test_send_media_single_photo_with_caption(httpx_mock: HTTPXMock, tmp_path):
     f = tmp_path / "a.jpg"
     f.write_bytes(b"fakejpg")
@@ -203,6 +242,114 @@ def test_dump_channel_preflight_rejects_missing_kabi_python(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="kabi-tg-cli"):
         private_media.dump_channel("-100x", "2026-01-01", "2026-01-02",
                                    tmp_path / "out", limit=10)
+
+
+def test_dump_channel_download_policy_preserves_only_ids_argv_slot(tmp_path, monkeypatch):
+    from chat_daily_tg import private_media
+
+    calls = []
+    monkeypatch.setattr(private_media, "_require_tg_cli", lambda: None)
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(private_media.subprocess, "run", fake_run)
+    private_media.dump_channel(
+        "-100x", "2026-01-01", "2026-01-02", tmp_path / "out", 10,
+        media_kinds=("photo",), max_media=20,
+    )
+    assert calls[0][0][-4:] == ["0", "", "photo", "20"]
+
+
+def test_dump_channels_uses_one_subprocess_and_validates_order(tmp_path, monkeypatch):
+    from chat_daily_tg import private_media
+
+    calls = []
+    monkeypatch.setattr(private_media, "_require_tg_cli", lambda: None)
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        payload = json.loads(kwargs["input"])
+        assert [r["chat_id"] for r in payload["requests"]] == ["-1001", "-1002"]
+        results = [
+            {"chat_id": "-1001", "status": "ok", "manifest": [{"msg_id": 1}], "error": None},
+            {"chat_id": "-1002", "status": "failed", "manifest": [], "error": "ValueError: nope"},
+        ]
+        envelope = {"ok": True, "schema_version": "1", "data": {"results": results}}
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(envelope), stderr="")
+
+    monkeypatch.setattr(private_media.subprocess, "run", fake_run)
+    requests = [
+        {"chat_id": "-1001", "since": "2026-01-01", "until": "2026-01-02",
+         "out_dir": tmp_path / "one", "limit": 10, "media_kinds": ("photo",), "max_media": 20},
+        {"chat_id": "-1002", "since": "2026-01-01", "until": "2026-01-02",
+         "out_dir": tmp_path / "two", "limit": 20},
+    ]
+    got = private_media.dump_channels(requests)
+    assert len(calls) == 1
+    assert calls[0][0][-1] == "--batch-json"
+    assert got[0]["status"] == "ok" and got[1]["status"] == "failed"
+    assert (tmp_path / "one").exists() and (tmp_path / "two").exists()
+
+
+def test_dump_channels_rejects_wrong_result_identity(tmp_path, monkeypatch):
+    import pytest
+    from chat_daily_tg import private_media
+
+    monkeypatch.setattr(private_media, "_require_tg_cli", lambda: None)
+
+    def fake_run(cmd, **kwargs):
+        envelope = {"ok": True, "schema_version": "1", "data": {"results": [
+            {"chat_id": "-999", "status": "ok", "manifest": [], "error": None},
+        ]}}
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(envelope), stderr="")
+
+    monkeypatch.setattr(private_media.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="wrong chat identity"):
+        private_media.dump_channels([{
+            "chat_id": "-1001", "since": "2026-01-01", "until": "2026-01-02",
+            "out_dir": tmp_path / "out", "limit": 10,
+        }])
+
+
+def test_dump_channels_distinguishes_legacy_batch_unsupported(tmp_path, monkeypatch):
+    import pytest
+    from chat_daily_tg import private_media
+
+    monkeypatch.setattr(private_media, "_require_tg_cli", lambda: None)
+    monkeypatch.setattr(
+        private_media.subprocess, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="ValueError: invalid literal for int() with base 10: '--batch-json'"),
+    )
+    with pytest.raises(private_media.DumpManyUnsupported):
+        private_media.dump_channels([{
+            "chat_id": "-1001", "since": "2026-01-01", "until": "2026-01-02",
+            "out_dir": tmp_path / "out", "limit": 10,
+        }])
+
+
+def test_private_channel_dump_failure_cleans_partial_downloads(tmp_path, monkeypatch):
+    import pytest
+    from chat_daily_tg import private_media
+    from chat_daily_tg.config import RawChannel
+
+    out_dir = tmp_path / "partial-dump"
+
+    def fail_dump(*args, **kwargs):
+        out_dir.mkdir()
+        (out_dir / "partial.jpg").write_bytes(b"incomplete")
+        raise TimeoutError("telegram fetch stalled")
+
+    monkeypatch.setattr(private_media, "dump_channel", fail_dump)
+    with pytest.raises(TimeoutError, match="stalled"):
+        private_media.push_private_channel(
+            channel=RawChannel(id="-100x", name="private"),
+            since="2026-01-01", until="2026-01-02", out_dir=out_dir,
+            sender=None, limit=10,
+        )
+    assert not out_dir.exists()
 
 
 def test_media_post_bypasses_l1_dedup_but_text_only_dup_is_skipped(tmp_path, monkeypatch):

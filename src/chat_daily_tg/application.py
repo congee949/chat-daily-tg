@@ -9,6 +9,7 @@ block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
 (health briefing day-boundary + wake deadline) — do not delete the block.
 """
 from __future__ import annotations
+from contextlib import ExitStack
 import argparse
 from dataclasses import replace
 from datetime import date, timedelta
@@ -235,38 +236,104 @@ def _build_dedup_gates(cfg, *, no_push: bool):
             log.warning("content dedup store unavailable (layer off this run): %s", e)
     if dedup.topic.enabled:
         try:
-            from chat_daily_tg.evidence_index import GeminiEmbedder
+            from chat_daily_tg.evidence_index import build_embedder, build_reranker
             from chat_daily_tg.paths import DELIVERED_INDEX_DB
             from chat_daily_tg.topic_dedup import (
-                DeliveredIndex, SameEventJudge, TopicDedupGate,
+                DEFAULT_CALIBRATION_RECEIPT,
+                DeliveredIndex,
+                SameEventJudge,
+                TopicDedupGate,
             )
             t = dedup.topic
             em = cfg.models.embedding if cfg.models else None
             if not (em and em.enabled):
                 raise RuntimeError("models.embedding disabled — L2 needs it")
-            embedder = GeminiEmbedder.from_config(em)
-            index = DeliveredIndex(DELIVERED_INDEX_DB, window_days=t.index_window_days)
-            # SameEventJudge applies model/timeout overrides to a replace() COPY.
-            judge = SameEventJudge(
-                _llm_from_block(cfg, cfg.resolve_model_alias(t.judge_model_alias)),
-                model=t.judge_model, timeout=t.judge_timeout_seconds,
+            embedder = build_embedder(em)
+            index = DeliveredIndex(
+                DELIVERED_INDEX_DB,
+                window_days=t.index_window_days,
+                generation=getattr(embedder, "generation", None),
             )
+            from chat_daily_tg.jev_judge import build_jev_judge
+            from chat_daily_tg.jev_shadow import build_shadow
+            fallback_judge = None
+            try:
+                fallback_judge = SameEventJudge(
+                    _llm_from_block(cfg, cfg.resolve_model_alias(t.judge_model_alias)),
+                    model=t.judge_model, timeout=t.judge_timeout_seconds,
+                )
+            except Exception as exc:
+                log.warning("L2 chat judge unavailable error_type=%s", type(exc).__name__)
+            primary = build_jev_judge(cfg, fallback=fallback_judge)
+            judge = primary if primary is not None else fallback_judge
+            # The provider selector also prevents a second Jev request as shadow.
+            jev_shadow = (
+                build_shadow(cfg) if getattr(t, "judge_provider", "llm") != "jev" else None
+            )
+            log.info(
+                "L2 judge selected requested=%s active=%s mode=%s",
+                getattr(t, "judge_provider", "llm"),
+                type(judge).__name__ if judge is not None else "none", t.mode,
+            )
+            l2_reranker = None
+            if getattr(t, "reranker_enabled", False) is True:
+                reranker_model = cfg.models.reranker if cfg.models else None
+                if not (reranker_model and reranker_model.enabled):
+                    log.warning(
+                        "L2 reranker requested but models.reranker is disabled; "
+                        "retaining dense candidate order and disabling enforce"
+                    )
+                else:
+                    try:
+                        l2_reranker = build_reranker(reranker_model)
+                    except Exception as e:
+                        # A failed client must not take the whole fail-open
+                        # gate down; TopicDedupGate remains report-only.
+                        log.warning(
+                            "L2 reranker unavailable; disabling enforce: %s",
+                            e,
+                        )
+            requested_mode = t.mode
+            if requested_mode == "enforce":
+                if getattr(t, "enforce_enabled", False) is not True:
+                    requested_mode = "report"
+                elif l2_reranker is None:
+                    log.warning(
+                        "L2 enforce requested without an available reranker; "
+                        "downgrading to report"
+                    )
+                    requested_mode = "report"
             topic_gate = TopicDedupGate(
-                index, embedder, judge, mode=t.mode,
+                index, embedder, judge, mode=requested_mode,
+                jev_shadow=jev_shadow,
+                reranker=l2_reranker,
+                rerank_top_k=t.reranker_top_k,
                 candidate_min_sim=t.candidate_min_sim, strong_sim=t.strong_sim,
                 retrieval_window_hours=t.retrieval_window_hours,
                 exclude_producers=frozenset(t.exclude_producers),
                 max_judge_calls_per_run=t.max_judge_calls_per_run,
+                min_embedding_coverage=t.min_embedding_coverage,
+                calibrated_generation_id=t.calibrated_generation_id,
+                calibration_receipt_path=DEFAULT_CALIBRATION_RECEIPT,
+                online_backfill_cap=t.online_backfill_cap,
                 # The annotation deep-link base and the ingest target are the
                 # SAME group — derived, not restated, so a forum migration
                 # can't leave 前文↗ links pointing into the dead group.
                 group_internal_id=str(t.forum_chat_id).removeprefix("-100").lstrip("-"),
-                # Ingest+backfill run lazily at the first prepare() with real
-                # cards: a zero-new-card run costs zero network calls.
+                # Text ingest runs lazily at the first prepare() with real
+                # cards. Embedding backfill is a separate bounded sidecar job.
                 ingest={
                     "db_path": Path(cfg.sources.telegram.db_path).expanduser(),
                     "forum_chat_id": t.forum_chat_id,
                     "sync_limit": t.sync_limit,
+                    "sent_ledger_path": (
+                        getattr(t, "xmonitor_ledger_path", None).expanduser()
+                        if getattr(t, "xmonitor_ledger_enabled", False)
+                        and getattr(t, "xmonitor_ledger_path", None) is not None
+                        else None
+                    ),
+                    "sent_ledger_max_age_hours": getattr(
+                        t, "xmonitor_ledger_max_age_hours", 24),
                 },
             )
         except Exception as e:
@@ -287,7 +354,10 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
     channels = cfg.sources.telegram.raw_channels if cfg.sources.telegram.enabled else []
     if not channels:
         return
+    from chat_daily_tg.qwen_runtime import channel_runtime
+    resources = ExitStack()
     try:
+        resources.enter_context(channel_runtime(cfg, no_push=no_push))
         from collections import OrderedDict
         from chat_daily_tg.raw_channels import push_raw_channel_cards
         from chat_daily_tg.tg_sender import TelegramSender
@@ -298,6 +368,26 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
         # One store/gate pair per run (the L2 judge budget is global across
         # channels); construction failure = that layer off, delivery proceeds.
         content_store, topic_gate = _build_dedup_gates(cfg, no_push=no_push)
+        if topic_gate is not None:
+            closer = getattr(topic_gate.judge, "close", None)
+            if callable(closer):
+                resources.callback(closer)
+        auth_cfg = getattr(cfg.sources.telegram.dedup, "authority", None)
+        authority = dict(getattr(auth_cfg, "weights", {}) or {})
+        # First-arrival URL collapse no longer depends on weights: once any
+        # channel delivered a canonical URL, later rewrites are skipped.
+        url_authority_skip = bool(getattr(auth_cfg, "url_authority_skip", False))
+        xmon = None
+        if not no_push and content_store is not None:
+            try:
+                from chat_daily_tg.content_seen import XMonitorIndex
+                from chat_daily_tg.paths import XMONITOR_INDEX_COPY
+                xmon = XMonitorIndex(XMONITOR_INDEX_COPY)
+            except Exception as e:
+                log.warning("xmonitor index unavailable (cross-producer off): %s", e)
+                xmon = None
+        # Keep config order for grouping. Within a topic batch, public cards are
+        # sent by source timestamp so first-arrival wins across channels.
         groups: "OrderedDict[str, list]" = OrderedDict()
         for ch in channels:
             groups.setdefault(ch.topic or "channels_news", []).append(ch)
@@ -329,6 +419,9 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
                 incremental=incremental,
                 content_store=content_store,
                 topic_gate=topic_gate,
+                authority=authority or None,
+                url_authority_skip=url_authority_skip,
+                xmon=xmon,
             )
             total += n
             log.info("raw channel cards pushed: %d -> topic=%s %s", n, topic_key, target)
@@ -336,6 +429,11 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
     except Exception as e:
         log.exception("raw channel stage failed: %s", e)
         notify_failure("chat-daily-tg 频道原文卡片失败", f"{type(e).__name__}: {e}")
+    finally:
+        try:
+            resources.close()
+        except Exception as exc:
+            log.warning("channel resource cleanup failed error_type=%s", type(exc).__name__)
 
 
 def run_channels(no_push: bool = False) -> int:

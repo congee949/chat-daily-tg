@@ -254,12 +254,15 @@ def test_store_lookup_empty_list_is_none(tmp_path):
 
 
 def test_fingerprints_for_returns_text_and_url_keys():
+    from chat_daily_tg.content_seen import title_fingerprint, title_key
     text = _FP_BASE + "\nhttps://example.com/a"
     fps = fingerprints_for(text)
-    assert fps == [
-        text_key(text_fingerprint(text)),
-        url_key("https://example.com/a"),
-    ]
+    expected = [text_key(text_fingerprint(text))]
+    tfp = title_fingerprint(text)
+    if tfp:
+        expected.append(title_key(tfp))
+    expected.append(url_key("https://example.com/a"))
+    assert fps == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -437,3 +440,94 @@ def test_xmon_z_suffix_timestamp_loads_and_matches(tmp_path):
     assert hit is not None
     key, entry = hit
     assert key == "t:456" and entry["ts"] == ts_z
+
+
+# --- url first-arrival (non-bare same URL, chronological) ---
+
+def test_url_first_arrival_skips_any_later_commentary(tmp_path):
+    store = ContentSeenStore(tmp_path / "cs.db", window_days=14)
+    url = "https://example.com/news/authority-1"
+    first = f"权威稿件正文足够长超过二十四字阈值。 {url}"
+    second = f"二手转述也足够长超过二十四字阈值。 {url}"
+    assert not is_bare_link_post(first)
+    assert not is_bare_link_post(second)
+    store.register(fingerprints_for(first), chat_id="-1001", msg_id=1, channel="High")
+    # Flag off → historical deliver
+    d0 = check_duplicate(second, store=store, channel_name="Low", channel_id="-1002",
+                         url_authority_skip=False)
+    assert d0.skip is False
+    # Flag on → first delivery owns the URL, any later channel is skipped
+    d1 = check_duplicate(second, store=store, channel_name="Low", channel_id="-1002",
+                         url_authority_skip=True)
+    assert d1.skip is True and d1.reason == "url_first"
+    # Even a higher-weight later channel stays skipped (weights unused)
+    d2 = check_duplicate(second, store=store, channel_name="Higher", channel_id="-1009",
+                         authority={"Higher": 999, "-1009": 999, "High": 1, "-1001": 1},
+                         url_authority_skip=True)
+    assert d2.skip is True and d2.reason == "url_first"
+
+
+def test_url_first_arrival_works_without_weights(tmp_path):
+    store = ContentSeenStore(tmp_path / "cs.db", window_days=14)
+    url = "https://example.com/news/authority-2"
+    first = f"第一篇足够长的评述文字超过二十四字。 {url}"
+    second = f"第二篇足够长的评述文字超过二十四字。 {url}"
+    store.register(fingerprints_for(first), chat_id="-1001", msg_id=1, channel="A")
+    d = check_duplicate(second, store=store, channel_name="B", channel_id="-1002",
+                        authority={}, url_authority_skip=True)
+    assert d.skip is True and d.reason == "url_first"
+
+
+# --- title / media / xmon non-bare ---
+
+def test_title_exact_and_fuzzy_skip(tmp_path):
+    from chat_daily_tg.content_seen import (
+        ContentSeenStore, check_duplicate, fingerprints_for, title_fingerprint,
+    )
+    store = ContentSeenStore(tmp_path / "cs.db", window_days=14)
+    first = "Dopamine 3.0 为 iOS 26 带来首个越狱\n\n正文一段足够长的说明文字超过阈值。"
+    second = "Dopamine 3.0 为 iOS 26 带来首个越狱\n\n另一家媒体的复述正文也足够长超过阈值。"
+    # near-identical title with tiny pad
+    third = "Dopamine 3.0 为 iOS 26 带来首个越狱版\n\n再一篇足够长的正文用于模糊标题命中测试。"
+    store.register(fingerprints_for(first), "-1001", 1, "A")
+    store.register_title(first, "-1001", 1, "A")
+    d = check_duplicate(second, store=store)
+    assert d.skip and d.reason == "title"
+    d2 = check_duplicate(third, store=store)
+    assert d2.skip and d2.reason in {"title", "title_fuzzy"}
+    assert title_fingerprint(first) is not None
+
+
+def test_media_fingerprint_collision(tmp_path):
+    from chat_daily_tg.content_seen import (
+        ContentSeenStore, check_media_duplicate, media_fingerprints_for,
+    )
+    a = tmp_path / "a.jpg"
+    b = tmp_path / "b.jpg"
+    a.write_bytes(b"photo-bytes-identical")
+    b.write_bytes(b"photo-bytes-identical")
+    store = ContentSeenStore(tmp_path / "cs.db", window_days=14)
+    store.register(media_fingerprints_for([a]), "-1001", 7, "A")
+    d = check_media_duplicate([b], store=store)
+    assert d.skip and d.reason == "media"
+    c = tmp_path / "c.jpg"
+    c.write_bytes(b"different-photo-bytes")
+    assert check_media_duplicate([c], store=store).skip is False
+
+
+def test_xmon_skips_non_bare_commentary(store, tmp_path):
+    from chat_daily_tg.content_seen import XMonitorIndex, check_duplicate
+    from datetime import datetime, timezone
+    p = tmp_path / "xmon.json"
+    ts = datetime.now(timezone.utc).isoformat()
+    p.write_text(
+        '{"entries": {"t:999888777": {"ts": "%s", "by": "x_monitor", "ok": true}}}' % ts,
+        encoding="utf-8",
+    )
+    xmon = XMonitorIndex(p)
+    text = (
+        "这条推文补充了很好的背景信息，建议收藏后细读。"
+        " https://x.com/i/status/999888777"
+    )
+    d = check_duplicate(text, store=store, xmon=xmon)
+    assert d.skip and d.reason == "xmon"

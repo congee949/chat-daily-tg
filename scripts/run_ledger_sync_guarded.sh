@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_ledger_sync_guarded.sh — launchd wrapper for media_sent_ledger pull (r4s → Mac).
+# run_ledger_sync_guarded.sh — launchd wrapper for media pull and sent-content push.
 #
 # Thin guard: only timestamps + exit code into the daily guard log. No venv /
 # caffeinate / TG alert — this is a short rsync; failures are transient SSH
@@ -17,7 +17,13 @@ mkdir -p "$DATA_DIR/logs"
 {
   echo "$(date '+%F %T') start ledger-sync"
   "$PROJECT/scripts/sync_media_ledger.sh"
-  rc=$?
+  media_rc=$?
+  "$PROJECT/scripts/sync_sent_content_ledger.sh"
+  content_rc=$?
+  rc=$media_rc
+  if [ "$rc" -eq 0 ] && [ "$content_rc" -ne 0 ]; then
+    rc=$content_rc
+  fi
   echo "$(date '+%F %T') end ledger-sync exit=$rc"
   exit "$rc"
 } >>"$LOG" 2>&1

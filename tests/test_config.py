@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-from chat_daily_tg.config import Config, load_config
+from chat_daily_tg.config import Config, load_config, RerankerModel
 
 
 def test_load_config_reads_yaml(tmp_path: Path):
@@ -338,3 +338,61 @@ telegram:
     assert d2.topic.mode == "report"
     assert d2.topic.judge_model == "gpt-5.6-terra"
     assert cfg2.sources.telegram.raw_channels[0].dedup is True
+
+
+def test_xmonitor_ledger_import_is_opt_in_by_default():
+    from chat_daily_tg.config import DedupTopic
+
+    assert DedupTopic().xmonitor_ledger_enabled is False
+
+
+
+def test_jev_defaults_are_disabled_and_bounded():
+    from chat_daily_tg.config import JevModel
+    model = JevModel()
+    assert model.enabled is False
+    assert model.endpoint.endswith('/v1/systemone')
+    assert model.model == 'jev-latest'
+    assert model.api_key_env == 'TYPESAFE_API_KEY'
+    assert model.retry_max_attempts == 2
+
+
+
+def test_reranker_revision_attestation_is_opt_in_by_default():
+    model = RerankerModel(
+        endpoint="https://generic-reranker.test/v1",
+        model="generic-reranker",
+        api_key_env="",
+    )
+
+    assert model.model_revision == ""
+
+
+
+def test_load_config_reads_local_openai_embedding_without_api_key(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["微信 A"]
+models:
+  summary: {endpoint: "http://summary", model: "gpt-5.6-sol", api_key_env: "K"}
+  embedding:
+    enabled: true
+    provider: openai
+    endpoint: "http://127.0.0.1:8790/v1"
+    model: "qwen3-vl-embedding-8b-4bit"
+    batch_size: 32
+    dimension: 4096
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.models.embedding.provider == "openai"
+    assert cfg.models.embedding.api_key_env == ""
+    assert cfg.models.embedding.batch_size == 32
+    assert cfg.models.embedding.dimension == 4096

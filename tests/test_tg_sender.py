@@ -4,6 +4,7 @@ import pytest
 import httpx
 from unittest.mock import patch
 from chat_daily_tg.tg_sender import (
+    AmbiguousDeliveryError,
     TelegramSender,
     split_message,
     escape_markdown_v2,
@@ -255,6 +256,50 @@ def test_send_photo_posts_multipart(httpx_mock: HTTPXMock, tmp_path):
     assert req.url.path.endswith("/sendPhoto")
     body = req.read()
     assert b"12345" in body and b"hi there" in body
+
+
+def test_media_upload_uses_long_read_budget_for_slow_proxy():
+    """A delayed Bot API upload response must not trip the 30s client default."""
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", timeout=30.0)
+    timeout = s._media_request_timeout()
+    assert timeout.read == 120.0
+    assert timeout.write == 120.0
+    assert timeout.connect == 30.0
+    assert timeout.pool == 30.0
+
+
+def test_send_photo_read_timeout_is_ambiguous_and_never_retried(httpx_mock: HTTPXMock, tmp_path):
+    """The server may have accepted the photo before its response was lost.
+    Repeating this POST was the direct cause of the 2026-08-02 triple push."""
+    httpx_mock.add_exception(
+        httpx.ReadTimeout("response lost after upload"),
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"fake")
+    s = TelegramSender(
+        bot_token="-TOKEN-", chat_id="12345",
+        retry_max_attempts=3, retry_backoff_seconds=[0, 0, 0],
+    )
+    with pytest.raises(AmbiguousDeliveryError, match="outcome unknown"):
+        s.send_media(str(png), "photo", caption="same card")
+    assert len(httpx_mock.get_requests()) == 1
+
+
+def test_send_card_read_timeout_is_ambiguous_and_never_retried(httpx_mock: HTTPXMock):
+    httpx_mock.add_exception(
+        httpx.ReadTimeout("response lost"),
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+    )
+    s = TelegramSender(
+        bot_token="-TOKEN-", chat_id="12345",
+        retry_max_attempts=3, retry_backoff_seconds=[0, 0, 0],
+    )
+    with pytest.raises(AmbiguousDeliveryError):
+        s.send_card("<b>same card</b>")
+    assert len(httpx_mock.get_requests()) == 1
 
 
 def test_send_photo_omits_empty_caption(httpx_mock: HTTPXMock, tmp_path):

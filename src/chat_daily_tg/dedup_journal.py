@@ -6,13 +6,13 @@ self-destructs. This journal is the ONLY durable record of why a post was
 withheld, and it doubles as the raw data for measuring precision. Shared by
 the L1 (content_seen) and L2 (topic_dedup) layers so neither imports the other.
 
-Writing never raises: journaling failure must not block delivery, and a
-suppression that cannot be journaled still proceeds (it is already logged).
+Writing never raises; callers can keep delivery open when a terminal decision cannot be persisted.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +21,7 @@ from chat_daily_tg.paths import DEDUP_JOURNAL
 log = logging.getLogger(__name__)
 
 
-def record(entry: dict, path: Path = DEDUP_JOURNAL) -> None:
+def record(entry: dict, path: Path = DEDUP_JOURNAL) -> bool:
     """Append one JSON line: {ts, layer, action, chat_id, msg_id, ...}."""
     try:
         entry = {"ts": datetime.now(timezone.utc).isoformat(), **entry}
@@ -29,8 +29,12 @@ def record(entry: dict, path: Path = DEDUP_JOURNAL) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return True
     except Exception as e:
-        log.warning("dedup journal write failed (suppression already logged): %s", e)
+        log.warning("dedup journal write failed: %s", e)
+        return False
 
 
 def today_counts(path: Path = DEDUP_JOURNAL, tz: str = "Asia/Shanghai") -> dict[str, int]:

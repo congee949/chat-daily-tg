@@ -327,3 +327,6 @@ microbenchmark 同时报告墙钟时间和操作次数。性能结论应基于�
 开始修改前阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。PR 应说明改动属于 unit、hermetic E2E 还是真实人工验证，并列出未验证项。不要提交真实消息、数据库、归档、Bot token、模型 key、路由表或机器专用配置。
 
 本项目以 [MIT License](LICENSE) 发布。提交前仍须确认你拥有新增内容的版权，并且不要把真实消息、密钥、数据库或机器专用配置加入仓库。
+
+
+频道去重的版本范围与验证结果见 [去重整改发布范围](docs/notes/dedup-remediation-release-2026-09-24.md)。

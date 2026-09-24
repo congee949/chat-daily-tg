@@ -44,27 +44,55 @@ class Card:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://[^\s<>]+")
-# Inline Markdown link the channel author typed in the body: [label](https://…).
-# The body is sent under HTML parse mode, so plain escape_html leaves this syntax
-# literal — Telegram only auto-links the bare URL, showing "[label](url)" verbatim.
-_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+# Inline Markdown supported by the channel-card renderer.  Telegram's Bot API
+# receives HTML, while messages cached by tg-cli preserve common Markdown spans.
+# Recognising the spans here prevents readers from seeing literal ``**`` / ``~~``
+# markers while still escaping every unsupported or malformed construct as text.
+_MD_INLINE_RE = re.compile(
+    r"(?P<link>\[([^\]\n]+)\]\((https?://[^)\s]+)\))"
+    r"|(?P<code>`([^`\n]+)`)"
+    r"|(?P<bold>\*\*([^*\n]+?)\*\*)"
+    r"|(?P<strike>~~([^~\n]+?)~~)"
+    r"|(?P<italic>(?<!\w)_([^_\n]+?)_(?!\w))"
+)
 
 
-def escape_body_html(text: str) -> str:
-    """Escape body text as Telegram HTML, converting inline Markdown links
-    [label](url) into real <a> anchors in the same pass so they render clickable
-    instead of literally. Text with no Markdown links is escaped exactly as
-    escape_html would, so non-link bodies are unchanged."""
+def _render_inline_markdown(text: str) -> str:
+    """Render the safe, commonly emitted Markdown subset as Telegram HTML.
+
+    All unmatched text is escaped.  This deliberately does not attempt a full
+    Markdown implementation: malformed or nested syntax remains readable text,
+    rather than risking malformed Telegram HTML and losing the whole card.
+    """
     parts: list[str] = []
     pos = 0
-    for m in _MD_LINK_RE.finditer(text):
+    for m in _MD_INLINE_RE.finditer(text):
         parts.append(escape_html(text[pos:m.start()]))
-        label = escape_html(m.group(1))
-        href = escape_html(m.group(2)).replace('"', "&quot;")
-        parts.append(f'<a href="{href}">{label}</a>')
+        if m.group("link") is not None:
+            label = escape_html(m.group(2))
+            href = escape_html(m.group(3)).replace('"', "&quot;")
+            parts.append(f'<a href="{href}">{label}</a>')
+        elif m.group("code") is not None:
+            parts.append(f"<code>{escape_html(m.group(5))}</code>")
+        elif m.group("bold") is not None:
+            parts.append(f"<b>{escape_html(m.group(7))}</b>")
+        elif m.group("strike") is not None:
+            parts.append(f"<s>{escape_html(m.group(9))}</s>")
+        else:
+            parts.append(f"<i>{escape_html(m.group(11))}</i>")
         pos = m.end()
     parts.append(escape_html(text[pos:]))
     return "".join(parts)
+
+
+def escape_body_html(text: str) -> str:
+    """Render safe Markdown spans from a channel body as Telegram HTML.
+
+    Supported spans are links, bold, italic, inline code, and strikethrough.
+    Line-oriented Markdown is intentionally left as prose so ordinary channel
+    hashtags and punctuation keep their source meaning.
+    """
+    return "\n".join(_render_inline_markdown(line) for line in text.splitlines())
 
 # A Telegram album (media group) arrives as several messages that share a grouped_id,
 # but tg-cli's messages.db stores no raw_json, so grouped_id is unavailable here. We
@@ -197,8 +225,67 @@ def build_card(row: sqlite3.Row, channel: RawChannel) -> Card | None:
     return Card(text_html=text_html, link=preview_link)
 
 
+
+def _same_tick_premerge(
+    cards: list,
+    ch: RawChannel,
+    seen: SeenStore,
+    content_store,
+    authority: dict | None = None,
+    url_authority_skip: bool = False,
+) -> list:
+    """Within one channel batch, drop later cards that share a text/URL
+    fingerprint with an earlier card still pending in this tick.
+
+    Does NOT advance SeenStore for suppressed cards until we intentionally
+    terminalize them (same as L1 skip): high-water must not swallow a card
+    that merely lost a same-tick race without a durable journal reason.
+    First card in batch order wins. Callers should feed cards in source
+    timestamp order so chronological first-arrival is preserved.
+    """
+    if not cards or not ch.dedup:
+        return cards
+    try:
+        from chat_daily_tg.content_seen import fingerprints_for
+    except Exception:
+        return cards
+
+    claimed: set[str] = set()
+    out: list = []
+    for ids, c, content_plain in cards:
+        if not content_plain:
+            out.append((ids, c, content_plain))
+            continue
+        try:
+            fps = fingerprints_for(content_plain)
+        except Exception:
+            out.append((ids, c, content_plain))
+            continue
+        if fps and any(fp in claimed for fp in fps):
+            log.info("skip same-tick content-dup (%s msg %s)", ch.name, ids[0])
+            try:
+                from chat_daily_tg import dedup_journal
+                dedup_journal.record({
+                    "layer": "L1", "action": "skip", "reason": "same_tick",
+                    "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+                    "text_head": content_plain[:120],
+                })
+            except Exception:
+                pass
+            for mid in ids:
+                seen.add(SeenStore.key(ch.id, mid))
+            continue
+        for fp in fps:
+            claimed.add(fp)
+        out.append((ids, c, content_plain))
+    return out
+
+
 def _dedup_skip(content_plain: str, ch: RawChannel, ids: list[int],
-                seen: SeenStore, content_store) -> bool:
+                seen: SeenStore, content_store,
+                authority: dict | None = None,
+                url_authority_skip: bool = False,
+                xmon=None) -> bool:
     """L1 content-dedup gate. True = suppress this card (already journaled and
     marked seen). Any internal failure returns False — dedup must never block
     delivery (投递优先于完美)."""
@@ -206,7 +293,11 @@ def _dedup_skip(content_plain: str, ch: RawChannel, ids: list[int],
         return False
     try:
         from chat_daily_tg.content_seen import check_duplicate
-        d = check_duplicate(content_plain, store=content_store)
+        d = check_duplicate(
+            content_plain, store=content_store, xmon=xmon,
+            channel_name=ch.name, channel_id=str(ch.id),
+            authority=authority, url_authority_skip=url_authority_skip,
+        )
         if not d.skip:
             return False
         log.info("skip content-dup (%s msg %s): %s hit ← %s msg %s @ %s",
@@ -242,12 +333,98 @@ def _dedup_register(content_plain: str, ch: RawChannel, ids: list[int],
     try:
         from chat_daily_tg.content_seen import fingerprints_for
         content_store.register(fingerprints_for(content_plain), ch.id, ids[0], ch.name)
+        content_store.register_title(content_plain, ch.id, ids[0], ch.name)
     except Exception as e:
         log.warning("content dedup register failed (%s msg %s): %s", ch.name, ids[0], e)
 
 
+def _media_dedup_skip(paths, ch: RawChannel, ids: list[int],
+                     seen: SeenStore, content_store) -> bool:
+    """True when identical media bytes were already delivered."""
+    if content_store is None or not ch.dedup or not paths:
+        return False
+    try:
+        from chat_daily_tg.content_seen import check_media_duplicate
+        d = check_media_duplicate(paths, store=content_store)
+        if not d.skip:
+            return False
+        log.info("skip media-dup (%s msg %s): %s hit ← %s msg %s @ %s",
+                 ch.name, ids[0], d.reason,
+                 d.detail.get("matched_channel", "?"),
+                 d.detail.get("matched_msg_id", "?"),
+                 d.detail.get("matched_sent_at", "?"))
+        try:
+            from chat_daily_tg import dedup_journal
+            dedup_journal.record({
+                "layer": "L1", "action": "skip", "reason": d.reason,
+                "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+                **d.detail,
+            })
+        except Exception:
+            pass
+        for mid in ids:
+            seen.add(SeenStore.key(ch.id, mid))
+        return True
+    except Exception as e:
+        log.warning("media dedup check failed (%s msg %s), delivering: %s",
+                    ch.name, ids[0], e)
+        return False
+
+
+def _media_dedup_register(paths, ch: RawChannel, ids: list[int], content_store) -> None:
+    if content_store is None or not ch.dedup or not paths:
+        return
+    try:
+        from chat_daily_tg.content_seen import media_fingerprints_for
+        content_store.register(media_fingerprints_for(paths), ch.id, ids[0], ch.name)
+    except Exception as e:
+        log.warning("media dedup register failed (%s msg %s): %s", ch.name, ids[0], e)
+
+
+def _terminalize_ambiguous_delivery(
+    exc: Exception, ch: RawChannel, ids: list[int], seen: SeenStore,
+) -> bool:
+    """Persist an unknown Bot API outcome so it is never blindly replayed.
+
+    Telegram's Bot API has no idempotency key.  A read/write timeout can mean
+    "message accepted, response lost" (the 2026-08-02 triple-photo incident).
+    Marking every source member terminal prevents both an in-process retry and
+    the next incremental run from multiplying a likely-delivered post.  The
+    journal plus alert preserve an explicit recovery trail for the rarer case
+    where the request did not land; ``channels resend`` remains the manual
+    recovery hatch for public text cards.
+    """
+    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+    if not isinstance(exc, AmbiguousDeliveryError):
+        return False
+    for mid in ids:
+        seen.add(SeenStore.key(ch.id, mid))
+    try:
+        from chat_daily_tg import dedup_journal
+        dedup_journal.record({
+            "layer": "delivery", "action": "ambiguous",
+            "reason": "telegram_transport_timeout", "method": exc.method,
+            "chat_id": ch.id, "msg_id": ids[0], "member_ids": ids,
+            "channel": ch.name,
+        })
+    except Exception:
+        pass
+    log.error("ambiguous delivery terminalized (%s msg %s via %s); automatic replay suppressed",
+              ch.name, ids[0], exc.method)
+    try:
+        from chat_daily_tg.notifier import notify_failure
+        notify_failure(
+            "chat-daily-tg 投递结果待确认",
+            f"{ch.name} msg {ids[0]} 的 {exc.method} 响应超时；已停止自动重试以避免重复，"
+            "请核对目标话题，若确实缺失再手动补发。",
+        )
+    except Exception:
+        pass
+    return True
+
+
 def _l2_check(topic_gate, ch: RawChannel, content_plain: str, ids: list[int],
-              seen: SeenStore) -> tuple[bool, str, object]:
+              seen: SeenStore, *, has_media: bool = False) -> tuple[bool, str, object]:
     """L2 topic-gate decision, shared by the public and private send paths.
     Returns (skip, annotation_html, verdict). skip=True means the card was
     journaled (with its own chat_id:msg_id for --resend) and marked seen.
@@ -257,14 +434,15 @@ def _l2_check(topic_gate, ch: RawChannel, content_plain: str, ids: list[int],
     try:
         v = topic_gate.assess(content_plain, ref={
             "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+            "producer": "chatdaily_raw", "has_media": has_media,
         })
-        if v.action == "skip":
+        if v.action == "skip" and not has_media:
             log.info("skip topic-dup (%s msg %s): sim=%.2f vs msg %s",
                      ch.name, ids[0], v.similarity, v.matched_msg_id)
             for mid in ids:
                 seen.add(SeenStore.key(ch.id, mid))
             return True, "", v
-        if v.action == "annotate" and v.matched_msg_id:
+        if v.action in ("annotate", "skip") and v.matched_msg_id:
             return False, topic_gate.annotation_html(v.matched_msg_id), v
         return False, "", v
     except Exception as e:
@@ -323,6 +501,23 @@ def resend_raw_card(*, channel: RawChannel, msg_id: int, db_path: str | Path,
     return True
 
 
+@dataclass
+class _PendingPublic:
+    """One public-channel card waiting for chronological cross-channel send."""
+    ch: RawChannel
+    ids: list[int]
+    card: Card
+    content_plain: str
+    ts: float  # unix seconds; missing/bad timestamps sort last within the run
+
+
+def _row_ts(row) -> float:
+    try:
+        return parse_timestamp(row["timestamp"]).timestamp()
+    except Exception:
+        return float("inf")
+
+
 def push_raw_channel_cards(
     *,
     channels: list[RawChannel],
@@ -338,23 +533,34 @@ def push_raw_channel_cards(
     incremental: bool = False,
     content_store=None,   # content_seen.ContentSeenStore | None (L1 dedup)
     topic_gate=None,      # topic_dedup.TopicDedupGate | None (L2 dedup)
+    authority: dict | None = None,
+    url_authority_skip: bool = False,
+    xmon=None,            # content_seen.XMonitorIndex | None
+    sent_content_ledger_path: str | Path | None = None,
 ) -> int:
     """Export each raw channel's window and push every message as a card.
 
+    Public channels are exported first, then sent in source-timestamp order so
+    cross-channel collisions resolve by chronological first-arrival rather than
+    config order. Private channels stay on the media-download path and run after
+    public cards of the same call (their posts are already oldest→newest).
+
     Returns the number of cards pushed. A failure on a single channel/message is
-    logged and skipped; it never aborts the remaining channels. Already-pushed message
-    ids (tracked in `seen_path`) are skipped, so re-runs/retries don't duplicate.
-    incremental=True (the 2-hourly forwarder) fetches only messages newer than each
-    channel's high-water mark, so high-volume private channels aren't re-downloaded."""
+    logged and skipped; it never aborts the remaining channels. Already-pushed
+    message ids (tracked in `seen_path`) are skipped, so re-runs/retries don't
+    duplicate. incremental=True fetches only messages newer than each channel's
+    high-water mark.
+    """
     seen = SeenStore(seen_path)
     total = 0
     private_attempted = 0
     private_failed = 0
+    pending: list[_PendingPublic] = []
+    media_dirs: list[Path] = []
+
     for ch in channels:
         hwm = seen.max_msg_id(ch.id) if incremental else 0
-        # Private channels (no public username) get the media-download path: Telegram
-        # can't render a preview card for t.me/c links, so we download media via the
-        # user session and re-upload it through the bot.
+        # Private channels (no public username) get the media-download path.
         if not (ch.username or "").lstrip("@"):
             private_attempted += 1
             try:
@@ -365,6 +571,8 @@ def push_raw_channel_cards(
                     sender=sender, limit=ch.limit, seen=seen, min_id=hwm,
                     delay_seconds=delay_seconds, no_push=no_push,
                     content_store=content_store, topic_gate=topic_gate,
+                    authority=authority, url_authority_skip=url_authority_skip,
+                    xmon=xmon,
                 )
             except Exception as e:
                 private_failed += 1
@@ -373,7 +581,10 @@ def push_raw_channel_cards(
 
         try:
             if sync_before_export:
-                sync_chat(ch.id, limit=ch.limit)
+                sync_chat(
+                    ch.id, limit=ch.limit, db_path=db_path,
+                    min_msg_id=hwm,
+                )
             rows = read_messages(
                 db_path=Path(db_path).expanduser(),
                 chat_id=ch.id,
@@ -386,15 +597,9 @@ def push_raw_channel_cards(
             log.warning("raw channel export failed for %s: %s", ch.name, e)
             continue
 
-        # Fold album items into one card each, then build per-group so one malformed row
-        # (e.g. bad timestamp) skips itself instead of aborting the whole channel. Each
-        # card carries every member msg_id so all of them get marked seen on send.
-        # content_plain (promo-stripped body, no header) rides along for the dedup
-        # layers — fingerprinting the rendered HTML would bake the per-channel header
-        # into the identity and defeat cross-channel matching.
-        cards: list[tuple[list[int], Card, str]] = []
+        cards: list[tuple[list[int], Card, str, float]] = []
         excluded_ids: list[int] = []
-        excluded_posts: list[tuple[int, str]] = []  # (head_id, text head) for the journal
+        excluded_posts: list[tuple[int, str]] = []
         for group in _group_albums(rows):
             head = group[0]
             ids = [r["msg_id"] for r in group]
@@ -409,55 +614,22 @@ def push_raw_channel_cards(
                 continue
             if c is not None:
                 content_plain = strip_promo_lines((head["content"] or "").strip(), ch.strip_patterns)
-                cards.append((ids, c, content_plain))
+                cards.append((ids, c, content_plain, _row_ts(head)))
         log.info("raw channel %s: %d msgs → %d cards (%d filtered)",
                  ch.name, len(rows), len(cards), len(excluded_ids))
 
-        # Archive verbatim cards for auditability (always, even with --no-push).
-        # Written BEFORE the send loop, so a dedup-suppressed card still leaves its
-        # full text here — the recovery/audit trail for a wrong suppression.
-        archive_path = archive_dir / f"rawcard-{_safe(ch.name)}.md"
+        archive_path = Path(archive_dir) / f"rawcard-{_safe(ch.name)}.md"
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
         archive_path.write_text(
             "\n\n---\n\n".join(
-                (c.text_html + (f"\n\n[原文] {c.link}" if c.link else "")) for _, c, _ in cards
+                (c.text_html + (f"\n\n[原文] {c.link}" if c.link else ""))
+                for _, c, _, _ in cards
             )
             or "(无消息)",
             encoding="utf-8",
         )
 
-        if no_push:
-            continue
-
-        # Media-only posts (empty body): fetch the REAL media via the user session
-        # and re-upload it through the bot — a pure-photo post arrives as the photo
-        # itself, not as a "🖼 媒体内容" placeholder card (the t.me link preview
-        # renders no image, so the placeholder was all the user saw). Best effort:
-        # any failure leaves the placeholder card as the fallback. Keyed by msg_id;
-        # downloaded files are removed after the send loop.
-        media_map: dict[int, list[tuple[str, str]]] = {}
-        media_only_ids = [mid for ids, _, cp in cards
-                          if not cp and SeenStore.key(ch.id, ids[0]) not in seen
-                          for mid in ids]
-        media_dir = archive_dir / f"rawmedia-{_safe(ch.name)}"
-        if media_only_ids:
-            try:
-                from chat_daily_tg.private_media import (
-                    dump_messages_by_ids,
-                    media_by_msg_id,
-                )
-                media_map = media_by_msg_id(
-                    dump_messages_by_ids(ch.id, media_only_ids, media_dir))
-            except Exception as e:
-                log.warning("raw media fetch failed for %s (placeholder fallback): %s",
-                            ch.name, e)
-                media_map = {}
-
-        # A configured exclusion is a successful terminal decision, not a send
-        # failure. Record every member so incremental polling does not fetch the
-        # same intentionally suppressed post forever. Journaled like every other
-        # suppression: an overbroad exclude regex is otherwise untraceable —
-        # excluded posts never reach the rawcard archive, and --resend's
-        # documented recovery flow starts from the journal.
+        # Exclusions are terminal regardless of --no-push so incremental HWM moves.
         for mid in excluded_ids:
             seen.add(SeenStore.key(ch.id, mid))
         for head_id, text_head in excluded_posts:
@@ -471,89 +643,273 @@ def push_raw_channel_cards(
             except Exception:
                 pass
 
-        if topic_gate is not None and ch.dedup and cards:
-            try:  # one embed batch per channel; failure → gate goes offline, all deliver.
-                # Only unseen cards — a catch-up re-run must not re-embed what it
-                # is about to skip on the seen check anyway. Empty-body (media)
-                # posts have nothing to embed and bypass the gate entirely.
-                unseen = [cp for card_ids, _, cp in cards
-                          if cp and SeenStore.key(ch.id, card_ids[0]) not in seen]
-                if unseen:
-                    topic_gate.prepare(unseen)
-            except Exception as e:
-                log.warning("topic gate prepare failed (%s): %s", ch.name, e)
+        if no_push:
+            continue
 
+        for ids, c, content_plain, ts in cards:
+            pending.append(_PendingPublic(ch, ids, c, content_plain, ts))
+
+    if no_push:
+        return total
+
+    # Chronological first-arrival across public channels in this topic batch.
+    pending.sort(key=lambda p: (p.ts, str(p.ch.id), p.ids[0]))
+
+    # Cross-channel same-tick premerge on the sorted stream.
+    if content_store is not None and pending:
         try:
-            for ids, c, content_plain in cards:
-                if SeenStore.key(ch.id, ids[0]) in seen:  # head id identifies the card
+            from chat_daily_tg.content_seen import fingerprints_for
+            claimed: set[str] = set()
+            kept: list[_PendingPublic] = []
+            for item in pending:
+                if not item.ch.dedup or not item.content_plain:
+                    kept.append(item)
                     continue
-
-                media = [m for mid in ids for m in media_map.get(mid, [])]
-                if media:
-                    # Real-media push: the card header rides as the caption, plus an
-                    # 原文 link (media messages carry no link preview). Dedup gates
-                    # are bypassed — an empty body has no fingerprintable content
-                    # (same rule as the private path, review finding A4).
-                    caption = c.text_html.partition("\n\n")[0]
-                    if c.link:
-                        caption = f'{caption} · <a href="{escape_html(c.link)}">原文</a>'
+                try:
+                    fps = fingerprints_for(item.content_plain)
+                except Exception:
+                    kept.append(item)
+                    continue
+                if fps and any(fp in claimed for fp in fps):
+                    log.info("skip same-tick content-dup (%s msg %s)",
+                             item.ch.name, item.ids[0])
                     try:
-                        from chat_daily_tg.private_media import _send_media
-                        dropped = _send_media(media, sender, caption)
-                    except Exception as e:
-                        log.warning("raw media push failed (%s msg %s), "
-                                    "placeholder fallback: %s", ch.name, ids[0], e)
+                        from chat_daily_tg import dedup_journal
+                        dedup_journal.record({
+                            "layer": "L1", "action": "skip", "reason": "same_tick",
+                            "chat_id": item.ch.id, "msg_id": item.ids[0],
+                            "channel": item.ch.name,
+                            "text_head": item.content_plain[:120],
+                        })
+                    except Exception:
+                        pass
+                    for mid in item.ids:
+                        seen.add(SeenStore.key(item.ch.id, mid))
+                    continue
+                for fp in fps:
+                    claimed.add(fp)
+                kept.append(item)
+            pending = kept
+        except Exception as e:
+            log.warning("cross-channel same-tick premerge failed: %s", e)
+
+    # Batch media downloads per channel for empty-body cards still pending.
+    media_map: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    media_caption_map: dict[tuple[str, int], tuple[str, str]] = {}
+    media_only_by_ch: dict[str, list[int]] = {}
+    for item in pending:
+        if item.content_plain:
+            continue
+        if SeenStore.key(item.ch.id, item.ids[0]) in seen:
+            continue
+        media_only_by_ch.setdefault(item.ch.id, [])
+        media_only_by_ch[item.ch.id].extend(item.ids)
+    ch_by_id = {ch.id: ch for ch in channels}
+    for chat_id, mids in media_only_by_ch.items():
+        ch = ch_by_id.get(chat_id)
+        if ch is None:
+            continue
+        media_dir = Path(archive_dir) / f"rawmedia-{_safe(ch.name)}"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        media_dirs.append(media_dir)
+        try:
+            from chat_daily_tg.private_media import dump_messages_by_ids, media_by_msg_id
+            manifest = dump_messages_by_ids(ch.id, mids, media_dir)
+            by_mid = media_by_msg_id(manifest)
+            for mid, items in by_mid.items():
+                media_map[(ch.id, mid)] = items
+            # The tg-cli database may omit captions for media messages. The
+            # targeted Telethon manifest is the authoritative fallback for this
+            # one field; keep the caption separate from the binary media map.
+            for entry in manifest:
+                text = str(entry.get("text") or "").strip()
+                html = str(entry.get("html") or escape_html(text)).strip()
+                if text:
+                    media_caption_map[(ch.id, int(entry["msg_id"]))] = (text, html)
+        except Exception as e:
+            log.warning("raw media fetch failed for %s (placeholder fallback): %s",
+                        ch.name, e)
+
+    if topic_gate is not None and pending:
+        try:
+            unseen = []
+            for item in pending:
+                if not item.ch.dedup or SeenStore.key(item.ch.id, item.ids[0]) in seen:
+                    continue
+                text = item.content_plain or next(
+                    (media_caption_map[(item.ch.id, mid)][0] for mid in item.ids
+                     if (item.ch.id, mid) in media_caption_map), "")
+                text = strip_promo_lines(text, item.ch.strip_patterns)
+                if text and not matches_exclude_patterns(text, item.ch.exclude_patterns):
+                    unseen.append(text)
+            if unseen:
+                topic_gate.prepare(unseen)
+        except Exception as e:
+            log.warning("topic gate prepare failed (public batch): %s", e)
+
+    try:
+        for item in pending:
+            ch, ids, c, content_plain = item.ch, item.ids, item.card, item.content_plain
+            if SeenStore.key(ch.id, ids[0]) in seen:
+                continue
+
+            media = [m for mid in ids for m in media_map.get((ch.id, mid), [])]
+            downloaded_caption = next(
+                (media_caption_map[(ch.id, mid)] for mid in ids
+                 if (ch.id, mid) in media_caption_map), None)
+            if downloaded_caption:
+                downloaded_text, downloaded_html = downloaded_caption
+                content_plain = strip_promo_lines(downloaded_text, ch.strip_patterns)
+                header = c.text_html.partition("\n\n")[0]
+                rendered = strip_promo_lines_html(downloaded_html, ch.strip_patterns)
+                c = Card(text_html=f"{header}\n\n{rendered}" if rendered else header,
+                         link=c.link)
+                if matches_exclude_patterns(downloaded_text, ch.exclude_patterns):
+                    try:
+                        from chat_daily_tg import dedup_journal
+                        journaled = dedup_journal.record({
+                            "layer": "L1", "action": "skip", "reason": "exclude_pattern",
+                            "chat_id": ch.id, "msg_id": ids[0], "channel": ch.name,
+                            "text_head": downloaded_text[:120],
+                        })
+                        if journaled is False:
+                            raise OSError("caption exclusion was not journaled")
+                    except Exception as exc:
+                        log.warning("caption exclusion journal failed: %s", exc)
                     else:
-                        if dropped:
-                            log.warning("raw media partial loss (%s msg %s): "
-                                        "%d item(s) not sent", ch.name, ids[0], dropped)
                         for mid in ids:
                             seen.add(SeenStore.key(ch.id, mid))
-                        total += 1
-                        if delay_seconds > 0:
-                            time.sleep(delay_seconds)
                         continue
-                    # Media send failed → fall through to the placeholder card path.
-
-                if _dedup_skip(content_plain, ch, ids, seen, content_store):
+            if media:
+                media_paths = [p for p, _ in media]
+                if _media_dedup_skip(media_paths, ch, ids, seen, content_store):
                     continue
+                l2_verdict = None
+                annotation = ""
+                if content_plain:
+                    l2_skip, annotation, l2_verdict = _l2_check(
+                        topic_gate, ch, content_plain, ids, seen, has_media=True)
+                    if l2_skip:
+                        continue
+                caption = c.text_html.partition("\n\n")[0]
+                if downloaded_caption:
+                    rendered = strip_promo_lines_html(downloaded_html, ch.strip_patterns)
+                    caption = f"{caption}\n\n{rendered}" if rendered else caption
+                if annotation:
+                    caption = f"{caption}\n{annotation}"
+                if c.link:
+                    caption = f'{caption} · <a href="{escape_html(c.link)}">原文</a>'
+                try:
+                    from chat_daily_tg.private_media import _send_media
+                    sent_ids = []
+                    if len(visible_text(caption)) <= 1024:
+                        dropped = _send_media(media, sender, caption, sent_ids=sent_ids)
+                    else:
+                        # Only the text card contains the full caption. Index its
+                        # IDs so future annotations link to the visible evidence.
+                        dropped = _send_media(media, sender, "")
+                        sent_ids = sender.send_card(caption, link=c.link) or []
+                except Exception as e:
+                    if _terminalize_ambiguous_delivery(e, ch, ids, seen):
+                        continue
+                    for mid in ids:
+                        seen.add_hole(ch.id, mid)
+                    log.warning("raw media push failed (%s msg %s), "
+                                "placeholder fallback: %s", ch.name, ids[0], e)
+                else:
+                    if dropped:
+                        log.warning("raw media partial loss (%s msg %s): "
+                                    "%d item(s) not sent", ch.name, ids[0], dropped)
+                    for mid in ids:
+                        seen.add(SeenStore.key(ch.id, mid))
+                    _media_dedup_register(media_paths, ch, ids, content_store)
+                    if content_plain:
+                        _l2_register(topic_gate, ch, content_plain, sent_ids,
+                                     sender, l2_verdict)
+                    total += 1
+                    if delay_seconds > 0:
+                        time.sleep(delay_seconds)
+                    continue
+                # Media send failed → fall through to placeholder card path.
 
+            if content_plain and not (media or downloaded_caption) and _dedup_skip(
+                    content_plain, ch, ids, seen, content_store,
+                    authority=authority, url_authority_skip=url_authority_skip,
+                    xmon=xmon):
+                continue
+
+            l2_verdict = None
+            annotation = ""
+            if content_plain:
                 l2_skip, annotation, l2_verdict = _l2_check(
-                    topic_gate, ch, content_plain, ids, seen)
+                    topic_gate, ch, content_plain, ids, seen,
+                    has_media=bool(media or downloaded_caption))
                 if l2_skip:
                     continue
-                text_html = c.text_html
-                if annotation:
-                    # build_card's layout contract: one header line, then "\n\n",
-                    # then the body (raw_channels.py:194). The annotation becomes a
-                    # second header line. Contract is pinned by tests.
-                    head_part, sep, body = text_html.partition("\n\n")
-                    text_html = (f"{head_part}\n{annotation}{sep}{body}"
-                                 if sep else f"{text_html}\n{annotation}")
+            text_html = c.text_html
+            if annotation:
+                head_part, sep, body = text_html.partition("\n\n")
+                text_html = (f"{head_part}\n{annotation}{sep}{body}"
+                             if sep else f"{text_html}\n{annotation}")
 
-                try:
-                    sent_ids = sender.send_card(text_html, link=c.link)
-                except Exception as e:
-                    log.warning("raw card push failed (%s): %s", ch.name, e)
+            try:
+                sent_ids = sender.send_card(text_html, link=c.link)
+            except Exception as e:
+                if _terminalize_ambiguous_delivery(e, ch, ids, seen):
                     continue
-                # write-after-send: a crash re-tries rather than drops. Record EVERY album
-                # item, or the incremental high-water mark stalls at the head id.
                 for mid in ids:
-                    seen.add(SeenStore.key(ch.id, mid))
+                    seen.add_hole(ch.id, mid)
+                log.warning("raw card push failed (%s): %s", ch.name, e)
+                continue
+            for mid in ids:
+                seen.add(SeenStore.key(ch.id, mid))
+            # General content provenance is independent of the r4s-owned media
+            # ledger.  Record only successful public text-card sends; media and
+            # private paths intentionally retain their existing handoff rules.
+            # Seen is advanced first to preserve the existing no-replay
+            # semantics even when this best-effort append fails.
+            if content_plain and sent_ids:
+                try:
+                    from chat_daily_tg.sent_content_ledger import append_message_ids
+
+                    username = (ch.username or "").lstrip("@")
+                    source_ref = f"https://t.me/{username}/{ids[0]}"
+                    ledger_path = sent_content_ledger_path
+                    if ledger_path is None:
+                        # Keep alternate runtime roots (including tests) self-
+                        # contained while resolving to the standard state path
+                        # for production's DATA_DIR/raw_channel_seen.txt.
+                        from chat_daily_tg.paths import SENT_CONTENT_LEDGER
+                        ledger_path = (
+                            Path(seen_path).expanduser().parent
+                            / "state" / SENT_CONTENT_LEDGER.name
+                        )
+                    append_message_ids(
+                        sent_ids,
+                        chat_id=getattr(sender, "chat_id", ""),
+                        thread_id=getattr(sender, "message_thread_id", None),
+                        producer="chatdaily_raw",
+                        source_kind="telegram_channel",
+                        source_ref=source_ref,
+                        source_message_ids=ids,
+                        url=c.link or source_ref,
+                        content=content_plain,
+                        content_id=f"telegram-channel:{ch.id}:{ids[0]}",
+                        path=ledger_path,
+                    )
+                except Exception as e:
+                    log.warning("sent-content ledger write failed (%s msg %s): %s",
+                                ch.name, ids[0], e)
+            if content_plain:
                 _dedup_register(content_plain, ch, ids, content_store)
                 _l2_register(topic_gate, ch, content_plain, sent_ids, sender, l2_verdict)
-                total += 1
-                if delay_seconds > 0:
-                    time.sleep(delay_seconds)
-        finally:
-            if media_only_ids:
-                # Downloaded binaries are re-fetchable next run; don't let them
-                # accumulate in the archive tree (same rule as the private path).
-                shutil.rmtree(media_dir, ignore_errors=True)
+            total += 1
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+    finally:
+        for media_dir in media_dirs:
+            shutil.rmtree(media_dir, ignore_errors=True)
 
-    # All private channels failing together is the signature of a broken shared
-    # dependency (e.g. the kabi-tg-cli interpreter vanished) — not bad luck on one
-    # channel. Surface it instead of returning a quiet 0 (review finding #20).
     if private_attempted and private_failed == private_attempted:
         from chat_daily_tg.notifier import notify_failure
         notify_failure(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import re
+import os
 from typing import Any
 from typing import Literal
 import yaml
@@ -33,10 +34,70 @@ class OptionalModel(LLM):
     enabled: bool = False
 
 
+class JevModel(BaseModel):
+    enabled: bool = False
+    endpoint: Literal["https://api.typesafe.ai/v1/systemone"] = Field(default_factory=lambda: os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1").rstrip("/") + "/systemone", validate_default=True)
+    model: Literal["jev-latest"] = "jev-latest"
+    api_key_env: str = "TYPESAFE_API_KEY"
+    timeout: float = Field(default=3, gt=0, le=3)
+    retry_max_attempts: int = Field(default=2, ge=1, le=2)
+    zero_data_retention: bool = False
+
+
+class JevPolicy(BaseModel):
+    jev_shadow_sample_rate: float = Field(default=1.0, ge=0, le=1)
+    jev_shadow_max_calls_per_run: int = Field(default=5, ge=0, le=5)
+    jev_shadow_daily_cap: int = Field(default=50, ge=0, le=50)
+
+
+class JevJudgePolicy(BaseModel):
+    jev_judge_max_attempts_per_run: int = Field(default=5, ge=0, le=5)
+    jev_judge_daily_cap: int = Field(default=50, ge=0, le=50)
+    jev_same_event_threshold: float = Field(default=0.5, gt=0, lt=1)
+
+
+
 class EmbeddingModel(OptionalModel):
-    dimension: int = 768
+    provider: Literal["gemini", "openai"] = "gemini"
+    # Local OpenAI-compatible embedding servers commonly require no key.
+    api_key_env: str = ""
+    batch_size: int = Field(default=100, ge=1, le=100)
+    # Generation identity is persisted beside every vector.  For the bundled
+    # loopback Qwen runtime model_revision can be discovered from its local
+    # runtime config; other providers should set it explicitly.
+    generation_id: str | None = None
+    model_revision: str = ""
+    normalized: bool = True
+    query_template: str = "query-v1"
+    document_template: str = "document-v1"
+    symmetric_query_document: bool = False
+    dimension: int = Field(default=768, ge=1)
     top_k: int = 8
     min_similarity: float = 0.35
+
+
+class RerankerModel(OptionalModel):
+    """Optional OpenAI-compatible reranker for daily evidence enhancement.
+
+    It is deliberately disabled by default. A runtime failure falls back to
+    the already-computed dense order and cannot affect report delivery.
+    """
+
+    api_key_env: str = ""
+    # Optional strict response-attestation contract. The bundled loopback
+    # runtime can discover this fingerprint from runtime.json when omitted;
+    # generic OpenAI-compatible providers remain compatible with the default.
+    model_revision: str = ""
+    timeout: float = 8.0
+    candidate_top_k: int = Field(default=24, ge=1, le=64)
+    top_k: int = Field(default=8, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def validate_candidate_limit(self):
+        if self.top_k > self.candidate_top_k:
+            raise ValueError("reranker.top_k cannot exceed candidate_top_k")
+        return self
+
 
 
 class ImageModel(OptionalModel):
@@ -61,6 +122,8 @@ class Models(BaseModel):
     vision: VisionModel | None = None
     image: ImageModel | None = None
     embedding: EmbeddingModel | None = None
+    reranker: RerankerModel | None = None
+    jev: Any = Field(default_factory=lambda: JevModel().model_dump())
 
 
 class Telegram(BaseModel):
@@ -124,6 +187,17 @@ class DedupTopic(BaseModel):
     without a deploy)."""
     enabled: bool = False
     mode: Literal["report", "annotate", "enforce"] = "report"
+    # ``mode=enforce`` is only a requested policy. This independent release
+    # switch must also be true before application wiring can suppress a card.
+    enforce_enabled: bool = False
+    # L2 candidate reranking is independent from daily evidence reranking and
+    # enforce. It only reorders candidates for SameEventJudge.
+    reranker_enabled: bool = False
+    reranker_top_k: int = Field(default=3, ge=1, le=3)
+    # Confirmed BWG captions write to the index; opt in after sync and backfill.
+    xmonitor_ledger_enabled: bool = False
+    xmonitor_ledger_path: Path = Path("~/chat-daily/state/xmonitor_sent_snapshot.json")
+    xmonitor_ledger_max_age_hours: float = Field(default=24, gt=0, le=24)
     forum_chat_id: str = "-1004424841223"
     index_window_days: int = Field(default=14, ge=1, le=90)
     retrieval_window_hours: int = Field(default=48, ge=1, le=336)
@@ -131,17 +205,44 @@ class DedupTopic(BaseModel):
     candidate_min_sim: float = Field(default=0.80, ge=0.0, le=1.0)
     strong_sim: float = Field(default=0.93, ge=0.0, le=1.0)
     max_judge_calls_per_run: int = Field(default=5, ge=0, le=50)
+    min_embedding_coverage: float = Field(default=0.995, ge=0.0, le=1.0)
+    calibrated_generation_id: str | None = None
+    online_backfill_cap: int = Field(default=32, ge=0, le=200)
+    qwen_runtime_on_demand: bool = False
+    qwen_runtime_start_timeout_seconds: float = Field(default=180.0, gt=0, le=300)
+    judge_provider: Literal["llm", "jev"] = "llm"
     judge_model_alias: str = "vibekey"       # resolve_model_alias name
     judge_model: str = "gpt-5.6-terra"       # overrides the alias's model
     judge_timeout_seconds: float = 25.0
     exclude_producers: list[str] = Field(
         default_factory=lambda: ["alert", "daily_summary", "growth", "bilibili"]
     )
+    jev_judge_max_attempts_per_run: Any = 5
+    jev_judge_daily_cap: Any = 50
+    jev_same_event_threshold: Any = 0.5
+    jev_shadow_enabled: Any = False
+    jev_shadow_sample_rate: Any = 1.0
+    jev_shadow_max_calls_per_run: Any = 5
+    jev_shadow_daily_cap: Any = 50
+
+
+class DedupAuthority(BaseModel):
+    """Cross-channel first-arrival when the same URL collides.
+
+    When `url_authority_skip` is true, a non-bare post whose canonical URL was
+    already delivered (any channel) is skipped (journal reason `url_first`)
+    instead of always delivering. Weights are retained for observability /
+    future ranking experiments but do not decide delivery order.
+    """
+    weights: dict[str, int] = Field(default_factory=dict)
+    url_authority_skip: bool = True
+
 
 
 class DedupConfig(BaseModel):
     content: DedupContent = Field(default_factory=DedupContent)
     topic: DedupTopic = Field(default_factory=DedupTopic)
+    authority: DedupAuthority = Field(default_factory=DedupAuthority)
 
 
 class TelegramSource(BaseModel):

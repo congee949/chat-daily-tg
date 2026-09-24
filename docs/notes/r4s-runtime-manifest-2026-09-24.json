@@ -1,0 +1,1112 @@
+{
+  "host": "r4s",
+  "source_root": "/root/chat-daily-tg",
+  "snapshot_date": "2026-09-24",
+  "scope": "deployed source hashes; runtime config, credentials and state excluded",
+  "manifest": [
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "sha256": "4d51d74f701949841d2f0e3338333189554909de05ceb56566dd83ef7b385d16",
+      "size": 2066,
+      "mode": "0o644"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "sha256": "19d43b102c8cf3c4fa5d09e7ee9f8e69d63f45ecfa8fd8d4c7b68220c00ada1d",
+      "size": 1138,
+      "mode": "0o644"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "ab92e744ae6955c4a7eceb83c33a8daee4efcf5d9eda6d023622d60bb5279f07",
+      "size": 2849,
+      "mode": "0o644"
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "5e7eea6faef3cb8f9e1865ceac368fc4af3dfc0a27fef0992969c7785ff8979a",
+      "size": 3686,
+      "mode": "0o644"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "4fe8c3f6f6bbba8de001eb1a0eb00fc2bd51360ef80782529e8d66e994c4958f",
+      "size": 1066,
+      "mode": "0o644"
+    },
+    {
+      "path": "README.md",
+      "sha256": "6fd9d2a91242bafee35463fd238255d28da8d2c134a634e4434c4956597d16b4",
+      "size": 13993,
+      "mode": "0o644"
+    },
+    {
+      "path": "deploy.sh",
+      "sha256": "9cff0c66a91ad1e0636f4d8280980fdde0d3d1d2f65e5fe18ef92f2c7584966d",
+      "size": 4086,
+      "mode": "0o755"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "sha256": "0c35050b254648a252b35017f2f7ad4d12e9f80a0d0c25c55855531274e6442c",
+      "size": 14973,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/images/readme-data-flow.png",
+      "sha256": "f3aa24da603ecf700f8eb74a4f2897a051a8ffc3c69e76aa5e2074afe2d06027",
+      "size": 1014267,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/2026-07-20-llm-card-agent-analysis.md",
+      "sha256": "cd68a44b0719eda92a6837331f957903f48c11a97c9c5df7fe041ef466cb50fb",
+      "size": 939,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/README.md",
+      "sha256": "8ab9715945ec3ea2b61e83f11270123cbc4d692af0fce01daf51a379215cfe6e",
+      "size": 2816,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/adversarial-review-2026-06-29.md",
+      "sha256": "8337d7bd7544b5c1cb5b46dcd33927b7ca8ee1d10d241e031054d2616e7d8d22",
+      "size": 32831,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-bilibili-copublish-youtube-johnathan.md",
+      "sha256": "9f21ebd822551ebae317c1dec7f1b1f133be787c03fe41a57de22b33e2484ab1",
+      "size": 880,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-bilibili.md",
+      "sha256": "f886318847d555a01b3695f485a03751da6976389c390e5021d1fe0f371cd001",
+      "size": 6583,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-citation-dedup.md",
+      "sha256": "bf2b7fcce1dde4a17c8f454a7d3f3152b164f88622838f21ff92984626175447",
+      "size": 3711,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-growth-mining.md",
+      "sha256": "b755f2ffac82680a294232d1b44977a427340968680480647396ccfa8e6636bb",
+      "size": 9055,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-review-fixes.md",
+      "sha256": "b57ce5a00aff4ab1e185632e2b740de73953f8542835a90647d252c1efc4da8e",
+      "size": 11644,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-route-table.md",
+      "sha256": "f6e90502b592f7ea7f3745f852ee534e9ff4cd45b8bd334f3b3335770266a38d",
+      "size": 4008,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes-vision-observability.md",
+      "sha256": "87cc2b7d523d260a7c99a395451011264acf455326447b0314776f2732656851",
+      "size": 6368,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/notes/implementation-notes.md",
+      "sha256": "92163801d4561915adfdbf468c36ca4f3891dbfbcbfae12a67c3cc15aca3ca29",
+      "size": 47029,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/runbook.md",
+      "sha256": "1d50c32c421f094dcbc65250f087a2786cb2054f84a7f16acae8324dafac1a3e",
+      "size": 21508,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/schedule-designer.html",
+      "sha256": "941e3f6b961417cad39ca2453cff14d6fa9577bac189b13d7ecc9d6400b96a97",
+      "size": 22762,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-02-bilibili-subscriptions-design.md",
+      "sha256": "11ad233bbc1d0d92ed5891352a6b38a559f803658c91c765ce8e6dde8e506a06",
+      "size": 27384,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-02-raycast-ai-dictionary-design.md",
+      "sha256": "36e41e67a21f835b60ce007bdeda584acf1b490d7c36e26896ff31b1b9b8f5ca",
+      "size": 2401,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-04-task-monitor-dashboard-design.md",
+      "sha256": "a20492feff5afdffd7720c07c0b3cd3bef5d82815860764ddcea8d45320e6b94",
+      "size": 16799,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-05-auq4me-merge-blindspot-pass.md",
+      "sha256": "28e232a17046dc30e26afaadd793c64ac47349ad0db4d8427d54acd1d51dd35f",
+      "size": 21026,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-09-llm-output-validation-design.md",
+      "sha256": "5566fcd51871ca25c66fae9df09fcb2f7b7f275a16d55876416f4304bc105a12",
+      "size": 3337,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-09-unified-tg-route-table-design.md",
+      "sha256": "587ce01a7b0f36d6092037ec8e846e3935e7502444f8804cc2a981ecedfe7d50",
+      "size": 5411,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-16-cross-producer-and-topic-dedup-design.md",
+      "sha256": "b38712915fdc9336417aa2b0c8a58b42e62c0ec200529fd1751921a0030f1ba8",
+      "size": 10088,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-16-raw-channel-content-dedup-design.md",
+      "sha256": "fb8de70082fc46dd01b5f96933bfae0046b538f1adaae0b753f215aea8841852",
+      "size": 8836,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-17-channels-forwarder-r4s-migration-design.md",
+      "sha256": "2a65ecf6c30c0dcb77ec0ef42284e3cd15838ff3dab6adc8d51fb73fbb322d01",
+      "size": 8633,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-17-interaction-boundary-curation-capture-design.md",
+      "sha256": "3d6032b78482bbfc37e8bcbf6bd27dc35f57a0714f780e2028a1ded5f99fbf6c",
+      "size": 7557,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-17-tg-x-structured-content-report-design.md",
+      "sha256": "deab04f0a16e353fef4a79a051aab3726ed052497178cee3ecc962104b58a087",
+      "size": 21226,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/spark/2026-07-18-official-x-push-policy-design.md",
+      "sha256": "d9864540cefcf492ed8f1ae01b28bf2825062eef9799562901ade91c82432219",
+      "size": 13558,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-22-bilibili-article-heart-analysis-design.md",
+      "sha256": "d7d3c5fa82d28f937ef29d58466b3781cacae19110f5bab3aedd1cc9bf20ea2f",
+      "size": 19712,
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/testing.md",
+      "sha256": "3c75e6728ec5799bdddaf676817b0ccc3382b5a4b6af56d568e1f4b117a646c5",
+      "size": 4068,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.agent.plist",
+      "sha256": "6af6f6e70f416b5975d5d6ef12490e2c064772642cdad4d51cc39dca2c07a3ca",
+      "size": 1344,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.channels.plist",
+      "sha256": "0ba2b740917bf400d618d2da56a6bbc17d495e5fd07108a7fefb400630a629fe",
+      "size": 1959,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.disablesleep.plist",
+      "sha256": "9296b5a19790d2359d1e6e6992a8499e9e0694da604656307e3b785455b849d2",
+      "size": 949,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.growth-weekly.plist",
+      "sha256": "4420176b614d1184763ee1acfa5d1ad65c587cefadb5c319ecb7d466bd6f4df2",
+      "size": 1562,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.growth.plist",
+      "sha256": "4f14020cf6649c04442749d8cf5abcfb451937ffdb54396271c853674eac6350",
+      "size": 1419,
+      "mode": "0o644"
+    },
+    {
+      "path": "launchd/com.chat-daily-tg.ledger-sync.plist",
+      "sha256": "cc6dfdb4809c7060b4428a2dc00291a8962f11149916a7e025a6619ab42d24c5",
+      "size": 1100,
+      "mode": "0o644"
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "858405e6b51852190476a35413b48b26babfed6635034c37bcc70bf80c591e66",
+      "size": 1280,
+      "mode": "0o644"
+    },
+    {
+      "path": "run_daily.py",
+      "sha256": "049e0e4c5600b9bf7ac7e3b600edbfc73bcc90b542f94ff01189e254e9412d20",
+      "size": 520,
+      "mode": "0o644"
+    },
+    {
+      "path": "schedule.yaml",
+      "sha256": "92660c4ec85d54db23b29869dc930f319bb4a4f72457276874874d72d64bc1c9",
+      "size": 1734,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/archive/migrate_permanent_dedup.py",
+      "sha256": "6d3ddc4dca3d87c18cd54f4a6ae180936ba7971fed15eea99c4147963e74319d",
+      "size": 4255,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/benchmark_seen_store.py",
+      "sha256": "dc3854d9dbbb0db60a705a83415e8363d483d76172de127140f47e29769d8667",
+      "size": 2537,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/calibrate_topic_dedup.py",
+      "sha256": "a9a71ecafe8c6ccf3fa885d873762329c5295514937b93b5f47fdb08c6b099b0",
+      "size": 31734,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/due_gate.sh",
+      "sha256": "47e0fb63e2e190301d4b00d470b084b4c162c10bd43326b52926d61d1a96d0f6",
+      "size": 4508,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/guard_common.sh",
+      "sha256": "95d8d8964725e75e595487024059527e7814c74b1f4de994f27a3f775227321f",
+      "size": 6330,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/install-launchd.sh",
+      "sha256": "01955d788fab9e16d6e930e3488c2e59d83a196ee3e29984f87b5da9732b6ba9",
+      "size": 3895,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/measure_cross_producer_dup.py",
+      "sha256": "53e6e76c27ffc0dfc28fbc97db57f7228e71bca7d89d4f4f8a41a5ca5046c891",
+      "size": 9624,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/migrate_jsonl_to_sqlite.py",
+      "sha256": "902417716df91c9142d04db897063deb75d3e8290046feb773b7f1fa82673303",
+      "size": 8851,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/power_aware_disablesleep.sh",
+      "sha256": "09580b7f7dd2dea9bd2c8da13da32c47d50ae1b9fc92b6d7a6b82f4600dddc0e",
+      "size": 1019,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/research_loop.py",
+      "sha256": "1394570a70fb4722531de8fa605dbe7c50ce4866692e38a276a3c6d0569bedc3",
+      "size": 4500,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/run_bilibili_r4s.sh",
+      "sha256": "e7363078a6b94e9cac77c7ddcadfaf33fcd37491b15545c3b6957b717ddd018d",
+      "size": 6012,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_channels_guarded.sh",
+      "sha256": "6b935897b096b8d03a21ac88f683339187b97809aa137e9816dea709bc2d3e18",
+      "size": 5415,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_daily_guarded.sh",
+      "sha256": "0021013eeff920f74a5fdd0c956f0fd909cf14ec705c24cb367231c7b6539c23",
+      "size": 4566,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_growth_guarded.sh",
+      "sha256": "768da4f9d66804b0f59d68103cad345aa210b21e608a34ff2c39cb8989278b2b",
+      "size": 4191,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_growth_weekly_guarded.sh",
+      "sha256": "d6e63f01cd1f7765a8b3c4a24320648e93171d2d32d03c169c970cdbb78b74d3",
+      "size": 1523,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_ledger_sync_guarded.sh",
+      "sha256": "b9abe15300a4276812ec19770d91be6a90ab648b6b0f595d0e079935e3bae75f",
+      "size": 884,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/run_youtube_r4s.sh",
+      "sha256": "9647e1dbcb4424b718799fdda982f999d62c77c4b8cc72e36b3807b781a0f5dc",
+      "size": 6071,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/schedule.py",
+      "sha256": "145710b122d786ce9e33dd4ca4aa02a5757dd7920041bf14e658cd06f1c8bec8",
+      "size": 11319,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/sync_media_ledger.sh",
+      "sha256": "4bb9af1c3c84fab34b582052c02a35154825dc3156a0512e5029f14e418cf778",
+      "size": 5289,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/sync_tg_targets.sh",
+      "sha256": "5a3533d34aa0d942b14fe901a4f49bf81c51fff064caf15ed05b80a99eacd1c6",
+      "size": 2731,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/tg_media_dump.py",
+      "sha256": "b3bbdfc8c9bfe44d1cc4c0ee275ff857b3c9ed0d6e6aa064e8f2dcc1805f22f0",
+      "size": 7220,
+      "mode": "0o644"
+    },
+    {
+      "path": "scripts/weekly_media_rules_review.py",
+      "sha256": "fbb92614613e3dc8066f6ffdc9167f6a65528a472f3fabdd8e170a7e0bfeaf8c",
+      "size": 4616,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/application.py",
+      "sha256": "d879570529548f6651e903e9e03cb2664f84638eb7f52f44115602834bce899c",
+      "size": 94801,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/archive.py",
+      "sha256": "5d0129f0bbd047418e0ae7f9a7331ce7e0b9f3b09d3e1df73031a7a26146782d",
+      "size": 1894,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/bilibili_digest.py",
+      "sha256": "3ef01eef81b1b8737fc070910e592d7882787cec596482d47ebd120795e31c26",
+      "size": 12344,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/bilibili_fetcher.py",
+      "sha256": "92f624a5a9c24bed2218578e82f8c33f9de4387801a1d9fd6ceac7f043cce7c6",
+      "size": 25241,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/card_renderer.py",
+      "sha256": "815a9b61557e9e138b4f413fe8cd070ec5812ccceb57877eef1e814384ff64a7",
+      "size": 9359,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/cli.py",
+      "sha256": "4daa7cc335b8a161a567edfecd9b02dcca877bb4558867d676082f4170583fe0",
+      "size": 6635,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/config.py",
+      "sha256": "e068e4bdb588eb47f85aa8bbdd12aa904f8b27a294d22da34c8a2f46d31035e3",
+      "size": 18793,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/content_seen.py",
+      "sha256": "7d340abce7877b48c11ded39d4b66605a0718fbec7f4ccd82c17fa77eb02c8e5",
+      "size": 25580,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/context_builder.py",
+      "sha256": "405a3f483255bdc5003a5bffcd6bda23a205b83655d3b7c51fd1de043d00b612",
+      "size": 1601,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/cross_group_cluster.py",
+      "sha256": "fb4e36a08684e2284548fabc347a514b10949f1b6aea6db0f67a861031777f98",
+      "size": 7615,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/db.py",
+      "sha256": "6d9ccdb688f12b7f506480a893881f43a1f5ba82b7c31236384f09fe9a69cf43",
+      "size": 8585,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/death_signals.py",
+      "sha256": "a7b19f2eb240cd62130a0529b5f35630cad40daeebe42337e72ec98185c44645",
+      "size": 3032,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/dedup_journal.py",
+      "sha256": "30ee75d3acacea1f1773dfc6c5087f44498104eed6208409f7b6d2671a2c7d56",
+      "size": 3022,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/env.py",
+      "sha256": "07615885c56ee8146e97cf455a7054e28a5c2d5191c7d6f30f24775f6a76be78",
+      "size": 1514,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/evidence_index.py",
+      "sha256": "0e71e217dce50b16cc0e091ae9ea344c61ccd4b5499961794ab61f9193fee8ae",
+      "size": 18164,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/__init__.py",
+      "sha256": "f804dd60a3d7773955315b00f474ea302202f984399083f250973f50ea233f85",
+      "size": 287,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/channels/__init__.py",
+      "sha256": "c3bf885d4651f8110a5b375d7b6be03a0f0b7435131d8734fb1dd6b9036e61b2",
+      "size": 52,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/channels/application.py",
+      "sha256": "28e44dfac95def98427bc4cdd0436fff2c4a95daa47490cabbd15d37a5d4db15",
+      "size": 312,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/daily/__init__.py",
+      "sha256": "81d2795851b6a2855ae666216484b5be6ab071051151e4ebee0d3c1388bd1339",
+      "size": 29,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/daily/application.py",
+      "sha256": "624716da5a3a9015de0b3f16cf3a50680b798ffd57c4acb11917dd4690f9ce16",
+      "size": 503,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/growth/__init__.py",
+      "sha256": "88d292fd094539c586e1ee309ba31da2e09e0d42e0706c0c026e3d3eb010d039",
+      "size": 51,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/growth/application.py",
+      "sha256": "af6d5c584595ae429dc2428e65c72e904da84092babbb3945c695d69bb906b82",
+      "size": 670,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/media_digest/__init__.py",
+      "sha256": "1d475c750816f000900b43365863f0f21a067e568defda75630c44ad9003065b",
+      "size": 41,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/features/media_digest/application.py",
+      "sha256": "0b5478119234de08deb2cd09ceff368910dbc3f2ddf39a37900f3aca5a842bde",
+      "size": 335,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/growth_cards.py",
+      "sha256": "5b34b959f61af7d38dfa944849e73ccd31e772aad47d80b7bb3f7d70958997dc",
+      "size": 7890,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/growth_miner.py",
+      "sha256": "8c836b6fcfa21310b1bfc2cf8ffdbf7a6e0285fd65422e5ed00aeb7fca03f027",
+      "size": 17242,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/growth_store.py",
+      "sha256": "b68af2698dbe1b6da958aaf98a70f7f4f214c52299bb83eaf150d8ffc74f1add",
+      "size": 19604,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/growth_weekly.py",
+      "sha256": "208de5f092b9ed2b4a7856134491e3a66f05d45c3434a782c231311d3d40ceec",
+      "size": 11820,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/health_briefing.py",
+      "sha256": "bf1b4ec9826ba8ac410746cfaebcc9976785addb95c157c3fc98538cc39a8fa8",
+      "size": 29999,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/health_card.py",
+      "sha256": "eda97f5a3a866a58b0f2de989236fb105a73ae7d2dca654db6eb5e3966326004",
+      "size": 6442,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/health_rich.py",
+      "sha256": "151d519d3c1ebf9007b653dc0772ddc63ff9a8c881ab68c86483d6f4be3de9b8",
+      "size": 5150,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/hot_leads.py",
+      "sha256": "03ee19f11bab15a0c517b3f18299ceb5c3c74e1fc94f6dde1227eeda9631bc6d",
+      "size": 5386,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/img_relay.py",
+      "sha256": "e3587eb2eba0fc4771109fe4f284333b79d3a58b9df878c81942c1db10470ecd",
+      "size": 2180,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/incident_client.py",
+      "sha256": "e48ec5f2edb27d9b27af8bff6977e78e474e63fc13b8f70eb757735a870c7723",
+      "size": 8240,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/llm_client.py",
+      "sha256": "463b6ebbde8c33f064fd159ee5c5e12f02101fc8a32df2f0f7a55f972b6bae1d",
+      "size": 10221,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/logging_setup.py",
+      "sha256": "988694d3b0afcfeea304a988f42f9bd6cb3a56b923e112e5427133033242f6c7",
+      "size": 2340,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/media.py",
+      "sha256": "220f775fbaae410bd35515c9e1c801a98e12e0596674ac3062bffe661dc91881",
+      "size": 8312,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/notifier.py",
+      "sha256": "a769ad618d07c5f217243a834fe3d5dc55787de6542025dbe7c2b94ebf3bd1d6",
+      "size": 3618,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/paths.py",
+      "sha256": "6bfa500ca2f9c0504b9b13f8fa88ec2d1d8fa42dab60671a5d9e79011b8ba2d2",
+      "size": 3012,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/permanent_md.py",
+      "sha256": "76cc9ba0497f89ce9c3259030bfa8e5aac908875546b4466ba6e2cae1eaa81ec",
+      "size": 1682,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/post_process.py",
+      "sha256": "bb378729c20cb50fbd4b5b82fc264895015bab803be4863f66fe964710d47863",
+      "size": 1737,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/private_media.py",
+      "sha256": "c48dcac8fbc15e35ce332f2df02ca59c3b98618bc8a0385be5708b23b9794027",
+      "size": 16771,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/prompts.py",
+      "sha256": "8b997c33a8363d3aa3b1d6e175401975cf38f61a48f3aac0f3564c19adbda6c0",
+      "size": 10470,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/raw_channels.py",
+      "sha256": "9b05b73a281d5229728e829345d1710ae829e6c1fcfb36c1ad581972116636e7",
+      "size": 34749,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/raw_seen.py",
+      "sha256": "9533858432030f6712722b0c6d39e3000d9802db1819f9d9f457f2ff6938e32d",
+      "size": 8234,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/repeat_topics.py",
+      "sha256": "e8f02567a57d6d7ec39a9c354cfdda0f9978dd65812a5bf99636ea4876873463",
+      "size": 7594,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/research_loop.py",
+      "sha256": "e88b682853ff8bb29265d969dd73e9327bf95ebf25f1e342b0cf0b1e22671ea1",
+      "size": 7671,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/sanitize.py",
+      "sha256": "cbc685ab769df97dc71c4845a1f86fb364665a015cc7b9770fae2513977db7c6",
+      "size": 632,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/sent_ledger.py",
+      "sha256": "01dabb979a448767b85aeee05c97fed8c321ec252e25cc800f8eeac057309614",
+      "size": 6295,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/sqlite_util.py",
+      "sha256": "21ed1ba6537816362ab2c45f27538b2a3b9270a51cabb5d9361c6a0a402ec419",
+      "size": 8061,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/summarizer.py",
+      "sha256": "2b2d4ff408ed2b44eb93566e6cf198e0ab64e227dd43d6b8f4a0795c875a0237",
+      "size": 18661,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/telegram_exporter.py",
+      "sha256": "ea8b0c10dc630a751e6d46d3f932f5decbf34af513bf9436e31f9aa922ca705c",
+      "size": 7706,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/telegram_media.py",
+      "sha256": "35f95feb85d8059e39da08e2ccde2a33590b0681128aaefb83df1a071a609114",
+      "size": 3763,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/tg_sender.py",
+      "sha256": "83c790e8a426e4a7c0bef4156a95ee9c227b8e442752d2f66592e2e3bf1985ca",
+      "size": 30794,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/topic_dedup.py",
+      "sha256": "eec18fc479ce253cd4a39887729dd05dfd35ad58c676e8559e4f3e8b9e593a32",
+      "size": 32490,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/vision.py",
+      "sha256": "0f5c8fbb48b1b9dddab497adbc0f3c6bdfb8567373e22cc866439fcf1047051e",
+      "size": 31677,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/wx_exporter.py",
+      "sha256": "9f192ec7803f443919a39f860483fa0c0c03a7c5b189dc67cf17012936f8f2de",
+      "size": 8890,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/wxgf.py",
+      "sha256": "98a6c1267031d15be635b9d6e30ed4a016c8bec4940e413513066587d532f01f",
+      "size": 6443,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/youtube_digest.py",
+      "sha256": "bfb96860f3d436dd6ac91fa00442c7cc6a98d460e782328cc8c3e7caa8c3212d",
+      "size": 10804,
+      "mode": "0o644"
+    },
+    {
+      "path": "src/chat_daily_tg/youtube_fetcher.py",
+      "sha256": "7cb67c2554238a146d44bc31867e29951ae12038e33322e847ad5783ec4a95a0",
+      "size": 23640,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/conftest.py",
+      "sha256": "9e98e8e74fbd7135e93595d60d99440e97a34c2a7dd7a291b9242e614d4b264b",
+      "size": 1964,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/e2e/test_channels_cli_e2e.py",
+      "sha256": "9775366fdc2103c784130fa6f27d9d606d127cd3701d49cc0bcf3e4df14e4c40",
+      "size": 7042,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/fixtures/summary_output_sample.txt",
+      "sha256": "dc81c61511026417aa679d37899b035f6d5439c85ca4b0afe66cb0fcc15fa972",
+      "size": 1502,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/fixtures/wx_export_raw_sample.md",
+      "sha256": "d1106522bfd371bace55101bbeca94051793cca978b03956127ff7ce9968c79b",
+      "size": 1131,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_archive.py",
+      "sha256": "d2b621f60d831da8f3b6ca74f73b1616b2582550a1e368bb0eaeefac7ba9aa13",
+      "size": 2485,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_bilibili_articles.py",
+      "sha256": "ef039f5296b80980a07cc5ea5030762a96e69b820a3f076c9038b484cf79fb00",
+      "size": 6455,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_bilibili_digest.py",
+      "sha256": "5f594f38aba37ae6f927c0a725b8821d27ea71cbac243d09becfbf9b313e0027",
+      "size": 10318,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_bilibili_fetcher.py",
+      "sha256": "0daa95b2a7c412a379383410adda70b8024421fca14a9628650b2eba0d4d94a3",
+      "size": 16747,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_card_renderer.py",
+      "sha256": "870338e89f7998599105e3ea8a7293be5e9a0b9fefe8bc14defaa6ca5bedd148",
+      "size": 3499,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_cli.py",
+      "sha256": "75879de95dd7f9e4aa1851e0bf7b0ac799519c2d9beb9c5fea452bc5f490e98e",
+      "size": 2092,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_config.py",
+      "sha256": "b53deff9e7b7086d05f542ec36b4920fa259034e7514320b6133bf8a69e7a59f",
+      "size": 9674,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_content_seen.py",
+      "sha256": "e81ab96823c0a85f58653d1825db793e349751bf4e50cc102d80ffe23b223072",
+      "size": 20856,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_context_builder.py",
+      "sha256": "3c93d546e0b93a802f27b7797248ee7665c5b531c124f113d9c539897005108b",
+      "size": 2366,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_cross_group_cluster.py",
+      "sha256": "c9a49df03a7120da06de430fee55df86f93820fda2842e42f68067b3817ebf6c",
+      "size": 8520,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_db.py",
+      "sha256": "a9479bf5a0e56f58a8132167965a3b2770ac00421ace1182f3f009e8a46efd93",
+      "size": 7005,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_death_signals.py",
+      "sha256": "0418fdc9706bdbfc849dbd436b44e57dca21a20ab42e139588dc5e41da0da659",
+      "size": 4439,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_dedup_journal.py",
+      "sha256": "e991d7cdf2fc928032bbbed56ba77cdc150542da84013e976f3b1397f4cef9ba",
+      "size": 2915,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_env.py",
+      "sha256": "466f446e8ebb6436bb2daaf119b066abf22e784cb42c73710702921bb42b5014",
+      "size": 1590,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_evidence_index.py",
+      "sha256": "9dc922cad4772f95f34170e8379322b9840c9de314b2cef48e9bb92afd8d3217",
+      "size": 15750,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_growth_cards.py",
+      "sha256": "a67045f08bfdaf7225393f554bbdf59a54e271c5a90489582be0d704ae6e2239",
+      "size": 7327,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_growth_judge_fallback.py",
+      "sha256": "a0983dce74d45ed240779da063595730cdd7c6a635c6b6593066c2daf76ddb62",
+      "size": 1010,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_growth_miner.py",
+      "sha256": "0cf9cd7cb1817b86f49ce5a60249dffb73315dababb28b5edaf73aaa30fe21b6",
+      "size": 17218,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_growth_store.py",
+      "sha256": "d5cf46a497853c469a1405465c90ac0ee80af6c8f477e55aec81192df445d4e6",
+      "size": 12014,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_growth_weekly.py",
+      "sha256": "a40e0c3d9fcbf1552723e10ac28df101c2fcc63a01f02cf7a04945af8cdf87e7",
+      "size": 13664,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_health_briefing.py",
+      "sha256": "38a79369b352eead827310ff2db7dbe88a8825ef82dc483e90d4215b6b9ff6cc",
+      "size": 18505,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_hot_leads.py",
+      "sha256": "0ab364f91efd90286fb0ce4b9630ad33d60b69c24e8bfa426cddf329a54cb392",
+      "size": 3194,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_img_relay.py",
+      "sha256": "500ea1fd9b53848aa7c34f242972d3c5bfb00051799ea62f1c51bef23053ab85",
+      "size": 1795,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_incident_client.py",
+      "sha256": "38669f579d22fd298d95595ad125c9b690eab47b6dc92d95616c8e5b9707341e",
+      "size": 6423,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_llm_client.py",
+      "sha256": "4e1a9af34d7fb6531e394952bfdce5bef8ad0b693accc513946e82db0a95fead",
+      "size": 12501,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_logging_setup.py",
+      "sha256": "f8fddc892a4da1f837874dbf3f8590dc8dfe2cb3f47a06beb3e625900209b50d",
+      "size": 1675,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_media.py",
+      "sha256": "e6b6120a65427a69d0f3286e76c4ed7cedae837beaa823421a51f2ea1175e8e4",
+      "size": 1920,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_migrate_jsonl_to_sqlite.py",
+      "sha256": "810c051a99d5a171cc4d948dba44dc8c4d8dee1b3f8c1dd62888652682116a73",
+      "size": 8981,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_notifier.py",
+      "sha256": "b1203326310bca98a58708e7eca65c0b2fb696006cc505d2b845da164389a2f7",
+      "size": 4062,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_permanent_md.py",
+      "sha256": "e97583cb678e7b08373cf12f0146e45675e86c7daee76cd955d8c0c06596962e",
+      "size": 1608,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_private_media.py",
+      "sha256": "8285e6f87345020afc7921c744ed2a77510c53489053a67565ef099c86dd97df",
+      "size": 15022,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_raw_channels.py",
+      "sha256": "aa281a6d38b9c0c068e9de00c6fec9db68f11ffc75f56ab6d145b8d5573f83d3",
+      "size": 49238,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_raw_seen.py",
+      "sha256": "f93505bbc0c8134f466b8aab8a58a724be291f843149e945a539fd064d627ac1",
+      "size": 4094,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_repeat_topics.py",
+      "sha256": "c87be461f47ececbfec67a9d6aff5a96719984d0d203392c9d0db08acb08a4d3",
+      "size": 2010,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_research_loop.py",
+      "sha256": "d9191fddcac550bb3d41d1463f492301499c6e83ed9a1ca1c5417e13db1a4a2e",
+      "size": 3456,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_retry.py",
+      "sha256": "c771aae2998f3fc4b921341fe147e726a81c7150859c8eba16377397d2b2ce42",
+      "size": 951,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_run_daily.py",
+      "sha256": "67ae5d259b578bba461a55a2e8b0325b29ee7da03996512a3863cdfd8172aa57",
+      "size": 52272,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_sanitize.py",
+      "sha256": "77e44c7f20a3f6dc0da0e0ed1e3a283150daf47dd059353f167125eba632920d",
+      "size": 447,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_schedule.py",
+      "sha256": "bec5dee4ed9856681813c27b8e55a11f6b7294d17a53c9b37f2f2dd19c39008e",
+      "size": 784,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_sent_ledger.py",
+      "sha256": "196f05273bb6f710fc566855f6296d255e0fd82a893ec6ca2c01b2aacd842945",
+      "size": 2369,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_summarizer.py",
+      "sha256": "03650f6d6aee20c89c0fd460f0b7f84d64a070ea0765fe0c30a283606f5ce6a4",
+      "size": 14823,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_summary_fallback.py",
+      "sha256": "3addc43613e872572ac2fd8a23d7a40581f1a8a34421b181af3fa7da6077ef5f",
+      "size": 1239,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_telegram_exporter.py",
+      "sha256": "1ac48c5370d8540ee863f8d91a55d941082caf0794b33495f0d1a9d4546ff0f0",
+      "size": 7247,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_telegram_media.py",
+      "sha256": "9dfa175e2c9babac86bbc35041b1e0f3e80c4e1edd175bc8fdd44eef17cb1a88",
+      "size": 2606,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_tg_sender.py",
+      "sha256": "926b36cfac2bedb4ba8d5268be9d2f8f13f1080500abf376cebb3398c86fddc1",
+      "size": 18949,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_topic_dedup.py",
+      "sha256": "9f4e12d7079411fba767ce33437fb011efdec4c8801a6afdb037c8adf1742f8b",
+      "size": 31012,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_vision.py",
+      "sha256": "c0ce69c3eff7d517d0e03b00d67bb547410f08100abcfeb070a951880eed7313",
+      "size": 38014,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_wx_exporter.py",
+      "sha256": "361c08a195108e24978d0e1469def445867c754ed19e4ce7641136b4b6779d3d",
+      "size": 14518,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_youtube_digest.py",
+      "sha256": "c6c0d0f48122fc4226148dadd16a8a2be9c59e1f2b88250d6738d9e9faab8e5e",
+      "size": 9884,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/test_youtube_fetcher.py",
+      "sha256": "64816f736cfd06eb3c3cb437bdf6295d8c13133a6e88314d540e82897ac1945b",
+      "size": 20431,
+      "mode": "0o644"
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "ef2a40d12b4f71b12fde2e1ec67dd031a704aea45c69824783c828ffc923b761",
+      "size": 86837,
+      "mode": "0o644"
+    }
+  ]
+}

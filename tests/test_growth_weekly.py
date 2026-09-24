@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 import json
 import re
+from types import SimpleNamespace
+import pytest
 
 from pytest_httpx import HTTPXMock
 
@@ -23,8 +25,19 @@ from chat_daily_tg.growth_weekly import (
     poll_dm_feedback,
 )
 
+from chat_daily_tg.growth_weekly import _feedback_relay_config_path as _REAL_RELAY_CONFIG_PATH
+
 DM_CHAT_ID = "999888777"
 GETUPDATES_RE = re.compile(r"https://api\.telegram\.org/bot-TOKEN-/getUpdates.*")
+
+
+
+
+@pytest.fixture(autouse=True)
+def _isolated_feedback_relay_config(tmp_path, monkeypatch):
+    from chat_daily_tg import growth_weekly
+    monkeypatch.setattr(growth_weekly, "_feedback_relay_config_path",
+                        lambda: tmp_path / "missing-relay.json")
 
 
 class FakeLLM:
@@ -246,3 +259,159 @@ def test_build_weekly_report_empty_db_skips_llm_call(tmp_path: Path):
     assert "评审版本：v1" in html
     assert "本周已按你的反馈更新" not in html
     assert llm.calls == []
+
+
+
+
+def _enable_relay(tmp_path, monkeypatch, *, owner=DM_CHAT_ID):
+    from chat_daily_tg import growth_weekly
+    config_path = tmp_path / "x-review-feedback-relay.json"
+    config_path.write_text(json.dumps({
+        "enabled": True,
+        "host": "bwg",
+        "project_dir": "/root/x_monitor",
+        "state_path": "/root/x_monitor/state/x-review-feedback.sqlite3",
+        "owner": owner,
+    }), encoding="utf-8")
+    monkeypatch.setattr(growth_weekly, "_feedback_relay_config_path", lambda: config_path)
+    return config_path
+
+
+def test_relay_success_appends_and_persists_update_offset(tmp_path, monkeypatch):
+    from chat_daily_tg import growth_weekly
+    _enable_relay(tmp_path, monkeypatch)
+    offset_path = tmp_path / "offset.txt"
+    offset_path.write_text("40", encoding="utf-8")
+    inbox_path = tmp_path / "inbox.jsonl"
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert argv[:2] == ["ssh", "-o"]
+        assert "relay" in argv[-1] and "--after 40" in argv[-1]
+        assert "--owner 999888777" in argv[-1]
+        return SimpleNamespace(stdout=json.dumps([
+            {"id": 51, "update_id": 41, "date": 1751990000, "text": "通过 relay 的反馈"},
+        ]))
+
+    monkeypatch.setattr(growth_weekly.subprocess, "run", fake_run)
+    assert growth_weekly.poll_dm_feedback(
+        "-TOKEN-", DM_CHAT_ID, offset_path=offset_path, inbox_path=inbox_path
+    ) == 1
+    assert offset_path.read_text(encoding="utf-8") == "41"
+    assert [json.loads(line)["text"] for line in inbox_path.read_text().splitlines()] == ["通过 relay 的反馈"]
+    assert len(calls) == 1
+
+
+def test_relay_failure_preserves_offset_and_never_polls_getupdates(tmp_path, monkeypatch):
+    from chat_daily_tg import growth_weekly
+    _enable_relay(tmp_path, monkeypatch)
+    offset_path = tmp_path / "offset.txt"
+    offset_path.write_text("40", encoding="utf-8")
+    inbox_path = tmp_path / "inbox.jsonl"
+
+    def fail_run(*_args, **_kwargs):
+        raise RuntimeError("ssh unavailable")
+
+    class NoDirectClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("relay failure must not steal getUpdates")
+
+    monkeypatch.setattr(growth_weekly.subprocess, "run", fail_run)
+    monkeypatch.setattr(growth_weekly.httpx, "Client", NoDirectClient)
+    assert growth_weekly.poll_dm_feedback(
+        "-TOKEN-", DM_CHAT_ID, offset_path=offset_path, inbox_path=inbox_path
+    ) == 0
+    assert offset_path.read_text(encoding="utf-8") == "40"
+    assert not inbox_path.exists()
+
+
+def test_relay_owner_mismatch_is_rejected_without_ssh_or_cursor_change(tmp_path, monkeypatch):
+    from chat_daily_tg import growth_weekly
+    _enable_relay(tmp_path, monkeypatch, owner="123")
+    offset_path = tmp_path / "offset.txt"
+    offset_path.write_text("40", encoding="utf-8")
+    inbox_path = tmp_path / "inbox.jsonl"
+    monkeypatch.setattr(
+        growth_weekly.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("owner mismatch must not invoke ssh"),
+    )
+    assert growth_weekly.poll_dm_feedback(
+        "-TOKEN-", DM_CHAT_ID, offset_path=offset_path, inbox_path=inbox_path
+    ) == 0
+    assert offset_path.read_text(encoding="utf-8") == "40"
+    assert not inbox_path.exists()
+
+
+def test_relay_config_uses_home_state_path(monkeypatch, tmp_path):
+    from chat_daily_tg import growth_weekly
+    monkeypatch.setattr(growth_weekly.Path, "home", lambda: tmp_path)
+    assert _REAL_RELAY_CONFIG_PATH() == (
+        tmp_path / "chat-daily/state/x-review-feedback-relay.json")
+
+
+def test_disabled_relay_keeps_direct_poll(tmp_path, monkeypatch, httpx_mock):
+    path = _enable_relay(tmp_path, monkeypatch)
+    path.write_text('{"enabled": false}', encoding="utf-8")
+    httpx_mock.add_response(url=GETUPDATES_RE, json={"ok": True, "result": []})
+    assert poll_dm_feedback("-TOKEN-", DM_CHAT_ID,
+        offset_path=tmp_path / "offset", inbox_path=tmp_path / "inbox") == 0
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.parametrize("case", ["bad-owner", "bad-host", "other-owner-row", "malformed-row", "malformed-config"])
+def test_relay_rejects_unsafe_or_malformed_input_without_state_changes(tmp_path, monkeypatch, case):
+    from chat_daily_tg import growth_weekly
+    path = _enable_relay(tmp_path, monkeypatch)
+    config = json.loads(path.read_text())
+    rows = [{"id": 51, "update_id": 41, "date": 1751990000, "text": "feedback"}]
+    dm = DM_CHAT_ID
+    if case == "bad-owner":
+        dm = "999888777; touch /tmp/unsafe"
+    elif case == "bad-host":
+        config["host"] = "-oProxyCommand=touch /tmp/unsafe"
+    elif case == "other-owner-row":
+        rows[0]["chat_id"] = "123"
+    elif case == "malformed-row":
+        rows.append({"update_id": 42})
+    path.write_text("{" if case == "malformed-config" else json.dumps(config))
+    calls = []
+    monkeypatch.setattr(growth_weekly.subprocess, "run", lambda *a, **kw:
+        (calls.append(a) or SimpleNamespace(stdout=json.dumps(rows))))
+    offset = tmp_path / "offset"
+    offset.write_text("40")
+    inbox = tmp_path / "inbox"
+    assert poll_dm_feedback("-TOKEN-", dm, offset_path=offset, inbox_path=inbox) == 0
+    assert offset.read_text() == "40" and not inbox.exists()
+    if case in {"bad-owner", "bad-host", "malformed-config"}:
+        assert calls == []
+
+
+def test_relay_quotes_remote_paths_and_ignores_replayed_rows(tmp_path, monkeypatch):
+    import shlex
+    from chat_daily_tg import growth_weekly
+    path = _enable_relay(tmp_path, monkeypatch)
+    config = json.loads(path.read_text())
+    config["project_dir"] = "/root/x monitor; echo literal"
+    config["state_path"] = "/root/data ' state.sqlite3"
+    path.write_text(json.dumps(config))
+    offset = tmp_path / "offset"
+    offset.write_text("40")
+    inbox = tmp_path / "inbox"
+
+    def run(argv, **kwargs):
+        command = shlex.split(argv[-1])
+        assert command == ["cd", config["project_dir"], "&&", "python3", "x_review_bot.py",
+            "--state", config["state_path"], "relay", "--after", "40", "--owner", DM_CHAT_ID]
+        assert kwargs == {"capture_output": True, "text": True, "check": True, "timeout": 30}
+        return SimpleNamespace(stdout=json.dumps([
+            {"id": 50, "update_id": 40, "date": 1751990000, "text": "old"},
+            {"id": 52, "update_id": 42, "date": 1751990002, "text": "second"},
+            {"id": 51, "update_id": 41, "date": 1751990001, "text": "first"},
+            {"id": 51, "update_id": 41, "date": 1751990001, "text": "first"},
+        ]))
+
+    monkeypatch.setattr(growth_weekly.subprocess, "run", run)
+    assert poll_dm_feedback("-TOKEN-", DM_CHAT_ID, offset_path=offset, inbox_path=inbox) == 2
+    assert offset.read_text() == "42"
+    assert [json.loads(line)["update_id"] for line in inbox.read_text().splitlines()] == [41, 42]

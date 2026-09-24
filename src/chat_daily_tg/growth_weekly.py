@@ -1,9 +1,9 @@
 """Weekly growth-mining job: drain DM feedback, fold it into the judge rubric,
 and build the Saturday HTML report.
 
-The bot is send-only, and Telegram's getUpdates only retains updates ~24h, so
-feedback DMs are polled DAILY (the daily growth job calls poll_dm_feedback at
-its tail) into a durable JSONL inbox. This module's weekly job then consumes
+Feedback DMs are collected daily into a durable JSONL inbox. When the local
+X review relay is enabled, BWG is the sole getUpdates consumer and this module
+reads its owner-filtered relay over SSH. Otherwise it polls Telegram directly. This module's weekly job then consumes
 that inbox, merges the feedback into a versioned rubric, and assembles the
 report; run_daily.py (another lane) is responsible for actually sending it.
 """
@@ -13,6 +13,10 @@ from datetime import datetime
 from pathlib import Path
 import json
 import logging
+import os
+import re
+import shlex
+import subprocess
 
 import httpx
 
@@ -46,9 +50,83 @@ def _write_offset(offset_path: Path, offset: int) -> None:
     offset_path.write_text(str(offset), encoding="utf-8")
 
 
+def _feedback_relay_config_path() -> Path:
+    return Path.home() / "chat-daily" / "state" / "x-review-feedback-relay.json"
+
+
+def _poll_feedback_relay(config: dict, dm_chat_id: str, *,
+                         offset_path: Path, inbox_path: Path) -> int:
+    """Read owner-filtered updates; only the BWG bot consumes getUpdates."""
+    owner = str(dm_chat_id)
+    if not re.fullmatch(r"[1-9][0-9]*", owner):
+        raise ValueError("relay requires a private owner chat id")
+    if "owner" in config and str(config["owner"]) != owner:
+        raise ValueError("relay owner does not match growth DM")
+    host = config.get("host", "bwg")
+    if not isinstance(host, str) or not re.fullmatch(
+        r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*", host
+    ):
+        raise ValueError("invalid relay SSH host")
+    project = config.get("project_dir", "/root/x_monitor")
+    state = config.get("state_path", "/root/x_monitor/state/x-review-feedback.sqlite3")
+    for value in (project, state):
+        if (not isinstance(value, str) or not value.startswith("/")
+                or any(ord(char) < 32 for char in value)):
+            raise ValueError("relay paths must be absolute")
+    high_water = _read_offset(offset_path)
+    command = "cd " + shlex.quote(project) + " && " + shlex.join([
+        "python3", "x_review_bot.py", "--state", state, "relay",
+        "--after", str(high_water), "--owner", owner,
+    ])
+    response = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, command],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    updates = json.loads(response.stdout)
+    if not isinstance(updates, list):
+        raise ValueError("relay must return an array")
+    entries: dict[int, dict] = {}
+    for row in updates:
+        if not isinstance(row, dict):
+            raise ValueError("relay row must be an object")
+        uid, mid, date, text = (row.get(key) for key in ("update_id", "id", "date", "text"))
+        if (type(uid) is not int or uid < 0 or type(mid) is not int or mid < 1
+                or type(date) is not int or date < 0 or not isinstance(text, str)):
+            raise ValueError("invalid relay message")
+        # Current relay checks sender + chat + private type server-side. Keep
+        # this check for envelopes that also expose their owner coordinates.
+        for field in ("owner", "chat_id", "from_id"):
+            if field in row and str(row[field]) != owner:
+                raise ValueError("relay returned another owner's message")
+        if row.get("chat_type", "private") != "private":
+            raise ValueError("relay returned a non-private message")
+        if uid <= high_water:
+            continue
+        entry = {"update_id": uid, "date": date, "text": text}
+        if uid in entries and entries[uid] != entry:
+            raise ValueError("relay returned conflicting update ids")
+        entries[uid] = entry
+    if not entries:
+        return 0
+    # Validate the complete response before writing. Persist the inbox before
+    # its cursor; a crash may replay lines, which consume_inbox already dedupes.
+    inbox_path.parent.mkdir(parents=True, exist_ok=True)
+    with inbox_path.open("a", encoding="utf-8") as fh:
+        for uid in sorted(entries):
+            fh.write(json.dumps(entries[uid], ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    _write_offset(offset_path, max(entries))
+    return len(entries)
+
+
 def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
                       offset_path: Path, inbox_path: Path) -> int:
-    """Drain getUpdates into the durable feedback inbox.
+    """Drain owner feedback from the configured relay, or directly from Telegram.
+
+    The optional ~/chat-daily/state/x-review-feedback-relay.json config uses
+    enabled, host, project_dir, state_path and owner. Enabled relay failures
+    preserve the local cursor and never fall back to direct getUpdates.
 
     Every update (including ones outside the DM chat, and ones with no text)
     advances the offset high-water mark so it is never re-delivered; only DM
@@ -59,6 +137,27 @@ def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
     """
     offset_path = Path(offset_path)
     inbox_path = Path(inbox_path)
+    try:
+        config_path = _feedback_relay_config_path()
+        try:
+            config_stat = config_path.lstat()
+        except FileNotFoundError:
+            relay = None
+        else:
+            if config_path.is_symlink() or config_stat.st_uid != os.getuid():
+                raise ValueError("untrusted feedback relay config")
+            relay = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(relay, dict) or type(relay.get("enabled", False)) is not bool:
+                raise ValueError("invalid feedback relay config")
+        if relay is not None and relay.get("enabled") is True:
+            return _poll_feedback_relay(
+                relay, dm_chat_id, offset_path=offset_path, inbox_path=inbox_path)
+    except Exception as exc:
+        # Never fall back to getUpdates when a relay is configured or broken:
+        # doing so would steal review callbacks from the sole BWG consumer.
+        log.warning("growth feedback relay unavailable; offset preserved error_type=%s",
+                    type(exc).__name__)
+        return 0
     high_water = _read_offset(offset_path)
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
     total = 0

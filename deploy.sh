@@ -7,6 +7,9 @@
 #   ./deploy.sh --status # 查看服务状态
 #
 # 覆盖默认分支：DEPLOY_BRANCH=main ./deploy.sh
+#
+# In-flight：若 com.chat-daily-tg.* 有非零 PID 正在跑，install-launchd 默认 abort。
+# 强制重载：CHAT_DAILY_FORCE_RELOAD=1 ./deploy.sh
 
 set -euo pipefail
 
@@ -32,6 +35,29 @@ require_clean_tree() {
     git status --short
     exit 1
   fi
+}
+
+# Mirror install-launchd's in-flight gate so deploy fails early (before pull/uv)
+# when a live agent is running, unless CHAT_DAILY_FORCE_RELOAD=1.
+require_no_inflight() {
+  local running
+  running="$(
+    launchctl list 2>/dev/null \
+      | awk '$3 ~ /^com\.chat-daily-tg\./ && $1 ~ /^[0-9]+$/ && $1 != "0" {
+          printf "  %s pid=%s\n", $3, $1
+        }'
+  )"
+  if [ -z "$running" ]; then
+    return 0
+  fi
+  if [ "${CHAT_DAILY_FORCE_RELOAD:-}" = "1" ]; then
+    echo "⚠ in-flight com.chat-daily-tg.* jobs (CHAT_DAILY_FORCE_RELOAD=1 → continuing):"
+    echo "$running"
+    return 0
+  fi
+  echo "❌ in-flight com.chat-daily-tg.* jobs; aborting deploy (set CHAT_DAILY_FORCE_RELOAD=1 to force):"
+  echo "$running"
+  exit 1
 }
 
 update_code() {
@@ -62,6 +88,9 @@ case "${1:-deploy}" in
     echo "远程: $(git rev-parse --short "$REMOTE/$BRANCH" 2>/dev/null || echo '未知')"
     ;;
   deploy)
+    # Early gate: do not pull/reset while a guarded job is mid-run.
+    require_no_inflight
+
     OLD=$(git rev-parse --short HEAD)
     update_code
     NEW=$(git rev-parse --short HEAD)
@@ -79,9 +108,10 @@ case "${1:-deploy}" in
       uv sync
     fi
 
-    # 重载 launchd——委托给 install-launchd.sh（渲染占位符 + 安装 agent 与 channels
-    # 两个 label）。旧版用错误 label com.chat-daily.tg，从不真正重载（finding #17）。
-    echo "🔄 重载 launchd..."
+    # 重载 launchd——委托给 install-launchd.sh（渲染占位符 + 安装 5 个 label：
+    # agent / channels / growth / growth-weekly / ledger-sync）。
+    # install-launchd 再次检查 in-flight；CHAT_DAILY_FORCE_RELOAD=1 可强制。
+    echo "🔄 重载 launchd（5 labels）..."
     bash "$REPO_DIR/scripts/install-launchd.sh"
 
     echo "✅ 部署完成"

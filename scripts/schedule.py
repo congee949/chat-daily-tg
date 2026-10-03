@@ -78,8 +78,12 @@ def entries_for(key: str, cfg: dict) -> list[dict]:
             out.append({"Hour": h, "Minute": m})
         return out
     if key == "growth-weekly":
-        h, m = _hm(node["time"])
-        return [{"Weekday": int(node["weekday"]), "Hour": h, "Minute": m}]
+        items = node if isinstance(node, list) else [node]
+        out = []
+        for item in items:
+            h, m = _hm(item["time"])
+            out.append({"Weekday": int(item["weekday"]), "Hour": h, "Minute": m})
+        return out
     raise KeyError(key)
 
 

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>REPLACE_WITH_HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>CHAT_DAILY_DATA_DIR</key>
+		<string>REPLACE_WITH_DATA_DIR</string>
+		<!-- Paired evaluation is deliberately opt-in. Set this to 1 only
+		     together with CHAT_DAILY_KNOWLEDGE_FROZEN_GOLD in the installed,
+		     local plist after a real reviewed >=200-row gold set exists. -->
+		<key>CHAT_DAILY_KNOWLEDGE_PAIRED_EVALUATION_ENABLED</key>
+		<string>0</string>
+		<key>CHAT_DAILY_KNOWLEDGE_FROZEN_GOLD</key>
+		<string></string>
+	</dict>
+	<key>Label</key>
+	<string>com.chat-daily-tg.knowledge-shadow</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
+		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_knowledge_guarded.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Fire frequently enough to retry failed probes; due_gate schedules the
+	     next successful observation exactly one hour later. -->
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>StandardErrorPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/knowledge-shadow-stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>REPLACE_WITH_DATA_DIR/logs/knowledge-shadow-stdout.log</string>
+	<key>WorkingDirectory</key>
+	<string>REPLACE_WITH_PROJECT_DIR</string>
+</dict>
+</plist>

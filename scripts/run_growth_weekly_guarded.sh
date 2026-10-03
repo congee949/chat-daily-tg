@@ -27,7 +27,10 @@ fi
 
 guard_setup_env
 
-/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --growth-weekly --model llm
+# Keep the weekly report on the same CLIProxyAPI-backed Sol model as the
+# daily growth job. `llm` is the legacy alias and may point at DeepSeek in
+# production.
+/usr/bin/caffeinate -is "$PY" "$PROJECT/run_daily.py" --growth-weekly --model sol
 rc=$?
 if [ "$rc" -ne 0 ]; then
   guard_notify "成长周报失败 exit=$rc，详见 $DATA_DIR/logs/growth-weekly-$(date +%F).log"

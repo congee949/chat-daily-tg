@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Offline calibration for the L2 topic-dedup layer — run BEFORE any enforcement.
+"""Exploratory L2 topic-dedup analysis; never an enforce calibration receipt.
 
 Measures the REAL same-event collision rate on the delivered surface (the
 Telegram notification forum group -1004424841223, where ALL producers' pushes
-land) and produces a human-review markdown report that sets candidate_min_sim /
-strong_sim and resolves the design's stated unknowns:
+land) and produces a non-authoritative human-review markdown report with
+historical threshold suggestions and unresolved design questions:
 
   - how are sendRichMessage posts / macrumors captions stored (corpus samples)
   - does sender_name separate producers for free (producer x sender cross-tab)
@@ -18,7 +18,7 @@ Stages (each individually skippable, each prints progress):
   4. embedding            (--no-embed to skip; spend requires --yes/confirm)
   5. all-pairs cosine     rolling 48h windows, cross-producer/cross-sender only
   6. judge sample         (--judge opt-in; spend requires --yes/confirm)
-  7. report file          ~/chat-daily/state/topic-dedup-calibration-<date>.md
+  7. exploratory report   ~/chat-daily/state/topic-dedup-exploratory-<date>.md
 
 Read-only by construction except the report file and the tg-cli sync: no
 SeenStore writes, no sends, and NO DeliveredIndex writes — messages.db is read
@@ -32,7 +32,7 @@ Once the account (@Congee123) is added to the group and synced, the same
 script runs end-to-end without edits.
 
 Usage:
-  .venv/bin/python scripts/calibrate_topic_dedup.py                 # full run
+  .venv/bin/python scripts/calibrate_topic_dedup.py                 # exploratory run
   .venv/bin/python scripts/calibrate_topic_dedup.py --no-sync --no-embed
   .venv/bin/python scripts/calibrate_topic_dedup.py --judge --yes   # incl. LLM
 """
@@ -87,6 +87,12 @@ BANDS: tuple[tuple[float, float], ...] = ((0.75, 0.80), (0.80, 0.87), (0.87, 0.9
 # makes sub-band pairs vanish from the report with no error.
 assert DETAIL_MIN_SIM == BANDS[0][0], "DETAIL_MIN_SIM must equal BANDS[0].lo"
 JUDGE_SAMPLE_PER_BAND = 8  # ~30 total across 4 bands
+EXPLORATORY_NOTICE = (
+    "> **NON-AUTHORITATIVE / REPORT-ONLY.** This historical small-sample analysis "
+    "is not a `chatdaily.l2-calibration-receipt.v1` artifact and cannot enable "
+    "L2 enforce. It is not bound to the required 200 labeled queries, seven-day "
+    "shadow evidence, generation context, reranker, or judge identity."
+)
 
 EXIT_OK = 0
 EXIT_PRECONDITION = 2
@@ -337,15 +343,13 @@ def confirm_spend(what: str, args: argparse.Namespace) -> bool:
 
 
 def build_embedder():
-    """Construct GeminiEmbedder exactly the way run_daily does (run_daily.py
+    """Construct the configured embedder exactly the way run_daily does (run_daily.py
     embedding stage): repo loaders for ~/chat-daily/.env + config.yaml, then
     cfg.models.embedding drives every constructor argument."""
     from chat_daily_tg.config import load_config
     from chat_daily_tg.env import load_env_file
-    from chat_daily_tg.evidence_index import GeminiEmbedder
+    from chat_daily_tg.evidence_index import build_embedder as build_configured_embedder
     from chat_daily_tg.paths import CONFIG_PATH, DATA_DIR
-    import os
-
     load_env_file(DATA_DIR / ".env")
     cfg = load_config(CONFIG_PATH)
     embedding_model = cfg.models.embedding if cfg.models else None
@@ -355,7 +359,7 @@ def build_embedder():
         print("  note: models.embedding.enabled is false in config — calibration proceeds anyway")
     # Shared factory: calibration must embed EXACTLY like the shipped gate,
     # or the measured thresholds stop describing production similarity.
-    return cfg, GeminiEmbedder.from_config(embedding_model)
+    return cfg, build_configured_embedder(embedding_model)
 
 
 def stage_embed(rep: Report, msgs: list[Msg], args: argparse.Namespace):
@@ -668,8 +672,8 @@ def write_report(rep: Report, args: argparse.Namespace) -> Path:
 
     out_dir = args.report_dir if args.report_dir else STATE_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"topic-dedup-calibration-{datetime.now(LOCAL_TZ):%Y-%m-%d}.md"
-    path.write_text(rep.render(), encoding="utf-8")
+    path = out_dir / f"topic-dedup-exploratory-{datetime.now(LOCAL_TZ):%Y-%m-%d}.md"
+    path.write_text(EXPLORATORY_NOTICE + "\n\n" + rep.render(), encoding="utf-8")
     return path
 
 
@@ -739,7 +743,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_PRECONDITION
 
     rep = Report()
-    rep.md_only(f"# L2 topic-dedup calibration — {datetime.now(LOCAL_TZ):%Y-%m-%d %H:%M %Z}")
+    rep.md_only(f"# L2 topic-dedup exploratory analysis — {datetime.now(LOCAL_TZ):%Y-%m-%d %H:%M %Z}")
     rep.md_only("")
     rep.md_only(f"- forum group: `{FORUM_CHAT_ID}` · db: `{db_path}` · window: {args.days}d")
     rep.md_only(f"- flags: no_sync={args.no_sync} no_embed={args.no_embed} judge={args.judge} "
@@ -759,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\n== stage 7/7: report ==")
     stage_checklist(rep, msgs, details, judge_results, args.days)
     path = write_report(rep, args)
-    print(f"\nreport written: {path}")
+    print(f"\nexploratory report written (not an enforce receipt): {path}")
     return EXIT_OK
 
 

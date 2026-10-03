@@ -11,8 +11,7 @@
 	<string>com.chat-daily-tg.ledger-sync</string>
 	<key>ProgramArguments</key>
 	<array>
-		<!-- Pull r4s media_sent_ledger.jsonl every minute so Podcast4bot on Mac
-		     can resolve 👍 reactions on subscription cards written on r4s. -->
+		<!-- Push the Mac sent-content ledger to the R4S Hermes reader every minute. -->
 		<string>REPLACE_WITH_PROJECT_DIR/bin/cdrun-bash</string>
 		<string>REPLACE_WITH_PROJECT_DIR/scripts/run_ledger_sync_guarded.sh</string>
 	</array>

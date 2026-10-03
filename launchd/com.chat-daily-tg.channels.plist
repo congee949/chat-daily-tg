@@ -25,6 +25,8 @@
 	<string>REPLACE_WITH_DATA_DIR/logs/channels-stdout.log</string>
 	<key>StartCalendarInterval</key>
 	<array>
+		<dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
 		<dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
 		<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
 		<dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>

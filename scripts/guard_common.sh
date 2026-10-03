@@ -21,43 +21,88 @@ guard_setup_env() {
   # never fires in tests/ad-hoc runs).
   export CHAT_DAILY_TG_ALERTS=1
   export CHAT_DAILY_ALERT_PROXY="$PROXY"
+  # kabi-tg-cli/Telethon does not read HTTP(S)_PROXY.  Give its dedicated
+  # proxy setting the same known-good local endpoint so MTProto fetches do not
+  # silently depend on Shadowrocket's current TUN mode.  Preserve an explicit
+  # operator override for environments that need a different Telegram route.
+  export TG_CLI_PROXY="${TG_CLI_PROXY:-$PROXY}"
 }
 
 # Alert: offline macOS notification first (never depends on network), then a
 # best-effort Telegram message over the proxy (TG is unreachable direct here).
+#
+# Token must NOT appear on curl argv (ps/audit visibility). python3 reads
+# $DATA_DIR/.env itself; only non-secret paths/title/msg ride argv.
 guard_notify() {
   local msg="$1"
   osascript -e "display notification \"${msg//\"/ }\" with title \"${GUARD_TITLE}\"" 2>/dev/null || true
   if [ -f "$DATA_DIR/.env" ]; then
-    local tok cid thread tgt
-    tok=$(grep -m1 '^TG_BOT_TOKEN=' "$DATA_DIR/.env" | cut -d= -f2-)
-    cid=$(grep -m1 '^TG_CHAT_ID=' "$DATA_DIR/.env" | cut -d= -f2-)
-    # Route to the 警告/alert forum topic when configured; fall back to DM cid.
-    tgt=$(/usr/bin/python3 - "$cid" <<'PY' 2>/dev/null
-import json, os, sys
-dm = sys.argv[1]
+    # Args: env_path, proxy, title, msg, targets_json (optional path).
+    # Bot token is loaded inside Python from env_path — never interpolated here.
+    /usr/bin/python3 - "$DATA_DIR/.env" "${PROXY:-}" "$GUARD_TITLE" "$msg" \
+      "${HOME}/qwenproxy/.tg-notify-targets.json" <<'PY' >/dev/null 2>&1 || true
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+env_path, proxy, title, msg, targets_path = sys.argv[1:6]
+
+def _load_env(path):
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+env = _load_env(env_path)
+tok = env.get("TG_BOT_TOKEN") or ""
+cid = env.get("TG_CHAT_ID") or ""
+thread = ""
+
 try:
-    t = json.load(open(os.path.expanduser("~/qwenproxy/.tg-notify-targets.json")))
-    cid = t.get("chat_id", dm) or dm
-    tid = (t.get("topics", {}) or {}).get("alert") or ""
+    with open(os.path.expanduser(targets_path), "r", encoding="utf-8") as fh:
+        t = json.load(fh)
+    cid = str(t.get("chat_id") or cid or "")
+    thread = str((t.get("topics") or {}).get("alert") or "")
 except Exception:
-    cid, tid = dm, ""
-print(cid)
-print(tid)
+    pass
+
+if not tok or not cid:
+    sys.exit(0)
+
+# Build URL inside Python so the token never lands on a shell/curl argv.
+url = "https://api.telegram.org/bot{}/sendMessage".format(tok)
+form = {
+    "chat_id": cid,
+    "text": "⚠️ {}: {}".format(title, msg),
+}
+if thread:
+    form["message_thread_id"] = thread
+data = urllib.parse.urlencode(form).encode("utf-8")
+
+handlers = []
+if proxy:
+    handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+else:
+    handlers.append(urllib.request.ProxyHandler({}))
+opener = urllib.request.build_opener(*handlers)
+req = urllib.request.Request(url, data=data, method="POST")
+try:
+    with opener.open(req, timeout=15) as resp:
+        resp.read()
+except Exception:
+    sys.exit(0)
 PY
-)
-    if [ -n "$tgt" ]; then
-      { IFS= read -r cid; IFS= read -r thread; } <<< "$tgt"
-    else
-      thread=""
-    fi
-    if [ -n "$tok" ] && [ -n "$cid" ]; then
-      curl -s --max-time 15 --proxy "$PROXY" \
-        "https://api.telegram.org/bot${tok}/sendMessage" \
-        --data-urlencode "chat_id=${cid}" \
-        ${thread:+--data-urlencode "message_thread_id=${thread}"} \
-        --data-urlencode "text=⚠️ ${GUARD_TITLE}: ${msg}" >/dev/null 2>&1 || true
-    fi
   fi
   echo "$(date '+%F %T') ALERT: $msg" >> "$LOG"
 }

@@ -20,6 +20,8 @@ agent:
 # 避免与整点墙钟对齐；CHAT_DAILY_NO_JITTER=1 可跳过。
 # 09:00 补档缩短 06→10 的 4h 空窗（早间资讯高峰）。
 channels:
+  - "00:00"
+  - "02:00"
   - "06:00"
   - "09:00"
   - "10:00"
@@ -36,7 +38,13 @@ growth:
   - "15:30"
   - "21:30"
 
-# 周报 + rubric 合并。weekday 用 launchd 约定：0/7=周日，6=周六。
+# 周报 + rubric 合并。首次成功会写 weekly marker，后续触发在任何 LLM/
+# Telegram 调用前直接退出；多触发只用于跨过短时模型/网络故障。
+# weekday 用 launchd 约定：0/7=周日，6=周六。
 growth-weekly:
-  weekday: 6
-  time: "09:45"
+  - weekday: 6
+    time: "09:45"
+  - weekday: 6
+    time: "15:45"
+  - weekday: 0
+    time: "09:45"

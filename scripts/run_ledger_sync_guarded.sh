@@ -1,12 +1,12 @@
 #!/bin/bash
-# run_ledger_sync_guarded.sh — launchd wrapper for media_sent_ledger pull (r4s → Mac).
+# run_ledger_sync_guarded.sh — launchd wrapper for sent-content push.
 #
 # Thin guard: only timestamps + exit code into the daily guard log. No venv /
 # caffeinate / TG alert — this is a short rsync; failures are transient SSH
 # blips more often than real outages, and StartInterval=60 would spam if we
 # alerted every miss. Inspect guard-ledger-sync-*.log / ledger-sync-*.log.
 #
-# Overridable: CHAT_DAILY_DATA_DIR, LEDGER_SYNC_* (passed through to sync script).
+# Overridable: CHAT_DAILY_DATA_DIR, SENT_CONTENT_SYNC_* (passed through to sync script).
 set -uo pipefail
 
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,7 @@ mkdir -p "$DATA_DIR/logs"
 
 {
   echo "$(date '+%F %T') start ledger-sync"
-  "$PROJECT/scripts/sync_media_ledger.sh"
+  "$PROJECT/scripts/sync_sent_content_ledger.sh"
   rc=$?
   echo "$(date '+%F %T') end ledger-sync exit=$rc"
   exit "$rc"

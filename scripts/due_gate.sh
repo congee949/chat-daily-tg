@@ -30,6 +30,9 @@ set -u
 DATA_DIR="${CHAT_DAILY_DATA_DIR:-/root/chat-daily}"
 STATE_DIR="$DATA_DIR/state"
 LOG_DIR="$DATA_DIR/logs"
+# Overlay ENOSPC (r4s root ~1G) must not leave the gate open forever: tmpfs
+# can still hold the next-due stamp so */5 stops hammering after a success.
+FALLBACK_DIR="${CHAT_DAILY_DUE_FALLBACK_DIR:-/tmp/chat-daily-due}"
 
 usage() {
   echo "usage: due_gate.sh check <name>" >&2
@@ -40,6 +43,29 @@ usage() {
 stamp_path() {
   # $1 = name
   echo "$STATE_DIR/due-$1.next"
+}
+
+fallback_stamp_path() {
+  # $1 = name
+  echo "$FALLBACK_DIR/due-$1.next"
+}
+
+# Write epoch seconds atomically. $1 = dest path, $2 = value.
+write_stamp() {
+  dest="$1"
+  value="$2"
+  parent=$(dirname "$dest")
+  mkdir -p "$parent" 2>/dev/null || return 1
+  tmp="$dest.tmp.$$"
+  if ! printf '%s\n' "$value" > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$tmp" "$dest"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
 }
 
 # Return 0 if $1 is a pure non-negative integer (digits only).
@@ -53,24 +79,22 @@ is_uint() {
 cmd_check() {
   name="${1:-}"
   [ -n "$name" ] || usage
-  stamp="$(stamp_path "$name")"
-
-  # Missing stamp → due (first run / after wipe).
-  if [ ! -f "$stamp" ]; then
-    exit 0
-  fi
-
-  due=$(cat "$stamp" 2>/dev/null || true)
-  # Corrupt / empty stamp → treat as due (self-heal on next success schedule).
-  if ! is_uint "$due"; then
-    exit 0
-  fi
 
   now=$(date +%s)
-  if [ "$now" -ge "$due" ]; then
-    exit 0
-  fi
-  exit 1
+  # Any valid future stamp (primary or tmpfs fallback) means not due. A stale
+  # primary left behind after ENOSPC must not override a newer fallback.
+  for stamp in "$(stamp_path "$name")" "$(fallback_stamp_path "$name")"; do
+    [ -f "$stamp" ] || continue
+    due=$(cat "$stamp" 2>/dev/null || true)
+    is_uint "$due" || continue
+    found=1
+    if [ "$now" -lt "$due" ]; then
+      exit 1
+    fi
+  done
+
+  # Missing / corrupt / all-past → due (first run, after wipe, or retry).
+  exit 0
 }
 
 cmd_schedule() {
@@ -101,24 +125,22 @@ cmd_schedule() {
   now=$(date +%s)
   next=$((now + delay))
   stamp="$(stamp_path "$name")"
-  tmp="$stamp.tmp.$$"
+  fallback="$(fallback_stamp_path "$name")"
 
-  # Atomic write: tmp + mv
-  if ! printf '%s\n' "$next" > "$tmp"; then
-    echo "due_gate: cannot write $tmp" >&2
-    rm -f "$tmp" 2>/dev/null || true
-    exit 1
-  fi
-  if ! mv "$tmp" "$stamp"; then
-    echo "due_gate: cannot mv $tmp -> $stamp" >&2
-    rm -f "$tmp" 2>/dev/null || true
-    exit 1
+  dest="$stamp"
+  if ! write_stamp "$stamp" "$next"; then
+    dest="$fallback"
+    if ! write_stamp "$fallback" "$next"; then
+      echo "due_gate: cannot write $stamp or $fallback" >&2
+      exit 1
+    fi
+    echo "due_gate: primary stamp unwritable, used fallback $fallback" >&2
   fi
 
   # Best-effort schedule log (CST-8 for human-readable day file).
   log="$LOG_DIR/due-gate-$(TZ=CST-8 date +%F).log"
   {
-    echo "$(TZ=CST-8 date '+%F %T') schedule name=$name delay=${delay}s next=$next min=$min_s max=$max_s"
+    echo "$(TZ=CST-8 date '+%F %T') schedule name=$name delay=${delay}s next=$next dest=$dest min=$min_s max=$max_s"
   } >> "$log" 2>/dev/null || true
 
   exit 0

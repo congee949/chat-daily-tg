@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -89,14 +90,28 @@ def _extract_candidate_topics(markdown: str, group_name: str) -> list[TopicSigna
     return topics
 
 
-def _similarity(a: str, b: str) -> float:
-    """Compute text similarity between two topic signatures."""
-    na, nb = _normalize(a), _normalize(b)
+def _pair_similarity(na: str, ca: Counter, nb: str, cb: Counter, threshold: float) -> float:
+    """Similarity of two pre-normalized topic signatures.
+
+    Semantics: empty side → 0.0, containment → 0.92, else
+    SequenceMatcher(None, na, nb).ratio(). Two provable upper bounds of
+    ratio() — real_quick_ratio (length balance) and quick_ratio (multiset
+    overlap, via the precomputed Counters) — short-circuit to 0.0 when they
+    already sit below the threshold, so the >= threshold verdict never
+    changes while most pairs skip the quadratic matcher.
+    """
     if not na or not nb:
         return 0.0
     # Fast containment check
     if na in nb or nb in na:
         return 0.92
+    la, lb = len(na), len(nb)
+    total = la + lb
+    if 2.0 * min(la, lb) / total < threshold:
+        return 0.0
+    overlap = sum(min(count, cb.get(ch, 0)) for ch, count in ca.items())
+    if 2.0 * overlap / total < threshold:
+        return 0.0
     return difflib.SequenceMatcher(None, na, nb).ratio()
 
 
@@ -116,6 +131,10 @@ def cluster_cross_group_topics(
     if not all_topics:
         return []
 
+    # Normalization (4 regex passes) runs once per topic, not once per pair.
+    norms = [_normalize(t.text) for t in all_topics]
+    counts = [Counter(n) for n in norms]
+
     # Greedy clustering
     clusters: list[list[TopicSignature]] = []
     used = set()
@@ -125,10 +144,12 @@ def cluster_cross_group_topics(
             continue
         cluster = [topic]
         used.add(i)
+        na, ca = norms[i], counts[i]
         for j, other in enumerate(all_topics):
             if j in used or j == i:
                 continue
-            if _similarity(topic.text, other.text) >= similarity_threshold:
+            sim = _pair_similarity(na, ca, norms[j], counts[j], similarity_threshold)
+            if sim >= similarity_threshold:
                 cluster.append(other)
                 used.add(j)
         clusters.append(cluster)

@@ -293,6 +293,16 @@ def mark_sent(db_path: Path, seg_id: str, style: str, sent_at: str | None = None
         conn.close()
 
 
+
+def mark_ambiguous(db_path: Path, seg_id: str, *, run_id: str | None = None) -> bool:
+    """Terminalize a segment whose Telegram outcome is unknown.
+
+    Counts as ``sent`` with style ``ambiguous`` so claim recovery cannot re-deliver
+    the same card automatically. Manual review remains the recovery hatch.
+    """
+    return mark_sent(db_path, seg_id, style="ambiguous", run_id=run_id)
+
+
 def sent_count_on(db_path: Path, date_str: str) -> int:
     """Cards already pushed on a given Beijing day (daily-quota guard)."""
     conn = connect(db_path)
@@ -471,3 +481,56 @@ def write_slice_file(seg: GrowthSegment, rows: list, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path
+
+
+def review_ambiguous(db_path: Path, seg_id: str, *, expected_sent_at: str,
+                     decision: str, actor: str, evidence: dict) -> dict:
+    """Review one frozen ambiguous attempt and optionally requeue its logical card.
+
+    A retry request is distinct from an absence finding. The original attempt
+    snapshot and every decision stay in the same SQLite transaction as changes.
+    """
+    if decision not in {'confirmed_sent','confirmed_absent','retry_requested'} or not actor or not expected_sent_at:
+        raise ValueError('explicit reviewer, decision and original send time required')
+    if not isinstance(evidence,dict) or not evidence.get('chat_id'):
+        raise ValueError('verified historical target required')
+    if decision=='confirmed_sent':
+        ids=evidence.get('message_ids')
+        if not isinstance(ids,list) or not ids or any(type(i) is not int or i<=0 for i in ids) or not evidence.get('telegram_reference'):
+            raise ValueError('actual Telegram message references required')
+    elif decision=='confirmed_absent' and not evidence.get('checked_scope'):
+        raise ValueError('historical chat/time/message scope required')
+    elif decision=='retry_requested' and not evidence.get('reason'):
+        raise ValueError('explicit retry reason required')
+    conn=connect(db_path)
+    try:
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('''CREATE TABLE IF NOT EXISTS growth_delivery_reviews (
+                id INTEGER PRIMARY KEY, segment_id TEXT NOT NULL, attempt_sent_at TEXT NOT NULL,
+                decision TEXT NOT NULL, actor TEXT NOT NULL, evidence TEXT NOT NULL,
+                original_snapshot TEXT NOT NULL, reviewed_at TEXT NOT NULL)''')
+            row=conn.execute('SELECT * FROM growth_segments WHERE id=?',(seg_id,)).fetchone()
+            if row is None or row['status']!='sent' or row['sent_style']!='ambiguous' or row['sent_at']!=expected_sent_at:
+                raise ValueError('ambiguous attempt changed or is no longer pending review')
+            prior=conn.execute('SELECT decision,evidence FROM growth_delivery_reviews WHERE segment_id=? AND attempt_sent_at=? ORDER BY id DESC LIMIT 1',
+                               (seg_id,expected_sent_at)).fetchone()
+            if decision=='retry_requested':
+                if prior is None or prior['decision']!='confirmed_absent':
+                    raise ValueError('confirm absence before requesting retry')
+                if str(json.loads(prior['evidence'])['chat_id'])!=str(evidence['chat_id']):
+                    raise ValueError('retry target differs from reviewed target')
+            elif prior is not None:
+                raise ValueError('this attempt already has a review decision')
+            conn.execute('INSERT INTO growth_delivery_reviews(segment_id,attempt_sent_at,decision,actor,evidence,original_snapshot,reviewed_at) VALUES (?,?,?,?,?,?,?)',
+                         (seg_id,expected_sent_at,decision,actor,json.dumps(evidence,ensure_ascii=False),
+                          json.dumps(dict(row),ensure_ascii=False),_now_iso()))
+            if decision=='confirmed_sent':
+                conn.execute("UPDATE growth_segments SET sent_style='reviewed-confirmed' WHERE id=?",(seg_id,))
+            elif decision=='retry_requested':
+                conn.execute("UPDATE growth_segments SET status='pending',sent_at=NULL,sent_style=NULL,claim_run_id=NULL,claim_until=NULL WHERE id=?",(seg_id,))
+        return {'segment_id':seg_id,'attempt_sent_at':expected_sent_at,'decision':decision,
+                'state':'pending' if decision=='retry_requested' else 'sent',
+                'network_send_performed':False}
+    finally:
+        conn.close()

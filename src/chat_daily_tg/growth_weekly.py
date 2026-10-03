@@ -1,9 +1,9 @@
 """Weekly growth-mining job: drain DM feedback, fold it into the judge rubric,
 and build the Saturday HTML report.
 
-The bot is send-only, and Telegram's getUpdates only retains updates ~24h, so
-feedback DMs are polled DAILY (the daily growth job calls poll_dm_feedback at
-its tail) into a durable JSONL inbox. This module's weekly job then consumes
+Feedback DMs are collected daily into a durable JSONL inbox. When the local
+X review relay is enabled, BWG is the sole getUpdates consumer and this module
+reads its owner-filtered relay over SSH. Otherwise it polls Telegram directly. This module's weekly job then consumes
 that inbox, merges the feedback into a versioned rubric, and assembles the
 report; run_daily.py (another lane) is responsible for actually sending it.
 """
@@ -13,6 +13,10 @@ from datetime import datetime
 from pathlib import Path
 import json
 import logging
+import os
+import re
+import shlex
+import subprocess
 
 import httpx
 
@@ -24,7 +28,6 @@ from chat_daily_tg.growth_store import (
     mined_days_summary,
     queue_stats,
     recent_sent,
-    rubric_version_of,
 )
 from chat_daily_tg.tg_sender import escape_html
 
@@ -46,9 +49,96 @@ def _write_offset(offset_path: Path, offset: int) -> None:
     offset_path.write_text(str(offset), encoding="utf-8")
 
 
+def _feedback_relay_config_path() -> Path:
+    return Path.home() / "chat-daily" / "state" / "x-review-feedback-relay.json"
+
+
+def _poll_feedback_relay(config: dict, dm_chat_id: str, *,
+                         offset_path: Path, inbox_path: Path, reply_intake=None) -> int:
+    """Read owner-filtered updates; only the BWG bot consumes getUpdates."""
+    owner = str(dm_chat_id)
+    if not re.fullmatch(r"[1-9][0-9]*", owner):
+        raise ValueError("relay requires a private owner chat id")
+    if "owner" in config and str(config["owner"]) != owner:
+        raise ValueError("relay owner does not match growth DM")
+    host = config.get("host", "bwg")
+    if not isinstance(host, str) or not re.fullmatch(
+        r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*", host
+    ):
+        raise ValueError("invalid relay SSH host")
+    project = config.get("project_dir", "/root/x_monitor")
+    state = config.get("state_path", "/root/x_monitor/state/x-review-feedback.sqlite3")
+    for value in (project, state):
+        if (not isinstance(value, str) or not value.startswith("/")
+                or any(ord(char) < 32 for char in value)):
+            raise ValueError("relay paths must be absolute")
+    high_water = _read_offset(offset_path)
+    command = "cd " + shlex.quote(project) + " && " + shlex.join([
+        "python3", "x_review_bot.py", "--state", state, "relay",
+        "--after", str(high_water), "--owner", owner,
+    ])
+    if reply_intake is not None:
+        from chat_daily_tg.feedback_relay_reader import READER_SCRIPT
+        command = shlex.join(["python3", "-c", READER_SCRIPT, state, str(high_water), owner,
+                              json.dumps(list(reply_intake.targets))])
+    response = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, command],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    updates = json.loads(response.stdout)
+    if not isinstance(updates, list):
+        raise ValueError("relay must return an array")
+    entries: dict[int, dict] = {}
+    reply_ids = []
+    for row in updates:
+        if not isinstance(row, dict):
+            raise ValueError("relay row must be an object")
+        if reply_intake is not None and isinstance(row.get("message"), dict):
+            uid = row.get("update_id")
+            if type(uid) is not int or uid < 0:
+                raise ValueError("invalid relay envelope id")
+            if uid > high_water:
+                reply_intake.accept(row)
+                reply_ids.append(uid)
+            continue
+        uid, mid, date, text = (row.get(key) for key in ("update_id", "id", "date", "text"))
+        if (type(uid) is not int or uid < 0 or type(mid) is not int or mid < 1
+                or type(date) is not int or date < 0 or not isinstance(text, str)):
+            raise ValueError("invalid relay message")
+        # Current relay checks sender + chat + private type server-side. Keep
+        # this check for envelopes that also expose their owner coordinates.
+        for field in ("owner", "chat_id", "from_id"):
+            if field in row and str(row[field]) != owner:
+                raise ValueError("relay returned another owner's message")
+        if row.get("chat_type", "private") != "private":
+            raise ValueError("relay returned a non-private message")
+        if uid <= high_water:
+            continue
+        entry = {"update_id": uid, "date": date, "text": text}
+        if uid in entries and entries[uid] != entry:
+            raise ValueError("relay returned conflicting update ids")
+        entries[uid] = entry
+    if not entries and not reply_ids:
+        return 0
+    # Validate the complete response before writing. Persist the inbox before
+    # its cursor; a crash may replay lines, which consume_inbox already dedupes.
+    inbox_path.parent.mkdir(parents=True, exist_ok=True)
+    with inbox_path.open("a", encoding="utf-8") as fh:
+        for uid in sorted(entries):
+            fh.write(json.dumps(entries[uid], ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    _write_offset(offset_path, max([*entries, *reply_ids]))
+    return len(entries)
+
+
 def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
-                      offset_path: Path, inbox_path: Path) -> int:
-    """Drain getUpdates into the durable feedback inbox.
+                      offset_path: Path, inbox_path: Path, reply_intake=None) -> int:
+    """Drain owner feedback from the configured relay, or directly from Telegram.
+
+    The optional ~/chat-daily/state/x-review-feedback-relay.json config uses
+    enabled, host, project_dir, state_path and owner. Enabled relay failures
+    preserve the local cursor and never fall back to direct getUpdates.
 
     Every update (including ones outside the DM chat, and ones with no text)
     advances the offset high-water mark so it is never re-delivered; only DM
@@ -59,6 +149,34 @@ def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
     """
     offset_path = Path(offset_path)
     inbox_path = Path(inbox_path)
+    if reply_intake is None:
+        from chat_daily_tg.content_feedback import configured_intake
+        reply_intake = configured_intake(bot_token, dm_chat_id)
+    try:
+        config_path = _feedback_relay_config_path()
+        try:
+            config_stat = config_path.lstat()
+        except FileNotFoundError:
+            relay = None
+        else:
+            if config_path.is_symlink() or config_stat.st_uid != os.getuid():
+                raise ValueError("untrusted feedback relay config")
+            relay = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(relay, dict) or type(relay.get("enabled", False)) is not bool:
+                raise ValueError("invalid feedback relay config")
+        if relay is not None and relay.get("enabled") is True:
+            count = _poll_feedback_relay(
+                relay, dm_chat_id, offset_path=offset_path, inbox_path=inbox_path, reply_intake=reply_intake)
+            if reply_intake is not None:
+                from chat_daily_tg.content_feedback import drain_configured
+                drain_configured(reply_intake, bot_token)
+            return count
+    except Exception as exc:
+        # Never fall back to getUpdates when a relay is configured or broken:
+        # doing so would steal review callbacks from the sole BWG consumer.
+        log.warning("growth feedback relay unavailable; offset preserved error_type=%s",
+                    type(exc).__name__)
+        return 0
     high_water = _read_offset(offset_path)
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
     total = 0
@@ -81,13 +199,25 @@ def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
             lines: list[str] = []
             for update in updates:
                 uid = update.get("update_id")
-                if uid is not None:
-                    high_water = max(high_water, uid)
+                if type(uid) is not int or uid < 0:
+                    raise ValueError("invalid Telegram update id; cursor preserved")
+                high_water = max(high_water, uid)
                 message = update.get("message")
                 if not message or "text" not in message:
                     continue
+                if reply_intake is not None:
+                    from chat_daily_tg.content_feedback import COMMANDS
+                    if (message.get("reply_to_message")
+                            and message.get("text", "").strip() in COMMANDS):
+                        reply_intake.accept(update)
+                        # Rejected target/owner replies must not fall through into DM preferences.
+                        continue
                 chat = message.get("chat") or {}
-                if str(chat.get("id")) != str(dm_chat_id):
+                sender = message.get("from") or {}
+                if (str(chat.get("id")) != str(dm_chat_id)
+                        or chat.get("type") != "private"
+                        or sender.get("is_bot") is True
+                        or str(sender.get("id")) != str(dm_chat_id)):
                     continue
                 lines.append(json.dumps(
                     {"update_id": uid, "date": message.get("date"), "text": message["text"]},
@@ -97,6 +227,8 @@ def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
                 with inbox_path.open("a", encoding="utf-8") as fh:
                     for line in lines:
                         fh.write(line + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 total += len(lines)
             # Persisted after every batch (not just once at the end) so offset
             # progress survives a crash on the NEXT iteration's request.
@@ -106,6 +238,9 @@ def poll_dm_feedback(bot_token: str, dm_chat_id: str, *,
                 # would loop forever re-fetching the same page — bail out.
                 log.error("getUpdates batch advanced no offset, aborting poll")
                 break
+    if reply_intake is not None:
+        from chat_daily_tg.content_feedback import drain_configured
+        drain_configured(reply_intake, bot_token)
     return total
 
 
@@ -188,8 +323,8 @@ def _enforce_rubric_header(text: str, expected_header: str) -> str:
 
 
 def merge_rubric(llm, rubric_path: Path, history_dir: Path,
-                  feedback_texts: list[str]) -> tuple[str, str, bool]:
-    """Fold this week's DM feedback into the judge rubric via one LLM call."""
+                  feedback_texts: list[str], *, feedback_ids: list[str] | None = None) -> tuple[str, str, bool]:
+    """Generate a candidate; keep the active rubric until evidence-bound review."""
     rubric_path = Path(rubric_path)
     history_dir = Path(history_dir)
     current_text, current_version = ensure_rubric(rubric_path)
@@ -212,13 +347,16 @@ def merge_rubric(llm, rubric_path: Path, history_dir: Path,
         return current_text, current_version, False
 
     new_text = _enforce_rubric_header(content.strip("\n"), expected_header)
-    resolved_version = rubric_version_of(new_text)
 
-    history_dir.mkdir(parents=True, exist_ok=True)
-    (history_dir / f"rubric-{current_version}-{today}.md").write_text(current_text, encoding="utf-8")
-    rubric_path.write_text(new_text if new_text.endswith("\n") else new_text + "\n", encoding="utf-8")
-
-    return new_text, resolved_version, True
+    from chat_daily_tg.rubric_candidates import RubricCandidates
+    from chat_daily_tg.call_receipts import digest
+    candidate = RubricCandidates(history_dir / "candidates").draft(
+        parent=current_text, text=new_text if new_text.endswith("\n") else new_text + "\n",
+        feedback_ids=feedback_ids or ["legacy-feedback:" + digest(text) for text in feedback_texts],
+        reason="成长反馈生成候选，等待固定样本回归与人工复审",
+    )
+    log.info("rubric candidate created id=%s; active=%s", candidate["id"], current_version)
+    return current_text, current_version, False
 
 
 # ------------------------------------------------------------------ weekly report
@@ -250,7 +388,7 @@ def _summarize_recent(llm, segments: list) -> str:
 
 
 def build_weekly_report(store_db: Path, chat_id: int, llm,
-                         rubric_version: str, rubric_changed: bool) -> str:
+                         rubric_version: str, rubric_changed: bool, *, candidate_root: Path | None = None) -> str:
     """Assemble the Saturday DM report from growth_store data. Returns Telegram
     HTML; the caller sends it (e.g. TelegramSender.send(..., parse_mode="HTML"))."""
     store_db = Path(store_db)
@@ -298,5 +436,22 @@ def build_weekly_report(store_db: Path, chat_id: int, llm,
     if rubric_changed:
         rubric_line += "（本周已按你的反馈更新）"
     lines.append(rubric_line)
-
+    if candidate_root is not None:
+        try:
+            from chat_daily_tg.rubric_candidates import candidate_summaries
+            candidates = candidate_summaries(candidate_root)
+            if candidates:
+                lines.extend(["", "<b>偏好候选复审</b>"])
+            for candidate in candidates:
+                lines.append(escape_html(
+                    f"候选 {candidate['id'][:12]} · {candidate['state']} · "
+                    f"新增 {candidate['added_lines']} 行 / 删除 {candidate['removed_lines']} 行"))
+                lines.append("本地差异：" + escape_html(candidate['diff_path']))
+                lines.append("本地候选：" + escape_html(candidate['candidate_path']))
+                if candidate['evaluation_path']:
+                    lines.append("评测：" + escape_html(candidate['evaluation_path']))
+                else:
+                    lines.append("评测尚未完成或文件校验未通过")
+        except Exception as exc:
+            log.warning("rubric candidate report unavailable error_type=%s", type(exc).__name__)
     return "\n".join(lines)

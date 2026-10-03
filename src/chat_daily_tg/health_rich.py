@@ -1,7 +1,7 @@
 """Telegram Bot API 10.2 rich-markdown presentation for a HealthReport."""
 from __future__ import annotations
 
-from chat_daily_tg.health_briefing import HealthReport, _progress
+from chat_daily_tg.health_briefing import HealthReport, SLEEP_PENDING_MESSAGE, _progress
 
 
 def _duration(hours: float | None) -> str:
@@ -39,16 +39,16 @@ def _sleep_delta(value: float | None, baseline: float | None) -> str:
 
 def _summary(report: HealthReport) -> str:
     parts: list[str] = []
-    sleep = report.sleep
+    sleep = report.last_night_sleep
     sleep_base = report.medians.get("sleep")
     if sleep and sleep_base:
         ratio = sleep.asleep_hours / sleep_base
         if 0.9 <= ratio <= 1.1:
-            parts.append("最近完整睡眠时长接近个人近期水平")
+            parts.append("昨夜睡眠时长接近个人近期水平")
         elif ratio < 0.9:
-            parts.append("最近完整睡眠时长低于个人近期水平")
+            parts.append("昨夜睡眠时长低于个人近期水平")
         else:
-            parts.append("最近完整睡眠时长高于个人近期水平")
+            parts.append("昨夜睡眠时长高于个人近期水平")
     exercise_base = report.medians.get("exercise")
     exercise = report.activity.exercise_min
     if exercise is not None and exercise_base:
@@ -67,16 +67,16 @@ def _summary(report: HealthReport) -> str:
 def build_health_rich_markdown(report: HealthReport, *, chart_media_id: str | None) -> str:
     progress, bar = _progress(report.briefing_day)
     activity = report.activity
-    sleep = report.sleep
+    sleep = report.last_night_sleep
     lines = [
         f"### 🌤️ 个人晨报 · {report.briefing_day.isoformat()}",
         "",
         f"{progress}  \n`{bar}`",
     ]
-    if report.wake_sleep:
-        lines.extend(["", f"起床：**{report.wake_sleep.end:%H:%M}**（依据最后睡眠阶段推定）"])
+    if sleep:
+        lines.extend(["", f"起床：**{sleep.end:%H:%M}**（依据最后睡眠阶段推定）"])
     else:
-        lines.extend(["", "起床：今晨睡眠数据尚未同步，暂不判断"])
+        lines.extend(["", SLEEP_PENDING_MESSAGE])
     if chart_media_id:
         lines.extend(["", f"![](tg://photo?id={chart_media_id})"])
 
@@ -93,7 +93,7 @@ def build_health_rich_markdown(report: HealthReport, *, chart_media_id: str | No
             "",
             "| 项目 | 数据 |",
             "|:---|---:|",
-            f"| 记录口径 | {report.sleep_label} |",
+            "| 记录口径 | 昨夜睡眠 |",
             f"| 睡眠时段 | {sleep.start:%m-%d %H:%M}–{sleep.end:%m-%d %H:%M} |",
             f"| 实睡 | {_duration(sleep.asleep_hours)} |",
             f"| 核心睡眠 | {_duration(sleep.core_hours)} |",

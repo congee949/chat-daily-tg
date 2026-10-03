@@ -11,7 +11,7 @@ import shutil
 import statistics
 import subprocess
 import time as _time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,6 +29,7 @@ def _wake_now(tz: ZoneInfo) -> datetime:
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 SLEEP_KEYS = ("core", "deep", "rem")
+SLEEP_PENDING_MESSAGE = "昨夜睡眠尚未同步，稍后补发"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,18 @@ class WorkoutSummary:
 
 
 @dataclass(frozen=True)
+class HealthDataGap:
+    """Auditable source-data problem; paths stay relative to the export root."""
+
+    category: str
+    metric: str
+    source_day: str
+    path: str
+    detail: str
+    transient: bool
+
+
+@dataclass(frozen=True)
 class HealthReport:
     report_day: date
     briefing_day: date
@@ -76,6 +89,12 @@ class HealthReport:
     baseline_samples: dict[str, int]
     baseline_days: int
     min_baseline_samples: int
+    data_gaps: tuple[HealthDataGap, ...] = ()
+
+    @property
+    def last_night_sleep(self) -> SleepEpisode | None:
+        episode = self.wake_sleep
+        return episode if episode and episode.end.date() == self.briefing_day else None
 
 
 def _apple_datetime(value: object, tz: ZoneInfo) -> datetime | None:
@@ -94,9 +113,40 @@ class HealthExportReader:
         # Adjacent local days reuse adjacent UTC chunks. A small LRU keeps that
         # benefit without retaining a whole month of high-frequency samples.
         self._cache: OrderedDict[Path, list[dict] | None] = OrderedDict()
+        self._data_gaps: OrderedDict[tuple[str, str], HealthDataGap] = OrderedDict()
+        self._legacy_wrappers: set[str] = set()
 
-    @staticmethod
-    def _ensure_materialized(path: Path) -> None:
+    def _relative_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return path.name
+
+    def _record_gap(self, path: Path, category: str, detail: str, *, transient: bool) -> None:
+        relative = self._relative_path(path)
+        parts = Path(relative).parts
+        metric = parts[-2] if len(parts) >= 2 and parts[0] == "HealthMetrics" else (
+            "workout" if parts and parts[0] == "Workouts" else "unknown"
+        )
+        source_day = path.stem if path.stem.isdigit() else ""
+        gap = HealthDataGap(category, metric, source_day, relative, detail[:200], transient)
+        self._data_gaps[(category, relative)] = gap
+
+    @property
+    def data_gaps(self) -> tuple[HealthDataGap, ...]:
+        return tuple(self._data_gaps.values())
+
+    def log_diagnostic_summary(self) -> None:
+        counts: dict[str, int] = {}
+        for gap in self._data_gaps.values():
+            counts[gap.category] = counts.get(gap.category, 0) + 1
+        if counts:
+            summary = ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
+            log.warning("health export data gaps: %s", summary)
+        if self._legacy_wrappers:
+            log.info("health export decoded %d legacy HAE1 file(s)", len(self._legacy_wrappers))
+
+    def _ensure_materialized(self, path: Path) -> bool:
         """Pull a dataless iCloud placeholder local before the lock-holding decoder touches it.
 
         Health Auto Export writes `.hae` into iCloud Drive. While a chunk is still a
@@ -113,29 +163,59 @@ class HealthExportReader:
             if st.st_size > 0 and st.st_blocks == 0:
                 with open(path, "rb") as fh:
                     fh.read()
+                refreshed = os.stat(path)
+                if refreshed.st_blocks == 0:
+                    self._record_gap(
+                        path, "icloud_placeholder", "file remains dataless after materialization",
+                        transient=True,
+                    )
+                    return False
         except OSError as exc:
-            log.debug("health export materialize skipped for %s: %s", path, exc)
+            self._record_gap(path, "temporary_read_error", str(exc), transient=True)
+            return False
+        return True
 
     def _decode(self, path: Path) -> list[dict] | None:
         if path in self._cache:
             self._cache.move_to_end(path)
             return self._cache[path]
-        if not path.is_file():
+        try:
+            path.stat()
+        except FileNotFoundError:
+            self._record_gap(path, "source_missing", "export file does not exist", transient=False)
             self._cache[path] = None
             return None
-        self._ensure_materialized(path)
+        except OSError as exc:
+            self._record_gap(path, "temporary_read_error", str(exc), transient=True)
+            self._cache[path] = None
+            return None
+        if not self._ensure_materialized(path):
+            self._cache[path] = None
+            return None
         tool = shutil.which("compression_tool")
         if not tool:
-            log.warning("health briefing unavailable: compression_tool not found")
+            self._record_gap(
+                path, "decoder_unavailable", "compression_tool not found", transient=False,
+            )
             self._cache[path] = None
             return None
         try:
-            proc = subprocess.run(
-                [tool, "-decode", "-i", str(path)],
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
+            with open(path, "rb") as fh:
+                header = fh.read(8)
+                legacy_payload = fh.read() if header.startswith(b"HAE1") else None
+            if header.startswith(b"HAE1"):
+                # Health Auto Export's older container prepends an eight-byte
+                # HAE1 header to an otherwise ordinary LZFSE stream.
+                proc = subprocess.run(
+                    [tool, "-decode", "-i", "/dev/stdin"], input=legacy_payload,
+                    capture_output=True, timeout=30, check=False,
+                )
+                self._legacy_wrappers.add(self._relative_path(path))
+            else:
+                proc = subprocess.run(
+                    [tool, "-decode", "-i", str(path)],
+                    capture_output=True, timeout=30, check=False,
+                )
             if proc.returncode != 0:
                 raise ValueError(proc.stderr.decode("utf-8", "replace")[:200])
             payload = json.loads(proc.stdout)
@@ -143,8 +223,21 @@ class HealthExportReader:
             if not isinstance(rows, list):
                 raise ValueError("data is not a list")
             result = [row for row in rows if isinstance(row, dict)]
+            if not result:
+                self._record_gap(path, "source_empty", "decoded export contains no records",
+                                 transient=False)
         except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-            log.warning("health export decode failed for %s: %s", path, exc)
+            detail = str(exc)
+            lowered = detail.lower()
+            transient = isinstance(exc, (OSError, subprocess.TimeoutExpired)) or any(
+                text in lowered for text in ("deadlock", "temporar", "timed out", "timeout")
+            )
+            self._record_gap(
+                path,
+                "temporary_read_error" if transient else "decode_invalid",
+                detail,
+                transient=transient,
+            )
             result = None
         self._cache[path] = result
         self._cache.move_to_end(path)
@@ -172,6 +265,11 @@ class HealthExportReader:
                     complete = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) >= utc_day_end
                 except OSError:
                     complete = False
+                if not complete:
+                    self._record_gap(
+                        path, "source_incomplete", "file was last modified before UTC day end",
+                        transient=False,
+                    )
                 rows.extend({**row, "_source_complete": complete} for row in decoded)
             cursor += timedelta(days=1)
 
@@ -415,7 +513,7 @@ def _recovery_assessment(activity: ActivityDay, sleep: SleepEpisode | None,
         return ""
     score = sum(signals)
     if score >= 2:
-        return "睡眠与心血管指标整体支持正常恢复"
+        return "睡眠与心血管指标整体支持正常恢复" if sleep else "心血管指标整体支持正常恢复"
     if score <= -2:
         return "多项恢复指标低于个人常态，今日宜控制训练负荷"
     return "恢复信号有分歧，结合主观疲劳再决定训练强度"
@@ -454,7 +552,8 @@ def wait_for_wake_signal(
     # Only an episode that ENDED on wake_day counts. sleep_ending() returns the
     # LONGEST cluster in its 18:00→14:00 window, so a ≥2h evening nap that
     # synced last night must not count as this morning's wake.
-    if episode and episode.end.date() >= wake_day:
+    if (episode and episode.end.astimezone(ZoneInfo(timezone_name)).date() == wake_day
+            and episode.end <= _wake_now(ZoneInfo(timezone_name))):
         log.info("wake signal: sleep ended %s", f"{episode.end:%H:%M}")
         return True
     log.info("no sleep data for %s — delivering summary without waiting", wake_day)
@@ -469,11 +568,14 @@ def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: st
     briefing_day = report_day + timedelta(days=1)
     activity = reader.activity_day(report_day)
     wake_sleep = reader.sleep_ending(briefing_day)
-    report_sleep = reader.sleep_ending(report_day)
-    # AutoSync commonly publishes the previous completed night before the current
-    # morning. Keep the briefing useful without pretending stale data is current.
-    sleep = wake_sleep or report_sleep
-    sleep_label = "昨夜睡眠" if wake_sleep else "最近完整睡眠（截至昨日早晨）"
+    tz = ZoneInfo(timezone_name)
+    if wake_sleep and (
+        wake_sleep.end.astimezone(tz).date() != briefing_day
+        or wake_sleep.end > _wake_now(tz)
+    ):
+        wake_sleep = None
+    sleep = wake_sleep
+    sleep_label = "昨夜睡眠" if wake_sleep else ""
 
     baselines: dict[str, list[float]] = {
         "active": [], "exercise": [], "stand": [], "steps": [], "distance": [],
@@ -491,12 +593,16 @@ def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: st
             if value is not None and value > 0:
                 baselines[key].append(value)
         prior_sleep = reader.sleep_ending(day + timedelta(days=1))
-        if prior_sleep:
+        if prior_sleep and prior_sleep.end.astimezone(tz).date() == day + timedelta(days=1):
             baselines["sleep"].append(prior_sleep.asleep_hours)
             baselines["wake"].append(prior_sleep.end.hour * 60 + prior_sleep.end.minute)
 
     minimum = cfg.min_baseline_samples
     median = {key: _median(values, minimum) for key, values in baselines.items()}
+    data_gaps = tuple(getattr(reader, "data_gaps", ()))
+    log_summary = getattr(reader, "log_diagnostic_summary", None)
+    if callable(log_summary):
+        log_summary()
     return HealthReport(
         report_day=report_day,
         briefing_day=briefing_day,
@@ -509,24 +615,52 @@ def build_health_report(report_day: date, cfg: HealthBriefing, timezone_name: st
         baseline_samples={key: len(values) for key, values in baselines.items()},
         baseline_days=cfg.baseline_days,
         min_baseline_samples=minimum,
+        data_gaps=data_gaps,
     )
+
+
+def write_health_gap_record(report: HealthReport, path: str | Path) -> Path:
+    """Atomically persist the Health source-gap audit beside the daily report."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    for gap in report.data_gaps:
+        counts[gap.category] = counts.get(gap.category, 0) + 1
+    payload = {
+        "schema_version": 1,
+        "report_day": report.report_day.isoformat(),
+        "briefing_day": report.briefing_day.isoformat(),
+        "status": "degraded" if report.data_gaps else "complete",
+        "summary": {key: counts[key] for key in sorted(counts)},
+        "gaps": [asdict(gap) for gap in report.data_gaps],
+    }
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
 
 
 def format_health_briefing(report: HealthReport) -> str:
     """Format the classic Markdown fallback from a structured health report."""
     activity = report.activity
-    sleep = report.sleep
+    sleep = report.last_night_sleep
     median = report.medians
     briefing_day = report.briefing_day
     progress, bar = _progress(briefing_day)
     lines = [f"### 🌤️ 个人晨报 · {briefing_day.isoformat()}"]
-    if report.wake_sleep:
+    if sleep:
         lines.append(
-            f"- 起床：{report.wake_sleep.end:%H:%M}"
-            f"（依据最后睡眠阶段推定{_clock_delta(report.wake_sleep.end, median['wake'])}）"
+            f"- 起床：{sleep.end:%H:%M}"
+            f"（依据最后睡眠阶段推定{_clock_delta(sleep.end, median['wake'])}）"
         )
     else:
-        lines.append("- 起床：今晨睡眠数据尚未同步，暂不判断")
+        lines.append(f"- {SLEEP_PENDING_MESSAGE}")
     lines.extend([f"- 年度：{progress}", bar])
 
     activity_parts: list[str] = []
@@ -549,9 +683,10 @@ def format_health_briefing(report: HealthReport) -> str:
     if sleep:
         sleep_delta = _pct_delta(sleep.asleep_hours, median["sleep"])
         lines.append(
-            f"- {report.sleep_label}：{sleep.start:%H:%M}–{sleep.end:%H:%M}，"
+            f"- 昨夜睡眠：{sleep.start:%H:%M}–{sleep.end:%H:%M}，"
             f"实睡 {sleep.asleep_hours:.1f} 小时{sleep_delta}；"
-            f"深睡 {sleep.deep_hours:.1f}h / REM {sleep.rem_hours:.1f}h / 清醒 {sleep.awake_hours:.1f}h"
+            f"核心 {sleep.core_hours:.1f}h / 深睡 {sleep.deep_hours:.1f}h / "
+            f"REM {sleep.rem_hours:.1f}h / 清醒 {sleep.awake_hours:.1f}h"
         )
     recovery: list[str] = []
     if activity.resting_hr and median["rhr"]:

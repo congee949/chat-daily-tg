@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from chat_daily_tg.wxgf import is_wxgf
+
 
 VALUE_KEYWORDS = (
     "活动", "价格", "额度", "bug", "风控", "封号", "报错", "教程", "入口",
@@ -57,6 +59,14 @@ def write_media_candidates(path: Path, candidates: list[MediaCandidate]) -> None
             f.write(json.dumps(item.to_json(), ensure_ascii=False) + "\n")
 
 
+def _has_wxgf_magic(p: Path) -> bool:
+    try:
+        with open(p, "rb") as f:
+            return is_wxgf(f.read(4))
+    except OSError:
+        return False
+
+
 def _is_valid_image_file(path: str | None) -> tuple[bool, str]:
     """Layer 1 prefilter: file size, decodability, and resolution checks."""
     if not path:
@@ -77,6 +87,8 @@ def _is_valid_image_file(path: str | None) -> tuple[bool, str]:
         # e.g. WeChat's proprietary wxgf format dumped by `wx extract` with a
         # .jpg name — Telegram can't decode it either (sendPhoto 400s), so it
         # must never reach vision or a digest citation.
+        if _has_wxgf_magic(p):
+            return False, "undecodable image (wxgf container)"
         return False, f"undecodable image ({type(e).__name__})"
     if w < 300 or h < 300:
         return False, f"too small resolution ({w}x{h})"

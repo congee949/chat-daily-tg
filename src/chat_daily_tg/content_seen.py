@@ -12,11 +12,13 @@ identity with a rolling time window:
                            pushed index (cross-producer layer, feature-gated)
 - ``check_duplicate``    — the single decision entry point
 
-Hit policy (决策记录 2026-07-16): text fingerprint hit → skip; URL hit → skip
-only when the post is a bare link (no substantive commentary); an x_monitor
-hit follows the same bare-link rule. 宁可重复，不可误杀 — every ambiguity
-resolves toward delivery, and the CALLER must wrap the whole check in
-try/except so no failure here can ever block delivery (投递优先于完美).
+Hit policy (updated 2026-08-08): text/title fingerprint hit → skip; fuzzy
+title (bigram Jaccard ≥ 0.88) → skip; bare-link URL hit → skip; non-bare same
+URL with url_authority_skip → first-arrival skip; x_monitor tweet/article keys
+→ skip for bare and non-bare; pure-media bytes → skip via media fingerprint.
+宁可重复，不可误杀 — every ambiguity resolves toward delivery, and the CALLER
+must wrap the whole check in try/except so no failure here can ever block
+delivery (投递优先于完美).
 
 Forbidden mitigations (do not "fix" races by deferring): holding a post for a
 later cycle silently loses it — the SeenStore high-water mark advances past it
@@ -32,6 +34,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from hashlib import sha1
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -83,6 +86,11 @@ _BARE_LINK_MAX_CHARS = 10
 # Normalized text shorter than this never fingerprints («哭了»-style shortposts
 # must not collide across channels).
 _MIN_FINGERPRINT_CHARS = 24
+# Title gate: first-line identity for rewrites that share a headline but not
+# a full-body fingerprint. Fuzzy threshold is character-bigram Jaccard.
+_MIN_TITLE_CHARS = 12
+_TITLE_FUZZY_THRESHOLD = 0.88
+_TITLE_FUZZY_MAX_SCAN = 500
 
 
 def _substance_len(text: str) -> int:
@@ -232,18 +240,100 @@ def text_fingerprint(text: str) -> str | None:
     return sha1(normalized.encode("utf-8")).hexdigest()
 
 
+def extract_title(text: str | None) -> str:
+    """First non-empty line — the usual headline slot for channel cards."""
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if s:
+            return s
+    return ""
+
+
+def normalize_title(title: str | None) -> str:
+    """URL-free, punctuation-free, casefolded title body."""
+    body = _body_without_links(title or "")
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKC", body).casefold()
+        if not ch.isspace() and unicodedata.category(ch)[0] not in ("P", "S", "Z", "C")
+    )
+
+
+def title_fingerprint(text: str | None) -> str | None:
+    """Exact title identity. None when the normalized title is too short."""
+    norm = normalize_title(extract_title(text))
+    if len(norm) < _MIN_TITLE_CHARS:
+        return None
+    return sha1(norm.encode("utf-8")).hexdigest()
+
+
+def _char_bigrams(s: str) -> set[str]:
+    if not s:
+        return set()
+    if len(s) == 1:
+        return {s}
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _bigram_jaccard(ba: frozenset[str] | set[str], bb: frozenset[str] | set[str]) -> float:
+    if not ba or not bb:
+        return 0.0
+    inter = len(ba & bb)
+    return inter / (len(ba) + len(bb) - inter)
+
+
+def title_jaccard(a: str, b: str) -> float:
+    """Character-bigram Jaccard on already-normalized titles."""
+    return _bigram_jaccard(_char_bigrams(a), _char_bigrams(b))
+
+
+def media_fingerprint(paths) -> str | None:
+    """sha1 over sorted per-file digests. None when no readable file exists.
+
+    Albums hash as an ordered multiset of member digests so re-ordering the
+    same photos still collides, while a single swapped frame does not.
+    """
+    try:
+        items = [Path(p) for p in (paths or []) if p]
+    except TypeError:
+        return None
+    digests: list[str] = []
+    for path in sorted(items, key=lambda p: str(p)):
+        try:
+            h = sha1()
+            with path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            digests.append(h.hexdigest())
+        except OSError:
+            continue
+    if not digests:
+        return None
+    return sha1("|".join(digests).encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # stores
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS content_seen (
-    fingerprint TEXT PRIMARY KEY,   -- 'text:<sha1>' | 'url:<sha1>'
+    fingerprint TEXT PRIMARY KEY,   -- 'text:<sha1>' | 'url:<sha1>' | 'title:<sha1>' | 'media:<sha1>'
     chat_id     TEXT NOT NULL,
     msg_id      INTEGER NOT NULL,
     channel     TEXT NOT NULL DEFAULT '',
     sent_at     TEXT NOT NULL       -- ISO UTC
 );
 CREATE INDEX IF NOT EXISTS idx_content_seen_sent_at ON content_seen(sent_at);
+CREATE TABLE IF NOT EXISTS title_seen (
+    title_norm  TEXT NOT NULL,
+    chat_id     TEXT NOT NULL,
+    msg_id      INTEGER NOT NULL,
+    channel     TEXT NOT NULL DEFAULT '',
+    sent_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_title_seen_sent_at ON title_seen(sent_at);
 """
 
 
@@ -253,6 +343,14 @@ def _now_utc() -> datetime:
 
 def text_key(fp: str) -> str:
     return f"text:{fp}"
+
+
+def title_key(fp: str) -> str:
+    return f"title:{fp}"
+
+
+def media_key(fp: str) -> str:
+    return f"media:{fp}"
 
 
 def url_key(canonical: str) -> str:
@@ -275,6 +373,12 @@ class ContentSeenStore:
 
     def __init__(self, path: Path, window_days: int = 14):
         self.window_days = window_days
+        # Cache only pure title features, never the rows or their delivery
+        # status. Each query still observes SQLite writes from other processes.
+        # The bounded, instance-owned cache is released when the store closes.
+        self._title_bigrams = lru_cache(maxsize=2 * _TITLE_FUZZY_MAX_SCAN)(
+            lambda title: frozenset(_char_bigrams(title))
+        )
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), timeout=10.0)
         self._conn.row_factory = sqlite3.Row
@@ -288,6 +392,7 @@ class ContentSeenStore:
         cutoff = (_now_utc() - timedelta(days=self.window_days)).isoformat()
         with self._conn:
             self._conn.execute("DELETE FROM content_seen WHERE sent_at < ?", (cutoff,))
+            self._conn.execute("DELETE FROM title_seen WHERE sent_at < ?", (cutoff,))
 
     def lookup(self, fingerprints: list[str]) -> SeenHit | None:
         if not fingerprints:
@@ -316,18 +421,75 @@ class ContentSeenStore:
                 [(fp, str(chat_id), int(msg_id), channel, now) for fp in fingerprints],
             )
 
+    def register_title(self, text: str | None, chat_id: str, msg_id: int,
+                       channel: str = "") -> None:
+        """Record the normalized title for fuzzy headline matching."""
+        norm = normalize_title(extract_title(text))
+        if len(norm) < _MIN_TITLE_CHARS:
+            return
+        now = _now_utc().isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO title_seen (title_norm, chat_id, msg_id, channel, sent_at) "
+                "VALUES (?,?,?,?,?)",
+                (norm, str(chat_id), int(msg_id), channel, now),
+            )
+
+    def find_similar_title(
+        self,
+        text: str | None,
+        *,
+        threshold: float = _TITLE_FUZZY_THRESHOLD,
+        max_scan: int = _TITLE_FUZZY_MAX_SCAN,
+    ) -> SeenHit | None:
+        """Nearest prior title by bigram Jaccard, if above threshold."""
+        norm = normalize_title(extract_title(text))
+        if len(norm) < _MIN_TITLE_CHARS:
+            return None
+        query_bigrams = _char_bigrams(norm)
+        rows = self._conn.execute(
+            "SELECT title_norm, chat_id, msg_id, channel, sent_at FROM title_seen "
+            "ORDER BY sent_at DESC LIMIT ?",
+            (int(max_scan),),
+        ).fetchall()
+        best: tuple[float, sqlite3.Row] | None = None
+        for row in rows:
+            sim = _bigram_jaccard(query_bigrams, self._title_bigrams(row["title_norm"] or ""))
+            if sim < threshold:
+                continue
+            if best is None or sim > best[0]:
+                best = (sim, row)
+        if best is None:
+            return None
+        _sim, row = best
+        # Synthetic fingerprint so callers can log a stable identity.
+        return SeenHit(
+            title_key(sha1((row["title_norm"] or "").encode("utf-8")).hexdigest()),
+            row["chat_id"], int(row["msg_id"]), row["channel"], row["sent_at"],
+        )
+
     def close(self) -> None:
+        self._title_bigrams.cache_clear()
         self._conn.close()
 
 
 def fingerprints_for(text: str) -> list[str]:
-    """Every fingerprint this post would register: text identity + one per URL."""
+    """Every fingerprint this post would register: text, title, and URLs."""
     fps: list[str] = []
     tf = text_fingerprint(text)
     if tf:
         fps.append(text_key(tf))
+    title_fp = title_fingerprint(text)
+    if title_fp:
+        fps.append(title_key(title_fp))
     fps.extend(url_key(u) for u in sorted(canonical_urls(text)))
     return fps
+
+
+def media_fingerprints_for(paths) -> list[str]:
+    """Fingerprint list for a pure-media post (0 or 1 media identity)."""
+    fp = media_fingerprint(paths)
+    return [media_key(fp)] if fp else []
 
 
 class XMonitorIndex:
@@ -406,13 +568,30 @@ def check_duplicate(
     *,
     store: ContentSeenStore,
     xmon: XMonitorIndex | None = None,
+    channel_name: str = "",
+    channel_id: str = "",
+    authority: dict[str, int] | None = None,
+    url_authority_skip: bool = False,
 ) -> DedupDecision:
-    """The three gates, cheapest and most certain first. `text` is the
+    """The gates, cheapest and most certain first. `text` is the
     promo-stripped plain head content of the card about to be sent.
+
+    Hit policy:
+      * text fingerprint → always skip
+      * exact title fingerprint → always skip
+      * fuzzy title (bigram Jaccard ≥ 0.88) → skip
+      * bare-link URL hit → always skip
+      * non-bare URL hit → deliver by default; when ``url_authority_skip`` is
+        on, the first delivery of that canonical URL wins and later
+        rewrites/commentary from any channel are skipped (reason
+        ``url_first``). Channel weights are not consulted.
+      * x_monitor tweet/article keys → skip for bare AND non-bare posts that
+        only restate an already-pushed X status/article
 
     The caller MUST wrap this call in try/except and treat any exception as
     'no hit' — this function is allowed to assume its inputs exist.
     """
+    _ = authority  # signature kept for call-site compatibility; unused
     tf = text_fingerprint(text)
     if tf:
         hit = store.lookup([text_key(tf)])
@@ -422,33 +601,86 @@ def check_duplicate(
                 "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
             })
 
-    urls = canonical_urls(text)
-    if not urls:
-        return DedupDecision(False)
-    bare = is_bare_link_post(text)
-    if not bare:
-        # Substantive commentary always delivers, whatever its links point at.
-        return DedupDecision(False)
-
-    hit = store.lookup([url_key(u) for u in sorted(urls)])
-    if hit:
-        return DedupDecision(True, "url", {
-            "matched_chat_id": hit.chat_id, "matched_msg_id": hit.msg_id,
-            "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
+    title_fp = title_fingerprint(text)
+    if title_fp:
+        hit = store.lookup([title_key(title_fp)])
+        if hit:
+            return DedupDecision(True, "title", {
+                "matched_chat_id": hit.chat_id, "matched_msg_id": hit.msg_id,
+                "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
+            })
+    try:
+        fuzzy = store.find_similar_title(text)
+    except Exception:
+        fuzzy = None
+    if fuzzy is not None:
+        return DedupDecision(True, "title_fuzzy", {
+            "matched_chat_id": fuzzy.chat_id, "matched_msg_id": fuzzy.msg_id,
+            "matched_channel": fuzzy.channel, "matched_sent_at": fuzzy.sent_at,
         })
 
-    if xmon is not None:
-        xhit = xmon.lookup(tweet_keys_from_urls(urls))
-        if xhit:
-            key, entry = xhit
-            # Same detail shape as text/url hits so journal analysis and the
-            # consumer's log line never fork on the hit source.
-            return DedupDecision(True, "xmon", {
-                "matched_chat_id": "x_monitor",
-                "matched_msg_id": key,
-                "matched_channel": f"x_monitor@{entry.get('by', '?')}",
-                "matched_sent_at": entry.get("ts", ""),
-                "matched_key": key,
+    urls = canonical_urls(text)
+    if urls:
+        bare = is_bare_link_post(text)
+        url_fps = [url_key(u) for u in sorted(urls)]
+        hit = store.lookup(url_fps)
+
+        if not bare:
+            if hit is not None and url_authority_skip:
+                return DedupDecision(True, "url_first", {
+                    "matched_chat_id": hit.chat_id, "matched_msg_id": hit.msg_id,
+                    "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
+                    "current_channel": channel_name or channel_id,
+                })
+            # Non-bare commentary still collapses against x_monitor: the tweet
+            # was already delivered by the X pipeline.
+            if xmon is not None:
+                xhit = xmon.lookup(tweet_keys_from_urls(urls))
+                if xhit:
+                    key, entry = xhit
+                    return DedupDecision(True, "xmon", {
+                        "matched_chat_id": "x_monitor",
+                        "matched_msg_id": key,
+                        "matched_channel": f"x_monitor@{entry.get('by', '?')}",
+                        "matched_sent_at": entry.get("ts", ""),
+                        "matched_key": key,
+                    })
+            return DedupDecision(False)
+
+        if hit:
+            return DedupDecision(True, "url", {
+                "matched_chat_id": hit.chat_id, "matched_msg_id": hit.msg_id,
+                "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
             })
 
+        if xmon is not None:
+            xhit = xmon.lookup(tweet_keys_from_urls(urls))
+            if xhit:
+                key, entry = xhit
+                return DedupDecision(True, "xmon", {
+                    "matched_chat_id": "x_monitor",
+                    "matched_msg_id": key,
+                    "matched_channel": f"x_monitor@{entry.get('by', '?')}",
+                    "matched_sent_at": entry.get("ts", ""),
+                    "matched_key": key,
+                })
+
     return DedupDecision(False)
+
+
+def check_media_duplicate(
+    paths,
+    *,
+    store: ContentSeenStore,
+) -> DedupDecision:
+    """Pure-media identity gate. Missing files / empty digests → no hit."""
+    fps = media_fingerprints_for(paths)
+    if not fps:
+        return DedupDecision(False)
+    hit = store.lookup(fps)
+    if hit is None:
+        return DedupDecision(False)
+    return DedupDecision(True, "media", {
+        "matched_chat_id": hit.chat_id, "matched_msg_id": hit.msg_id,
+        "matched_channel": hit.channel, "matched_sent_at": hit.sent_at,
+    })

@@ -1,10 +1,13 @@
+from pathlib import Path
 import json
 
 from pytest_httpx import HTTPXMock
+import pytest
 
 from chat_daily_tg.config import RawChannel
 from chat_daily_tg.raw_channels import (
     build_card,
+    escape_body_html,
     matches_exclude_patterns,
     strip_promo_lines,
     strip_promo_lines_html,
@@ -83,6 +86,23 @@ def test_build_card_renders_inline_markdown_link():
     assert card is not None
     assert '<a href="https://sneakerweb.org/">Sneaker Web</a>' in card.text_html
     assert "[Sneaker Web]" not in card.text_html  # literal markdown syntax gone
+
+
+def test_escape_body_html_renders_common_inline_markdown_and_escapes_html():
+    out = escape_body_html("**重要** _强调_ ~~过期~~ `x < y` [链接](https://e.com/?a=1&b=2) <script>")
+    assert "<b>重要</b>" in out
+    assert "<i>强调</i>" in out
+    assert "<s>过期</s>" in out
+    assert "<code>x &lt; y</code>" in out
+    assert '<a href="https://e.com/?a=1&amp;b=2">链接</a>' in out
+    assert "&lt;script&gt;" in out
+
+
+def test_escape_body_html_leaves_malformed_markdown_as_escaped_text():
+    out = escape_body_html("**未闭合 <b> 和 [坏链接](ftp://example.com)")
+    assert "**未闭合" in out
+    assert "[坏链接](ftp://example.com)" in out
+    assert "&lt;b&gt;" in out
 
 
 def test_build_card_markdown_link_escapes_surrounding_html():
@@ -243,6 +263,125 @@ def test_push_album_pushes_one_card_and_marks_all_ids_seen(tmp_path, monkeypatch
     again = FakeSender()
     assert raw_channels.push_raw_channel_cards(sender=again, **kwargs) == 0
     assert again.sent == []
+
+
+def test_public_text_album_writes_general_ledger_for_each_target_chunk(
+        tmp_path, monkeypatch):
+    from chat_daily_tg import raw_channels
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    rows = [
+        _row(content="相册正文", msg_id=13545),
+        _row(content="", msg_id=13546),
+        _row(content="", msg_id=13547),
+    ]
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: list(rows))
+
+    class Sender:
+        chat_id = "-100424841223"
+        message_thread_id = 41
+
+        def send_card(self, text_html, link=None):
+            return [901, 902]
+
+    ledger = tmp_path / "state" / "ledger.jsonl"
+    n = raw_channels.push_raw_channel_cards(
+        channels=[ch], since="2026-06-22", until="2026-06-24",
+        db_path=tmp_path / "x.db", sender=Sender(), archive_dir=tmp_path,
+        seen_path=tmp_path / "seen.txt", delay_seconds=0,
+        sent_content_ledger_path=ledger,
+    )
+    assert n == 1
+    records = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [record["message_id"] for record in records] == [901, 902]
+    assert all(record["source_message_ids"] == [13545, 13546, 13547]
+               for record in records)
+    assert all(record["source_ref"] == "https://t.me/examplechan/13545"
+               for record in records)
+    assert all(record["content"] == "相册正文" for record in records)
+    assert all(record["original_messages"] == [
+        {"message_id": 13545, "text": "相册正文"},
+        {"message_id": 13546, "text": ""},
+        {"message_id": 13547, "text": ""},
+    ] for record in records)
+    from chat_daily_tg.content_feedback import ReplyIntake
+    intake = ReplyIntake(tmp_path / "feedback", bot_id=1, owner_id=2,
+                         targets=[(-100424841223, 41)], text_ledger=ledger)
+    mapping = intake.resolve({"chat": {"id": -100424841223},
+                              "reply_to_message": {"message_id": 902}})
+    assert mapping["text"] == "相册正文"
+    assert mapping["mapping_provenance"] == "confirmed-text-ledger+original-messages"
+    assert all(record["content_id"] == "telegram-channel:-100123:13545"
+               for record in records)
+
+
+def test_general_ledger_failure_does_not_block_seen_or_delivery(tmp_path, monkeypatch):
+    from chat_daily_tg import raw_channels, sent_content_ledger
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(
+        raw_channels, "read_messages",
+        lambda **k: [_row(content="已成功投递的正文", msg_id=42)],
+    )
+    monkeypatch.setattr(
+        sent_content_ledger, "append_message_ids",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    class Sender:
+        chat_id = -100424841223
+        message_thread_id = 41
+
+        def __init__(self):
+            self.calls = 0
+
+        def send_card(self, text_html, link=None):
+            self.calls += 1
+            return [777]
+
+    sender = Sender()
+    seen_path = tmp_path / "seen.txt"
+    assert raw_channels.push_raw_channel_cards(
+        channels=[ch], since="2026-06-22", until="2026-06-24",
+        db_path=tmp_path / "x.db", sender=sender, archive_dir=tmp_path,
+        seen_path=seen_path, delay_seconds=0,
+        sent_content_ledger_path=tmp_path / "ledger.jsonl",
+    ) == 1
+    assert sender.calls == 1
+    assert SeenStore.key(ch.id, 42) in SeenStore(seen_path)
+
+
+def test_failed_public_text_send_does_not_write_general_ledger(tmp_path, monkeypatch):
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.raw_seen import SeenStore
+
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(
+        raw_channels, "read_messages",
+        lambda **k: [_row(content="这条没有投递成功", msg_id=43)],
+    )
+
+    class Sender:
+        chat_id = -100424841223
+        message_thread_id = 41
+
+        def send_card(self, text_html, link=None):
+            raise RuntimeError("pre-send failure")
+
+    ledger = tmp_path / "ledger.jsonl"
+    seen_path = tmp_path / "seen.txt"
+    assert raw_channels.push_raw_channel_cards(
+        channels=[ch], since="2026-06-22", until="2026-06-24",
+        db_path=tmp_path / "x.db", sender=Sender(), archive_dir=tmp_path,
+        seen_path=seen_path, delay_seconds=0,
+        sent_content_ledger_path=ledger,
+    ) == 0
+    assert not ledger.exists()
+    assert SeenStore.key(ch.id, 43) not in SeenStore(seen_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -617,6 +756,10 @@ def _push_channels(monkeypatch, tmp_path, *, channels, rows_by_chat, sender,
         raw_channels, "read_messages",
         lambda **k: list(rows_by_chat.get(k["chat_id"], [])),
     )
+    extra.setdefault(
+        "sent_content_ledger_path",
+        tmp_path / "state" / "sent_content_ledger.jsonl",
+    )
     return raw_channels.push_raw_channel_cards(
         channels=channels, since="2026-07-15", until="2026-07-16",
         db_path=tmp_path / "messages.db", sender=sender, archive_dir=tmp_path,
@@ -972,3 +1115,184 @@ def test_exclude_pattern_suppression_writes_l1_journal_entry(tmp_path, monkeypat
     assert e["msg_id"] == 777
     assert e["channel"] == "B频道"
     assert SeenStore.key(ch.id, 777) in SeenStore(tmp_path / "seen.txt")
+
+
+def test_same_tick_premerge_collapses_duplicate_fps(tmp_path):
+    from chat_daily_tg.raw_channels import _same_tick_premerge, Card
+    from chat_daily_tg.raw_seen import SeenStore
+    from chat_daily_tg.config import RawChannel
+
+    ch = RawChannel(id="-1001", name="Ch", username="ch")
+    seen = SeenStore(tmp_path / "seen.txt")
+    body = "同一正文用于同刻去重测试，长度必须超过二十四字阈值。"
+    url = "https://example.com/same-tick-1"
+    plain = f"{body} {url}"
+    c1 = Card(text_html=f"h\n\n{plain}", link=None)
+    c2 = Card(text_html=f"h\n\n{plain}", link=None)
+    cards = [([10], c1, plain), ([11], c2, plain)]
+    out = _same_tick_premerge(cards, ch, seen, content_store=None)
+    assert len(out) == 1 and out[0][0] == [10]
+    assert SeenStore.key(ch.id, 11) in seen
+
+
+def test_chronological_cross_channel_first_arrival(tmp_path, monkeypatch):
+    """Later-listed channel with earlier source timestamp wins URL ownership."""
+    journal = _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    seen_path = tmp_path / "seen.txt"
+    ch_late = RawChannel(id="-1001111", name="后处理频道", username="late_chan")
+    ch_early = RawChannel(id="-1002222", name="早到频道", username="early_chan")
+    url = "https://example.com/news/chrono-1"
+    text_late = f"后到但先被配置的频道正文足够长超过二十四字阈值。 {url}"
+    text_early = f"源时间更早的频道正文也足够长超过二十四字阈值。 {url}"
+    rows = {
+        "-1001111": [_row(content=text_late, msg_id=10,
+                          timestamp="2026-08-08T04:00:00+00:00")],
+        "-1002222": [_row(content=text_early, msg_id=20,
+                          timestamp="2026-08-08T03:00:00+00:00")],
+    }
+    sender = _RecordingSender()
+    # late channel listed first — without chrono sort it would win.
+    n = _push_channels(
+        monkeypatch, tmp_path,
+        channels=[ch_late, ch_early], rows_by_chat=rows,
+        sender=sender, seen_path=seen_path, content_store=store,
+        url_authority_skip=True,
+    )
+    assert n == 1
+    assert len(sender.sent) == 1
+    assert "源时间更早" in sender.sent[0][0]
+    assert SeenStore.key(ch_late.id, 10) in SeenStore(seen_path)
+    # Later card may be same_tick (shared URL fingerprint) or url_first.
+    assert any(e.get("reason") in {"url_first", "same_tick"} for e in journal)
+
+
+def test_public_media_fingerprint_suppresses_identical_album(tmp_path, monkeypatch):
+    import chat_daily_tg.private_media as pm
+    from chat_daily_tg import raw_channels
+
+    journal = _capture_journal(monkeypatch)
+    store = ContentSeenStore(tmp_path / "cs.db")
+    seen_path = tmp_path / "seen.txt"
+    ch_a = RawChannel(id="-1001111", name="A", username="a_chan")
+    ch_b = RawChannel(id="-1002222", name="B", username="b_chan")
+    photo = tmp_path / "same.jpg"
+    photo.write_bytes(b"identical-album-bytes")
+
+    def _dump(chat_id, msg_ids, out_dir):
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Point both channels at the same bytes via copied files.
+        items = []
+        for mid in msg_ids:
+            p = out_dir / f"{mid}.jpg"
+            p.write_bytes(photo.read_bytes())
+            items.append({"msg_id": mid, "media": [{"path": str(p), "kind": "photo"}]})
+        return items
+
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(
+        raw_channels, "read_messages",
+        lambda **k: [_row(content="", msg_id=1 if k["chat_id"] == "-1001111" else 2)],
+    )
+    monkeypatch.setattr(pm, "dump_messages_by_ids", _dump)
+
+    sender = _MediaSender()
+    n = raw_channels.push_raw_channel_cards(
+        channels=[ch_a, ch_b], since="2026-08-08", until="2026-08-09",
+        db_path=tmp_path / "db", sender=sender, archive_dir=tmp_path / "arch",
+        seen_path=seen_path, delay_seconds=0, content_store=store,
+    )
+    assert n == 1
+    assert len(sender.media) == 1
+    assert SeenStore.key(ch_b.id, 2) in SeenStore(seen_path)
+    assert any(e.get("reason") == "media" for e in journal)
+
+
+@pytest.mark.parametrize("long_caption", [False, True])
+def test_public_downloaded_caption_is_delivered_and_indexed(tmp_path, monkeypatch, long_caption):
+    from chat_daily_tg import raw_channels, private_media
+    body = "新模型发布，附上价格与配额说明。" * (90 if long_caption else 3)
+    dump = _fake_media_dump({4242: [("p.jpg", "photo")]})
+
+    def with_caption(*args):
+        manifest = dump(*args)
+        manifest[0].update(text=body, html=f"<b>{body}</b>")
+        return manifest
+
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: [_row(content="", msg_id=4242)])
+    monkeypatch.setattr(private_media, "dump_messages_by_ids", with_caption)
+    gate = _StubGate(verdict=SimpleNamespace(action="skip", matched_msg_id=777,
+                     similarity=0.98, vector=[0.3, 0.4], new_info="none"))
+    class CaptionSender(_MediaSender):
+        def send_card(self, text_html, link=None):
+            super().send_card(text_html, link=link)
+            return [2]
+    sender = CaptionSender()
+    sender.chat_id = "-100424841223"
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    assert raw_channels.push_raw_channel_cards(
+        **_push_kwargs(ch, tmp_path, sender), topic_gate=gate) == 1
+    assert len(sender.media) == 1
+    text = sender.cards[0][0] if long_caption else sender.media[0][2]
+    assert body in text and "t.me/c/424841223/777" in text
+    assert gate.prepared == [[body]]
+    assert all(ref["has_media"] for ref in gate.refs)
+    assert gate.index.registered[0]["text"] == body
+    assert gate.index.registered[0]["msg_ids"] == ([2] if long_caption else [1])
+    assert SeenStore.key(ch.id, 4242) in SeenStore(tmp_path / "seen.txt")
+
+
+def test_public_caption_survives_media_upload_failure(tmp_path, monkeypatch):
+    from chat_daily_tg import raw_channels, private_media
+    body = "不能上传图片时仍应保留这段从下载结果恢复的完整正文。"
+    dump = _fake_media_dump({4242: [("p.jpg", "photo")]})
+    def with_caption(*args):
+        manifest = dump(*args)
+        manifest[0]["text"] = body
+        return manifest
+    class FailingSender(_MediaSender):
+        def send_media(self, *args, **kwargs):
+            raise RuntimeError("upload rejected")
+    monkeypatch.setattr(raw_channels, "sync_chat", lambda *a, **k: None)
+    monkeypatch.setattr(raw_channels, "read_messages", lambda **k: [_row(content="", msg_id=4242)])
+    monkeypatch.setattr(private_media, "dump_messages_by_ids", with_caption)
+    ch = RawChannel(id="-100123", name="example", username="examplechan")
+    sender = FailingSender()
+    assert raw_channels.push_raw_channel_cards(**_push_kwargs(ch, tmp_path, sender)) == 1
+    assert body in sender.cards[0][0]
+
+
+def test_channel_sync_success_retained_when_local_read_fails(tmp_path,monkeypatch):
+    from chat_daily_tg import raw_channels
+    monkeypatch.setattr(raw_channels,'sync_chat',lambda *a,**k:None)
+    def fail(**kw):raise RuntimeError('local database failure')
+    monkeypatch.setattr(raw_channels,'read_messages',fail)
+    ch=RawChannel(id='-100123',name='example',username='examplechan')
+    result=raw_channels.push_raw_channel_cards(channels=[ch],since='2026-09-28',until='2026-09-29',
+        db_path=tmp_path/'db',sender=None,archive_dir=tmp_path/'archive',seen_path=tmp_path/'seen',delay_seconds=0)
+    assert result==0
+    rows=[json.loads(line) for line in (tmp_path/'archive/fetch_health.jsonl').read_text().splitlines()]
+    assert [(r['producer'],r['status']) for r in rows]==[
+        ('telegram-channel-sync','sync_completed'),('telegram-local-window','failed')]
+    assert not (tmp_path/'seen').exists()
+
+
+def test_unknown_public_send_has_ledger_content_identity(tmp_path,monkeypatch):
+    import httpx
+    from chat_daily_tg import raw_channels
+    from chat_daily_tg.tg_sender import TelegramSender
+    from chat_daily_tg.content_operations import DeliveryReview
+    monkeypatch.setattr(raw_channels,'sync_chat',lambda *a,**k:None)
+    monkeypatch.setattr(raw_channels,'read_messages',lambda **k:[_row(content='original',msg_id=42)])
+    def fail(request):raise httpx.ReadTimeout('unknown')
+    sender=TelegramSender('token','-100777',delivery_review_root=tmp_path/'review',
+                          client=httpx.Client(transport=httpx.MockTransport(fail)))
+    ch=RawChannel(id='-100123',name='example',username='examplechan')
+    result=raw_channels.push_raw_channel_cards(channels=[ch],since='2026-09-28',until='2026-09-29',
+        db_path=tmp_path/'db',sender=sender,archive_dir=tmp_path/'archive',seen_path=tmp_path/'seen',delay_seconds=0)
+    assert result==0
+    case=DeliveryReview(tmp_path/'review').report()['cases'][0]
+    assert case['content_id']=='telegram-channel:-100123:42'
+    assert case['producer']=='chatdaily_raw'

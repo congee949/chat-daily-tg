@@ -170,6 +170,20 @@ def test_fetch_filters_seen_lookback_and_enriches(httpx_mock: HTTPXMock, tmp_pat
     assert api_reqs and "seenvid0001" not in str(api_reqs[0].url)
 
 
+def test_selection_runs_before_digest_cap(httpx_mock: HTTPXMock, tmp_path):
+    _mock_feed(httpx_mock, CH_A, _feed(
+        _entry("newpromo001", local_pub=datetime(2026, 7, 2, 10)),
+        _entry("tutorial001", local_pub=datetime(2026, 7, 2, 8)),
+    ))
+    _mock_feed(httpx_mock, CH_B, _feed())
+    _mock_videos_api(httpx_mock, {"newpromo001": "PT4M", "tutorial001": "PT5M"})
+    videos = fetch_new_videos(
+        _src(max_per_digest=1), SeenStore(tmp_path / "seen"), api_key="K", now=NOW,
+        selector=lambda candidates: [v for v in candidates if v.video_id == "tutorial001"],
+    )
+    assert [v.video_id for v in videos] == ["tutorial001"]
+
+
 def test_shorts_and_live_placeholder_filtered_by_duration(httpx_mock: HTTPXMock, tmp_path):
     _mock_feed(httpx_mock, CH_A, _feed(
         _entry("shortvid001"), _entry("border18001"), _entry("keeper00001"),
@@ -295,6 +309,11 @@ def test_all_rss_fail_uses_data_api_uploads_fallback(
     videos = fetch_new_videos(_src(), SeenStore(tmp_path / "s.txt"), api_key="K", now=NOW)
 
     assert [v.video_id for v in videos] == ["apifallback"]
+    import json
+    receipts=[json.loads(line) for line in (tmp_path/'fetch_health.jsonl').read_text().splitlines()]
+    fallback=[r for r in receipts if r['producer']=='youtube-data-api']
+    assert [r['status'] for r in fallback]==['success','no_update']
+    assert any(r['producer']=='youtube-rss' and r['status']=='failed' for r in receipts)
     assert videos[0].title == "RSS 故障备用"
     assert videos[0].duration_seconds == 600
     requests = [str(request.url) for request in httpx_mock.get_requests()]
@@ -449,3 +468,19 @@ def test_proxy_from_env_precedence(monkeypatch):
     monkeypatch.setenv("http_proxy", "http://low.test:1")
     monkeypatch.setenv("HTTPS_PROXY", "http://high.test:2")
     assert _proxy_from_env() == "http://high.test:2"
+
+
+def test_rss_health_records_per_channel_failure_and_empty(tmp_path,monkeypatch):
+    import json
+    from xml.etree import ElementTree as ET
+    monkeypatch.setattr(yt.time,'sleep',lambda *_:None)
+    def fetch(client,channel):
+        if channel.channel_id==CH_A:raise RuntimeError('private failure body')
+        return ET.fromstring('<feed xmlns="http://www.w3.org/2005/Atom"></feed>')
+    monkeypatch.setattr(yt,'_fetch_feed_with_retry',fetch)
+    seen=SeenStore(tmp_path/'seen.txt')
+    videos,count,failed=yt._poll_channels(_src().fetch.whitelist,seen,None,cutoff=NOW)
+    rows=[json.loads(line) for line in (tmp_path/'fetch_health.jsonl').read_text().splitlines()]
+    assert [r['status'] for r in rows]==['failed','no_update']
+    assert rows[0]['error_type']=='RuntimeError' and 'private failure body' not in json.dumps(rows)
+    assert count==1 and videos==[] and not seen.path.exists()

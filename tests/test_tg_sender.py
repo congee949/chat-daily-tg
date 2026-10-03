@@ -4,6 +4,7 @@ import pytest
 import httpx
 from unittest.mock import patch
 from chat_daily_tg.tg_sender import (
+    AmbiguousDeliveryError,
     TelegramSender,
     split_message,
     escape_markdown_v2,
@@ -257,6 +258,50 @@ def test_send_photo_posts_multipart(httpx_mock: HTTPXMock, tmp_path):
     assert b"12345" in body and b"hi there" in body
 
 
+def test_media_upload_uses_long_read_budget_for_slow_proxy():
+    """A delayed Bot API upload response must not trip the 30s client default."""
+    s = TelegramSender(bot_token="-TOKEN-", chat_id="12345", timeout=30.0)
+    timeout = s._media_request_timeout()
+    assert timeout.read == 120.0
+    assert timeout.write == 120.0
+    assert timeout.connect == 30.0
+    assert timeout.pool == 30.0
+
+
+def test_send_photo_read_timeout_is_ambiguous_and_never_retried(httpx_mock: HTTPXMock, tmp_path):
+    """The server may have accepted the photo before its response was lost.
+    Repeating this POST was the direct cause of the 2026-08-02 triple push."""
+    httpx_mock.add_exception(
+        httpx.ReadTimeout("response lost after upload"),
+        url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
+        method="POST",
+    )
+    png = tmp_path / "card.png"
+    png.write_bytes(b"fake")
+    s = TelegramSender(
+        bot_token="-TOKEN-", chat_id="12345",
+        retry_max_attempts=3, retry_backoff_seconds=[0, 0, 0],
+    )
+    with pytest.raises(AmbiguousDeliveryError, match="outcome unknown"):
+        s.send_media(str(png), "photo", caption="same card")
+    assert len(httpx_mock.get_requests()) == 1
+
+
+def test_send_card_read_timeout_is_ambiguous_and_never_retried(httpx_mock: HTTPXMock):
+    httpx_mock.add_exception(
+        httpx.ReadTimeout("response lost"),
+        url="https://api.telegram.org/bot-TOKEN-/sendMessage",
+        method="POST",
+    )
+    s = TelegramSender(
+        bot_token="-TOKEN-", chat_id="12345",
+        retry_max_attempts=3, retry_backoff_seconds=[0, 0, 0],
+    )
+    with pytest.raises(AmbiguousDeliveryError):
+        s.send_card("<b>same card</b>")
+    assert len(httpx_mock.get_requests()) == 1
+
+
 def test_send_photo_omits_empty_caption(httpx_mock: HTTPXMock, tmp_path):
     httpx_mock.add_response(
         url="https://api.telegram.org/bot-TOKEN-/sendPhoto",
@@ -446,3 +491,69 @@ def test_sender_reuses_one_pool_and_closes_it():
         assert client_cls.call_count == 1
         sender.close()
         client_cls.return_value.__exit__.assert_called_once()
+
+
+def test_unknown_send_records_target_without_credentials(tmp_path):
+    import httpx,json
+    from chat_daily_tg.tg_sender import TelegramSender,AmbiguousDeliveryError
+    from chat_daily_tg.content_operations import DeliveryReview
+    def fail(request):raise httpx.ReadTimeout('private transport detail',request=request)
+    sender=TelegramSender('secret-token','-100123',message_thread_id=5,delivery_review_root=tmp_path,
+                          logical_content_id='source-1',client=httpx.Client(transport=httpx.MockTransport(fail)))
+    with pytest.raises(AmbiguousDeliveryError):sender.send('private text')
+    report=DeliveryReview(tmp_path).report()
+    assert report['unknown']==1
+    case=report['cases'][0]
+    assert case['content_id']=='source-1' and case['target']['method']=='sendMessage'
+    assert case['target']['chat_id']=='-100123'
+    assert 'secret-token' not in json.dumps(report) and 'private text' not in json.dumps(report)
+
+
+def test_unknown_journal_failure_does_not_retry_send(tmp_path):
+    import httpx
+    from chat_daily_tg.tg_sender import TelegramSender,AmbiguousDeliveryError
+    path=tmp_path/'file';path.write_text('not a directory');calls=[]
+    def fail(request):calls.append(1);raise httpx.ReadTimeout('timeout')
+    sender=TelegramSender('token','123',delivery_review_root=path,
+                          client=httpx.Client(transport=httpx.MockTransport(fail)))
+    with pytest.raises(AmbiguousDeliveryError):sender.send('text')
+    assert len(calls)==1
+
+
+def test_delivery_identity_is_scoped_and_restored_on_unknown(tmp_path):
+    import httpx
+    from chat_daily_tg.tg_sender import TelegramSender,AmbiguousDeliveryError,delivery_identity
+    from chat_daily_tg.content_operations import DeliveryReview
+    def fail(request):raise httpx.ReadTimeout('unknown')
+    sender=TelegramSender('token','123',delivery_review_root=tmp_path,
+                          client=httpx.Client(transport=httpx.MockTransport(fail)))
+    with pytest.raises(AmbiguousDeliveryError):
+        with delivery_identity('youtube','youtube:video-1'):
+            sender.send('caption')
+    with pytest.raises(AmbiguousDeliveryError):sender.send('unrelated')
+    cases=DeliveryReview(tmp_path).report()['cases']
+    bound=next(c for c in cases if c['content_id']=='youtube:video-1')
+    assert bound['producer']=='youtube' and bound['target']['content_mapping']=='explicit'
+    other=next(c for c in cases if c is not bound)
+    assert other['target']['content_mapping']=='needs_match'
+    assert sender.logical_content_id is None
+
+
+def test_unknown_later_chunk_retains_known_receipts(tmp_path):
+    import httpx
+    from chat_daily_tg.tg_sender import TelegramSender,AmbiguousDeliveryError,delivery_identity
+    from chat_daily_tg.content_operations import DeliveryReview
+    calls=[]
+    def handler(request):
+        calls.append(1)
+        if len(calls)==1:return httpx.Response(200,json={'ok':True,'result':{'message_id':123}})
+        raise httpx.ReadTimeout('second chunk unknown')
+    sender=TelegramSender('token','-100123',delivery_review_root=tmp_path,
+                          client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(AmbiguousDeliveryError):
+        with delivery_identity('fixture','one-logical-item'):
+            sender.send('first chunk')
+            sender.send('second chunk')
+    case=DeliveryReview(tmp_path).report()['cases'][0]
+    assert case['known_receipts']==[123] and case['content_id']=='one-logical-item'
+    assert len(calls)==2

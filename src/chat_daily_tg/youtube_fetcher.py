@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import time
+from typing import Callable
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -66,6 +67,7 @@ class YtVideo:
     description: str = ""
     view: int | None = None
     topic: str | None = None               # per-channel forum-topic override
+    selection_note: str = ""
 
     @property
     def seen_key(self) -> str:
@@ -261,6 +263,8 @@ def _fetch_feed_with_retry(client: httpx.Client, channel) -> ET.Element:
     raise last_err
 
 
+from chat_daily_tg.fetch_health import fetch_started, record_seen_fetch
+
 def _poll_channels(channels, seen: SeenStore, client: httpx.Client, *,
                    cutoff: datetime) -> tuple[list[YtVideo], int, list]:
     """One wave over ``channels``. Returns (videos, failure_count, failed_channels)."""
@@ -269,22 +273,31 @@ def _poll_channels(channels, seen: SeenStore, client: httpx.Client, *,
     for i, channel in enumerate(channels):
         if i:
             time.sleep(_CALL_SPACING_SECONDS)
+        started=fetch_started()
         try:
             root = _fetch_feed_with_retry(client, channel)
         except Exception as e:
+            record_seen_fetch(seen,producer='youtube-rss',source_ref=channel.channel_id,
+                              started_at=started,status='failed',error_type=type(e).__name__)
             log.warning("feed failed for %s (%s): %s",
                         channel.channel_id, channel.name or "?", e)
             failed.append(channel)
             continue
-        for entry in root.findall("atom:entry", _NS):
+        entries=root.findall("atom:entry", _NS)
+        parse_errors=0
+        for entry in entries:
             # Per-item isolation: one dirty entry must not kill the whole run.
             try:
                 video = _parse_entry(entry, channel, seen, cutoff)
             except Exception as e:
+                parse_errors+=1
                 log.warning("bad feed entry for %s skipped: %s", channel.channel_id, e)
                 continue
             if video is not None:
                 videos.append(video)
+        record_seen_fetch(seen,producer='youtube-rss',source_ref=channel.channel_id,started_at=started,
+                          status=('no_update' if not entries else 'parsed_empty' if parse_errors==len(entries) else 'success'),
+                          count=len(entries))
     return videos, len(failed), failed
 
 
@@ -333,6 +346,7 @@ def _fetch_uploads_via_api(src: YoutubeSource, seen: SeenStore,
     channels = _active_channels(src)
     if not channels:
         return []
+    lookup_started=fetch_started()
     try:
         response = client.get(_CHANNELS_API_URL, params={
             "part": "contentDetails",
@@ -342,6 +356,8 @@ def _fetch_uploads_via_api(src: YoutubeSource, seen: SeenStore,
         response.raise_for_status()
         items = response.json().get("items") or []
     except Exception as e:
+        for channel in channels:
+            record_seen_fetch(seen,producer='youtube-data-api',source_ref=channel.channel_id,started_at=lookup_started,status='failed',error_type=type(e).__name__)
         raise YoutubeFetchError(f"YouTube Data API uploads lookup failed: {e}") from e
 
     uploads_by_channel: dict[str, str] = {}
@@ -362,8 +378,10 @@ def _fetch_uploads_via_api(src: YoutubeSource, seen: SeenStore,
     for i, channel in enumerate(channels):
         if i:
             time.sleep(_CALL_SPACING_SECONDS)
+        started=fetch_started()
         uploads = uploads_by_channel.get(channel.channel_id)
         if not uploads:
+            record_seen_fetch(seen,producer='youtube-data-api',source_ref=channel.channel_id,started_at=started,status='failed',error_type='MissingUploadsPlaylist')
             log.warning("Data API fallback has no uploads playlist for %s (%s)",
                         channel.channel_id, channel.name or "?")
             continue
@@ -378,18 +396,24 @@ def _fetch_uploads_via_api(src: YoutubeSource, seen: SeenStore,
             items = response.json().get("items") or []
             successful_channels += 1
         except Exception as e:
+            record_seen_fetch(seen,producer='youtube-data-api',source_ref=channel.channel_id,started_at=started,status='failed',error_type=type(e).__name__)
             log.warning("Data API fallback failed for %s (%s): %s",
                         channel.channel_id, channel.name or "?", e)
             continue
+        parse_errors=0
         for item in items:
             try:
                 video = _parse_api_playlist_item(item, channel, seen, cutoff)
             except Exception as e:
+                parse_errors+=1
                 log.warning("bad Data API playlist item for %s skipped: %s",
                             channel.channel_id, e)
                 continue
             if video is not None:
                 videos.append(video)
+
+        record_seen_fetch(seen,producer='youtube-data-api',source_ref=channel.channel_id,started_at=started,
+                          status='no_update' if not items else 'parsed_empty' if parse_errors==len(items) else 'success',count=len(items))
 
     if not successful_channels:
         raise YoutubeFetchError("YouTube Data API uploads fallback failed for every channel")
@@ -508,7 +532,8 @@ def _proxy_from_env() -> str | None:
 
 def fetch_new_videos(src: YoutubeSource, seen: SeenStore, *,
                      api_key: str | None,
-                     now: datetime | None = None) -> list[YtVideo]:
+                     now: datetime | None = None,
+                     selector: Callable[[list[YtVideo]], list[YtVideo]] | None = None) -> list[YtVideo]:
     """Poll每个白名单频道的 RSS，去重后批量补时长，过滤 Shorts，按发布时间
     倒序返回（截断到 max_per_digest）。Candidates are only marked seen after a
     successful send, by the caller (write-after-send)."""
@@ -537,6 +562,8 @@ def fetch_new_videos(src: YoutubeSource, seen: SeenStore, *,
     kept = [v for v in videos if not _is_short(v, src.fetch.min_duration_seconds)]
     if len(kept) < len(videos):
         log.info("shorts filtered: %d -> %d videos", len(videos), len(kept))
+    if selector is not None:
+        kept = selector(kept)
     return _finalize(kept, src.fetch.max_per_digest)
 
 

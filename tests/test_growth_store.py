@@ -14,6 +14,7 @@ from chat_daily_tg.growth_store import (
     log_ab,
     mark_day_mined,
     mark_sent,
+    mark_ambiguous,
     mined_days_summary,
     pick_next,
     release_claim,
@@ -257,3 +258,63 @@ def test_regenerate_slice_index(tmp_path: Path):
     # 重复生成不追加（全量重建）
     regenerate_slice_index(db, seg_dir)
     assert out.read_text(encoding="utf-8").count("msg 100–200") == 1
+
+
+def test_mark_ambiguous_prevents_reclaim(tmp_path: Path):
+    db = tmp_path / "t.db"
+    insert_segments(db, [_seg("2026-07-10", 100, 200)])
+    claimed = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=1, run_id="run-x", lease_seconds=300,
+    )
+    assert claimed is not None
+    assert mark_ambiguous(db, claimed.id, run_id="run-x")
+    # Must not be claimable again (terminal).
+    again = claim_next(
+        db, prefer_date="2026-07-10", sent_date="2026-07-11",
+        quota=2, run_id="run-y", lease_seconds=300,
+    )
+    assert again is None
+
+
+def test_ambiguous_growth_review_requires_absence_and_frozen_attempt(tmp_path):
+    import pytest
+    from chat_daily_tg.growth_store import review_ambiguous
+    from chat_daily_tg.sqlite_util import connect
+    db=tmp_path/'db';seg=_seg('2026-09-29',1,10)
+    insert_segments(db,[seg]);mark_sent(db,seg.id,'ambiguous',sent_at='2026-09-29T08:00:00+08:00')
+    kw=dict(db_path=db,seg_id=seg.id,expected_sent_at='2026-09-29T08:00:00+08:00',actor='fixture')
+    with pytest.raises(ValueError,match='confirm absence'):
+        review_ambiguous(**kw,decision='retry_requested',evidence={'chat_id':123,'reason':'retry'})
+    review_ambiguous(**kw,decision='confirmed_absent',evidence={'chat_id':123,'checked_scope':'historical chat and time'})
+    assert pick_next(db, '2026-09-29') is None
+    review_ambiguous(**kw,decision='retry_requested',evidence={'chat_id':123,'reason':'explicit retry'})
+    assert pick_next(db, '2026-09-29').id==seg.id
+    with pytest.raises(ValueError,match='changed'):
+        review_ambiguous(**kw,decision='retry_requested',evidence={'chat_id':123,'reason':'stale repeat'})
+    conn=connect(db)
+    assert conn.execute('SELECT COUNT(*) FROM growth_delivery_reviews').fetchone()[0]==2
+    conn.close()
+
+
+def test_confirmed_growth_delivery_never_requeues(tmp_path):
+    from chat_daily_tg.growth_store import review_ambiguous
+    db=tmp_path/'db';seg=_seg('2026-09-29',1,10)
+    insert_segments(db,[seg]);mark_sent(db,seg.id,'ambiguous',sent_at='2026-09-29T08:00:00+08:00')
+    review_ambiguous(db,seg.id,expected_sent_at='2026-09-29T08:00:00+08:00',decision='confirmed_sent',actor='fixture',
+                     evidence={'chat_id':123,'message_ids':[42],'telegram_reference':'fixture Telegram receipt'})
+    assert pick_next(db, '2026-09-29') is None
+
+
+def test_growth_review_projected_to_daily_report(tmp_path):
+    from chat_daily_tg.growth_store import review_ambiguous
+    from chat_daily_tg.content_operations import DeliveryReview
+    db=tmp_path/'db';seg=_seg('2026-09-29',1,10)
+    insert_segments(db,[seg]);mark_sent(db,seg.id,'ambiguous',sent_at='2026-09-29T08:00:00+08:00')
+    review=DeliveryReview(tmp_path/'review')
+    review.import_growth(db,machine='fixture',target={'chat_id':123})
+    assert review.report()['unknown']==1
+    review_ambiguous(db,seg.id,expected_sent_at='2026-09-29T08:00:00+08:00',decision='confirmed_sent',actor='fixture',
+                     evidence={'chat_id':123,'message_ids':[42],'telegram_reference':'fixture receipt'})
+    for _ in range(2):review.import_growth(db,machine='fixture',target={'chat_id':123})
+    assert review.report()['unknown']==0 and review.report()['resolved']==1

@@ -13,6 +13,10 @@ dependencies = [
     "pydantic>=2.5",
     "tenacity>=8.2",
     "pillow>=12.3.0",
+    # KnowledgeIndex keeps vectors in a raw float32 matrix and uses the exact
+    # local Qwen tokenizer for the 800-token preflight required by the runtime.
+    "numpy>=2.0",
+    "tokenizers>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +28,7 @@ dev = [
 
 [project.scripts]
 chat-daily = "chat_daily_tg.cli:main"
+chat-daily-knowledge = "chat_daily_tg.knowledge_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 def _subscription_cfg(source_name):
     fetch = SimpleNamespace(whitelist=[object()])
@@ -21,6 +23,80 @@ def _subscription_cfg(source_name):
     )
 
 
+def test_l2_enforce_and_reranker_release_flags_are_independent(monkeypatch):
+    import chat_daily_tg.evidence_index as evidence_index
+    import chat_daily_tg.topic_dedup as topic_dedup
+    import run_daily
+
+    topic = SimpleNamespace(
+        enabled=True,
+        mode="enforce",
+        enforce_enabled=False,
+        reranker_enabled=False,
+        reranker_top_k=3,
+        index_window_days=14,
+        retrieval_window_hours=48,
+        forum_chat_id="-1001",
+        sync_limit=300,
+        candidate_min_sim=0.8,
+        strong_sim=0.93,
+        max_judge_calls_per_run=5,
+        min_embedding_coverage=0.995,
+        calibrated_generation_id=None,
+        online_backfill_cap=0,
+        judge_model_alias="judge",
+        judge_model="judge-model",
+        judge_timeout_seconds=8.0,
+        exclude_producers=[],
+    )
+    cfg = SimpleNamespace(
+        sources=SimpleNamespace(
+            telegram=SimpleNamespace(
+                db_path="/non-production/test.db",
+                dedup=SimpleNamespace(
+                    content=SimpleNamespace(enabled=False), topic=topic
+                ),
+            )
+        ),
+        models=SimpleNamespace(
+            embedding=SimpleNamespace(enabled=True),
+            reranker=SimpleNamespace(enabled=True),
+        ),
+        resolve_model_alias=lambda _name: object(),
+    )
+    embedder = SimpleNamespace(generation=object())
+    gate = object()
+    monkeypatch.setattr(evidence_index, "build_embedder", lambda _cfg: embedder)
+    monkeypatch.setattr(topic_dedup, "DeliveredIndex", MagicMock())
+    monkeypatch.setattr(topic_dedup, "SameEventJudge", MagicMock())
+    gate_factory = MagicMock(return_value=gate)
+    monkeypatch.setattr(topic_dedup, "TopicDedupGate", gate_factory)
+    monkeypatch.setattr(run_daily, "_llm_from_block", MagicMock())
+    reranker_factory = MagicMock()
+    monkeypatch.setattr(run_daily, "build_reranker", reranker_factory)
+
+    _, built = run_daily._build_dedup_gates(cfg, no_push=False)
+
+    assert built is gate
+    assert gate_factory.call_args.kwargs["mode"] == "report"
+    assert gate_factory.call_args.kwargs["reranker"] is None
+    assert gate_factory.call_args.kwargs["calibration_receipt_path"].name == (
+        "topic-dedup-calibration-receipt.v1.json"
+    )
+    reranker_factory.assert_not_called()
+
+    topic.enforce_enabled = True
+    run_daily._build_dedup_gates(cfg, no_push=False)
+    assert gate_factory.call_args.kwargs["mode"] == "report"
+    assert gate_factory.call_args.kwargs["reranker"] is None
+
+    topic.reranker_enabled = True
+    reranker_factory.return_value = "ranker"
+    run_daily._build_dedup_gates(cfg, no_push=False)
+    assert gate_factory.call_args.kwargs["mode"] == "enforce"
+    assert gate_factory.call_args.kwargs["reranker"] == "ranker"
+
+
 def test_run_bilibili_returns_failure_when_delivery_is_incomplete(tmp_path, monkeypatch):
     import run_daily
 
@@ -35,13 +111,51 @@ def test_run_bilibili_returns_failure_when_delivery_is_incomplete(tmp_path, monk
     monkeypatch.setattr("chat_daily_tg.bilibili_fetcher.fetch_new_content",
                         lambda *_args, **_kwargs: [SimpleNamespace(kind="video")])
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.build_summarizer",
-                        lambda *_: None)
+                        lambda *_, **kwargs: None)
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.push_digest",
                         lambda *_args, **_kwargs: 0)
     monkeypatch.setattr("chat_daily_tg.raw_seen.SeenStore", MagicMock)
     monkeypatch.setattr("chat_daily_tg.tg_sender.TelegramSender", MagicMock)
 
     assert run_daily.run_bilibili() == 1
+
+
+def test_run_bilibili_enospc_returns_2_and_throttles_repeat(tmp_path, monkeypatch):
+    import errno
+    import run_daily
+
+    cfg = _subscription_cfg("bilibili")
+    monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(run_daily, "configure_logging", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_env_file", lambda *_: None)
+    monkeypatch.setattr(run_daily, "load_config", lambda *_: cfg)
+    monkeypatch.setattr(run_daily, "notify_failure", MagicMock())
+    monkeypatch.setattr("chat_daily_tg.bilibili_fetcher.fetch_new_content",
+                        lambda *_a, **_k: (_ for _ in ()).throw(
+                            OSError(errno.ENOSPC, "No space left on device")))
+    monkeypatch.setattr("chat_daily_tg.raw_seen.SeenStore", MagicMock)
+    monkeypatch.setenv("CHAT_DAILY_SEEN_OVERFLOW_DIR", str(tmp_path / "overflow"))
+
+    assert run_daily.run_bilibili() == 2
+    assert run_daily.notify_failure.call_count == 1
+    assert run_daily.run_bilibili() == 2
+    assert run_daily.notify_failure.call_count == 1
+
+
+def test_alert_throttle_uses_tmp_when_state_unwritable(tmp_path, monkeypatch):
+    import run_daily
+
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(run_daily, "DATA_DIR", blocked)
+    fallback = Path("/tmp") / "chat-daily-alert-throttle-unit-test"
+    fallback.unlink(missing_ok=True)
+    try:
+        assert run_daily._alert_throttle_allow("unit-test", window_s=1200) is True
+        assert fallback.exists()
+        assert run_daily._alert_throttle_allow("unit-test", window_s=1200) is False
+    finally:
+        fallback.unlink(missing_ok=True)
 
 
 def test_run_youtube_returns_failure_when_delivery_is_incomplete(tmp_path, monkeypatch):
@@ -59,7 +173,7 @@ def test_run_youtube_returns_failure_when_delivery_is_incomplete(tmp_path, monke
     monkeypatch.setattr("chat_daily_tg.youtube_fetcher.fetch_new_videos",
                         lambda *_args, **_kwargs: [SimpleNamespace(topic=None)])
     monkeypatch.setattr("chat_daily_tg.youtube_digest.build_summarizer",
-                        lambda *_: None)
+                        lambda *_, **kwargs: None)
     monkeypatch.setattr("chat_daily_tg.youtube_digest.push_digest",
                         lambda *_args, **_kwargs: 0)
     monkeypatch.setattr("chat_daily_tg.raw_seen.SeenStore", MagicMock)
@@ -97,6 +211,8 @@ sources:
       - id: "-1001"
         name: "TG1"
         limit: 50
+        exclude_senders: ["Group Help Bot"]
+        exclude_patterns: ["入群验证"]
 llm: {endpoint: "http://x", model: "m", api_key_env: "K", max_tokens: 100}
 telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 """,
@@ -164,6 +280,8 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         assert "完整来源标签：微信 / G1" in first_prompt
         assert "### === 来源: Telegram / TG1 ===" in first_prompt
         assert "完整来源标签：Telegram / TG1" in first_prompt
+        assert mock_export_chat.call_args.kwargs["exclude_senders"] == ["Group Help Bot"]
+        assert mock_export_chat.call_args.kwargs["exclude_patterns"] == ["入群验证"]
         assert "## 原始聊天记录" in verifier_prompt
         assert "## 日报初稿" in verifier_prompt
         assert len(tg_client_instance.post.call_args_list) == 1
@@ -367,6 +485,8 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         rc = run_daily.main(date_str="2026-04-17")
 
     assert rc == 0
+    assert mock_export_group.call_args.kwargs["since"] == "2026-04-17"
+    assert mock_export_group.call_args.kwargs["until"] == "2026-04-17"
     first_prompt = mock_chat.call_args_list[0].args[0]
     verifier_prompt = mock_chat.call_args_list[1].args[0]
     assert "### === 来源: 图片理解 / 多来源 ===" in first_prompt
@@ -479,7 +599,10 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     assert "rich_media_0" in rich_calls[0].kwargs["files"]
 
 
-def test_run_daily_adds_embedding_evidence_to_verifier_prompt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("evidence_archive_fails", [False, True])
+def test_run_daily_adds_embedding_evidence_to_verifier_prompt(
+    tmp_path, monkeypatch, evidence_archive_fails
+):
     import chat_daily_tg.paths as paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
     monkeypatch.setattr(paths, "ARCHIVE_DIR", tmp_path / "archive")
@@ -505,6 +628,10 @@ models:
     api_key_env: "GOOGLE_API_KEY"
     top_k: 2
     min_similarity: 0.1
+  reranker:
+    enabled: true
+    endpoint: "http://127.0.0.1:8790/v1"
+    model: "qwen-reranker"
 telegram: {bot_token_env: "TT", chat_id_env: "TC"}
 """,
         encoding="utf-8",
@@ -527,7 +654,8 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
     verified_content = llm_content + "\n\n```json verification\n{\"checked_claims\":[]}\n```"
 
     with patch("run_daily.export_group") as mock_export_group, \
-         patch("run_daily.GeminiEmbedder") as embedder_cls, \
+         patch("run_daily.build_embedder") as embedder_factory, \
+         patch("run_daily.build_reranker") as reranker_factory, \
          patch("chat_daily_tg.llm_client.LLMClient.chat") as mock_chat, \
          patch("chat_daily_tg.tg_sender.httpx.Client") as tg_client_cls:
         mock_export_group.return_value = MagicMock(
@@ -536,11 +664,9 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
             content="# group\n\n### 2026-05-06 14:15\n\n**A**: 4.3出了哦\n\n### 2026-05-06 14:22\n\n**B**: 这个能直接读x\n",
             media_candidates=[],
         )
-        # run_daily builds the embedder via the shared GeminiEmbedder.from_config
-        # factory — route the classmethod to the same stub instance.
-        embedder_cls.from_config.return_value = embedder_cls.return_value
-        embedder_cls.return_value.embed_documents.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
-        embedder_cls.return_value.embed_queries.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        embedder = embedder_factory.return_value
+        embedder.embed_documents.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        embedder.embed_queries.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
         mock_chat.side_effect = [
             (llm_content, {"total_tokens": 10}),
             (verified_content, {"total_tokens": 8}),
@@ -553,16 +679,27 @@ telegram: {bot_token_env: "TT", chat_id_env: "TC"}
         import run_daily
         monkeypatch.setattr(run_daily, "CONFIG_PATH", tmp_path / "config.yaml")
         monkeypatch.setattr(run_daily, "DATA_DIR", tmp_path)
+        if evidence_archive_fails:
+            real_write_text = Path.write_text
+
+            def fail_evidence_archive(path, data, *args, **kwargs):
+                if path.name == "evidence-context.md":
+                    raise OSError("simulated evidence archive failure")
+                return real_write_text(path, data, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "write_text", fail_evidence_archive)
         rc = run_daily.main(date_str="2026-05-06")
 
     assert rc == 0
+    # A configured/enabled reranker model is not a release switch.
+    reranker_factory.assert_not_called()
     verifier_prompt = mock_chat.call_args_list[1].args[0]
     assert "## Embedding 检索证据" in verifier_prompt
     assert "4.3出了哦" in verifier_prompt
     assert "Grok 4.3 发布" in verifier_prompt
     archive_dir = tmp_path / "archive" / "2026" / "05" / "06"
     assert (archive_dir / "evidence.sqlite").exists()
-    assert (archive_dir / "evidence-context.md").exists()
+    assert (archive_dir / "evidence-context.md").exists() is not evidence_archive_fails
     summary_text = (archive_dir / "summary.md").read_text(encoding="utf-8")
     assert "## Embedding 检索证据" in summary_text
     assert "4.3出了哦" in summary_text
@@ -1131,3 +1268,37 @@ def test_termination_alert_registers_and_fires_once(monkeypatch):
     # Reset to default then re-raise, both times, so the process actually dies.
     assert registered[signal.SIGTERM] is signal.SIG_DFL
     assert killed == [(os.getpid(), signal.SIGTERM), (os.getpid(), signal.SIGTERM)]
+
+
+def test_jev_primary_wiring_and_legacy_fallback(monkeypatch, tmp_path):
+    from chat_daily_tg import application, evidence_index, paths, topic_dedup
+    from chat_daily_tg.config import Config
+    from chat_daily_tg.jev_judge import JevJudge
+
+    cfg = Config.model_validate({
+        "sources": {"wechat": {"groups": ["test"]}, "telegram": {
+            "dedup": {"content": {"enabled": False}, "topic": {
+                "enabled": True, "judge_provider": "jev", "jev_shadow_enabled": True,
+            }}}},
+        "models": {"summary": {"endpoint": "http://test", "model": "test", "api_key_env": "TEST"},
+                   "embedding": {"enabled": True, "endpoint": "http://test", "model": "test", "api_key_env": "TEST"},
+                   "jev": {"enabled": True}},
+        "vibekey": {"endpoint": "http://test", "model": "fallback", "api_key_env": "TEST"},
+        "telegram": {"bot_token_env": "TEST", "chat_id_env": "TEST"},
+    })
+    monkeypatch.setenv("TEST", "test")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(paths, "DELIVERED_INDEX_DB", tmp_path/"delivered.db")
+    monkeypatch.setattr(paths, "JEV_DEDUP_JUDGE", tmp_path/"judge.jsonl")
+    monkeypatch.setattr(evidence_index, "build_embedder", lambda _: SimpleNamespace(generation=None))
+    _, gate = application._build_dedup_gates(cfg, no_push=False)
+    assert isinstance(gate.judge, JevJudge)
+    assert gate.jev_shadow is None  # primary and shadow cannot double-bill
+    assert gate.judge.fallback is not None
+    gate.judge.close()
+    gate.index.close()
+    cfg.models.jev["endpoint"] = "https://invalid.example"
+    _, gate = application._build_dedup_gates(cfg, no_push=False)
+    assert isinstance(gate.judge, topic_dedup.SameEventJudge)
+    assert gate.jev_shadow is None
+    gate.index.close()

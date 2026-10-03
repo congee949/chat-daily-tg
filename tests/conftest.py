@@ -14,6 +14,15 @@ def _no_proxy_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _serial_vision_concurrency(monkeypatch):
+    # pytest_httpx hands out registered responses in registration order, so the
+    # vision thread pool would let two candidates race for each other's mocked
+    # response. Pin tests to one worker for deterministic response→candidate
+    # pairing; concurrency-specific tests override this env var themselves.
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "1")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_sent_ledger(monkeypatch, tmp_path):
     """Keep fake Telegram message IDs out of the live Podcast ledger."""
     from functools import partial

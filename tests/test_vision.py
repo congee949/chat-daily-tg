@@ -1,4 +1,5 @@
 import base64
+import json
 
 from pytest_httpx import HTTPXMock
 
@@ -51,7 +52,12 @@ def test_vision_client_posts_image_and_parses_json(tmp_path, httpx_mock: HTTPXMo
         },
     )
 
-    client = VisionClient(endpoint="https://vision.example/v1", model="vision", api_key="k")
+    client = VisionClient(
+        endpoint="https://vision.example/v1",
+        model="vision",
+        api_key="k",
+        extra_body={"reasoning_effort": "xhigh"},
+    )
     out = client.analyze(_candidate(str(image)))
 
     assert out.type == "activity_poster"
@@ -61,6 +67,7 @@ def test_vision_client_posts_image_and_parses_json(tmp_path, httpx_mock: HTTPXMo
     body = req.read().decode()
     encoded = base64.b64encode(b"fake image").decode("ascii")
     assert encoded in body
+    assert json.loads(body)["reasoning_effort"] == "xhigh"
 
 
 def _real_image(path, size=(400, 400)):
@@ -763,3 +770,143 @@ def test_write_vision_audit_truncates_and_survives_surrogates(tmp_path):
     # An empty run TRUNCATES the stale file instead of leaving it (review A1).
     write_vision_audit(path, [])
     assert path.read_text(encoding="utf-8") == ""
+
+
+def test_vision_concurrency_env_override_and_fallback(monkeypatch):
+    from chat_daily_tg.vision import _vision_concurrency
+    monkeypatch.delenv("CHAT_DAILY_VISION_CONCURRENCY", raising=False)
+    assert _vision_concurrency() == 3
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "5")
+    assert _vision_concurrency() == 5
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "junk")
+    assert _vision_concurrency() == 3
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "0")
+    assert _vision_concurrency() == 3
+
+
+def test_vision_client_reuses_one_http_client_until_closed(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+    body = _json.dumps({"type": "price_screenshot", "value_score": 0.9, "summary": "s",
+                        "key_facts": ["k"], "risk_flags": [],
+                        "should_include_in_daily": True, "reason": "r"})
+    image = tmp_path / "a.png"
+    image.write_bytes(b"fake image")
+    with patch("chat_daily_tg.vision.httpx.Client") as client_cls:
+        http = client_cls.return_value
+        response = http.post.return_value
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"choices": [{"message": {"content": body}}]}
+        client = VisionClient(endpoint="https://vision.example/v1", model="v", api_key="k")
+        client.analyze(_candidate(str(image)))
+        client.analyze(_candidate(str(image)))
+        assert client_cls.call_count == 1  # one pool for both calls
+        client.close()
+        http.close.assert_called_once()
+        client.analyze(_candidate(str(image)))
+        assert client_cls.call_count == 2  # closed → lazily recreated
+
+
+def _fake_analysis(candidate, value_score: float) -> VisionAnalysis:
+    return VisionAnalysis(
+        candidate=candidate, type="price_screenshot", value_score=value_score,
+        summary="信息", key_facts=["满减"], risk_flags=[],
+        should_include_in_daily=True, reason="r",
+    )
+
+
+def test_analyze_media_candidates_concurrent_run_keeps_candidate_order(monkeypatch):
+    import threading
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "3")
+    monkeypatch.setattr("chat_daily_tg.media._is_valid_image_file", lambda p: (True, "ok"))
+    # All three analyses must be in flight simultaneously before any returns:
+    # a serial implementation breaks the barrier (timeout) instead of flaking.
+    rendezvous = threading.Barrier(3, timeout=10)
+    lock = threading.Lock()
+    state = {"inflight": 0, "max_inflight": 0}
+    scores = {"/x/a.jpg": 0.9, "/x/b.jpg": 0.85, "/x/c.jpg": 0.95}
+
+    class FakeClient:
+        def analyze(self, candidate):
+            with lock:
+                state["inflight"] += 1
+                state["max_inflight"] = max(state["max_inflight"], state["inflight"])
+            rendezvous.wait()
+            with lock:
+                state["inflight"] -= 1
+            return _fake_analysis(candidate, scores[candidate.local_path])
+
+        def close(self):
+            pass
+
+    candidates = [_candidate(p, score=0.8) for p in ("/x/a.jpg", "/x/b.jpg", "/x/c.jpg")]
+    stats: dict = {}
+    audit: list = []
+    out = analyze_media_candidates(
+        client=FakeClient(), candidates=candidates, stats_out=stats, audit_out=audit)
+
+    # Results, audit rows and stats aggregate in CANDIDATE order, not completion order.
+    assert [a.candidate.local_path for a in out] == ["/x/a.jpg", "/x/b.jpg", "/x/c.jpg"]
+    assert [row["candidate"]["local_path"] for row in audit] == [
+        "/x/a.jpg", "/x/b.jpg", "/x/c.jpg"]
+    assert stats["attempted"] == 3 and stats["included"] == 3
+    assert state["max_inflight"] == 3  # concurrency actually happened
+
+
+def test_circuit_breaker_stops_submissions_under_concurrency(monkeypatch):
+    import threading
+    import chat_daily_tg.vision as vision_mod
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "2")
+    monkeypatch.setattr(vision_mod, "_CIRCUIT_BREAKER_FAILURES", 2)
+    monkeypatch.setattr("chat_daily_tg.media._is_valid_image_file", lambda p: (True, "ok"))
+    lock = threading.Lock()
+    attempted_paths: list[str] = []
+
+    class DeadClient:
+        def analyze(self, candidate):
+            with lock:
+                attempted_paths.append(candidate.local_path)
+            raise RuntimeError("endpoint dead")
+
+        def close(self):
+            pass
+
+    candidates = [_candidate(f"/x/{i}.jpg", score=0.8) for i in range(6)]
+    stats: dict = {}
+    audit: list = []
+    out = analyze_media_candidates(
+        client=DeadClient(), candidates=candidates, stats_out=stats, audit_out=audit)
+
+    # The dispatcher never keeps more calls in flight than the breaker can
+    # absorb, so a dead endpoint costs EXACTLY the threshold — deterministically.
+    assert out == []
+    assert sorted(attempted_paths) == ["/x/0.jpg", "/x/1.jpg"]
+    assert stats["attempted"] == 2
+    assert stats["api_failed"] == 2
+    assert stats["aborted_early"] == 4
+    assert [row["decision"] for row in audit] == ["api_failed", "api_failed"]
+
+
+def test_fallback_pick_is_order_deterministic_under_concurrency(monkeypatch):
+    import threading
+    monkeypatch.setenv("CHAT_DAILY_VISION_CONCURRENCY", "3")
+    monkeypatch.setattr("chat_daily_tg.media._is_valid_image_file", lambda p: (True, "ok"))
+    rendezvous = threading.Barrier(3, timeout=10)
+    # Nothing clears 0.8; two candidates tie at 0.7 — the promoted one must be
+    # the FIRST in candidate order (strict-> comparison), as in the serial loop.
+    scores = {"/x/a.jpg": 0.7, "/x/b.jpg": 0.7, "/x/c.jpg": 0.66}
+
+    class FakeClient:
+        def analyze(self, candidate):
+            rendezvous.wait()
+            return _fake_analysis(candidate, scores[candidate.local_path])
+
+        def close(self):
+            pass
+
+    candidates = [_candidate(p, score=0.8) for p in ("/x/a.jpg", "/x/b.jpg", "/x/c.jpg")]
+    stats: dict = {}
+    out = analyze_media_candidates(client=FakeClient(), candidates=candidates, stats_out=stats)
+    assert len(out) == 1
+    assert out[0].candidate.local_path == "/x/a.jpg"
+    assert stats["fallback_included"] == 1

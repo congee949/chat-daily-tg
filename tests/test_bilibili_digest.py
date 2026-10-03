@@ -88,7 +88,7 @@ def test_card_caption_does_not_label_the_subscribed_uploader_as_copublished():
 
 def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     seen = SeenStore(tmp_path / "seen.txt")
     videos = [_video("BV1newest001", publish_time=datetime(2026, 7, 2, 10)),
@@ -107,7 +107,7 @@ def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
 
 def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender(photo_fails=True)
     seen = SeenStore(tmp_path / "seen.txt")
     n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
@@ -121,7 +121,7 @@ def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path
 
 def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(link_enabled=False), summarizer=None, workdir=tmp_path)
@@ -130,7 +130,7 @@ def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
 
 def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: None)
+                        lambda url, dest, **kwargs: None)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(), summarizer=None, workdir=tmp_path)
@@ -139,7 +139,7 @@ def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path
 
 def test_push_digest_total_failure_leaves_unseen_for_retry(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: None)
+                        lambda url, dest, **kwargs: None)
 
     class DeadSender(FakeSender):
         def send_card(self, text_html, *, link=None, button=None):
@@ -167,7 +167,7 @@ def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
     # append_message_ids imports path default at call time via module path param - patch paths too
     monkeypatch.setattr("chat_daily_tg.sent_ledger.MEDIA_SENT_LEDGER", ledger)
     monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(), summarizer=None, workdir=tmp_path)
@@ -189,3 +189,46 @@ def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
         assert row["thread_id"] == 486
     else:
         assert hit["url"].endswith("BV1testtest1")
+
+
+def test_push_digest_ambiguous_photo_is_terminal_no_text_fallback(monkeypatch, tmp_path):
+    import httpx
+    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+
+    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+                        lambda url, dest, **kwargs: dest)
+    journal = []
+    monkeypatch.setattr("chat_daily_tg.dedup_journal.record",
+                        lambda entry, path=None: journal.append(entry))
+    monkeypatch.setattr("chat_daily_tg.notifier.notify_failure", lambda *a, **k: None)
+
+    class AmbiguousPhotoSender(FakeSender):
+        def send_photo(self, path, caption="", parse_mode=None, button=None):
+            raise AmbiguousDeliveryError("sendPhoto", httpx.ReadTimeout("lost"))
+
+    sender = AmbiguousPhotoSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+    n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
+                    summarizer=None, workdir=tmp_path)
+    assert n == 0
+    assert sender.cards == []  # no text fallback
+    assert "bilibili:BV1testtest1" in seen
+    assert journal and journal[0]["action"] == "ambiguous"
+
+
+def test_push_digest_seen_persist_failure_still_counts_sent(monkeypatch, tmp_path):
+    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover",
+                        lambda url, dest, **kwargs: dest)
+    monkeypatch.setattr("chat_daily_tg.sent_ledger.MEDIA_SENT_LEDGER",
+                        tmp_path / "ledger.jsonl")
+    sender = FakeSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+
+    def boom(_key):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(seen, "add", boom)
+    n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
+                    summarizer=None, workdir=tmp_path)
+    assert n == 1
+    assert sender.photos or sender.cards

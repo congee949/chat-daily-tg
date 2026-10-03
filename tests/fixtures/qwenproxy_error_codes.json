@@ -1,0 +1,74 @@
+{
+  "description": "Hermetic QwenProxy↔chat-daily error contract. Codes must match qwenproxy ERROR_CODES where proxy-originated; client-local 200 soft failures listed separately.",
+  "retryable_http_statuses": [408, 409, 425, 429, 500, 501, 502, 503, 504],
+  "non_retryable_http_statuses": [400, 401, 403, 404],
+  "retry_after_client_cap_seconds": 60,
+  "codes": [
+    {
+      "code": "unauthorized",
+      "http_status": 401,
+      "retryable": false,
+      "notes": "Missing/wrong Authorization; client must not retry"
+    },
+    {
+      "code": "invalid_model_id",
+      "http_status": 400,
+      "retryable": false,
+      "notes": "Display names / non-slug model ids rejected by proxy"
+    },
+    {
+      "code": "RateLimited",
+      "http_status": 429,
+      "retryable": true,
+      "notes": "Upstream RateLimited; proxy may attach Retry-After; client caps wait at 60s"
+    },
+    {
+      "code": "lane_busy",
+      "http_status": 429,
+      "retryable": true,
+      "notes": "All account lanes busy; Retry-After typically 2s"
+    },
+    {
+      "code": "empty_non_stream_body",
+      "http_status": 502,
+      "retryable": true,
+      "notes": "Browser/upstream 200 with empty non-stream body after internal retry"
+    },
+    {
+      "code": "headers_timeout",
+      "http_status": 502,
+      "retryable": true,
+      "notes": "Headers path timed out; do not leak account id"
+    },
+    {
+      "code": "session_invalid",
+      "http_status": 503,
+      "retryable": true,
+      "notes": "Session missing or chat input unavailable"
+    },
+    {
+      "code": "all_accounts_unavailable",
+      "http_status": 429,
+      "retryable": true,
+      "notes": "No healthy accounts (cooldown or no state)"
+    },
+    {
+      "code": "server_not_ready",
+      "http_status": 503,
+      "retryable": true,
+      "notes": "Proxy still initializing; Retry-After often 1s"
+    },
+    {
+      "code": "malformed_response",
+      "http_status": 200,
+      "retryable": true,
+      "notes": "Client-local: 200 without usable choices/message"
+    },
+    {
+      "code": "empty_content",
+      "http_status": 200,
+      "retryable": true,
+      "notes": "Client-local: 200 with empty or whitespace-only message.content"
+    }
+  ]
+}

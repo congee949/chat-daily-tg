@@ -25,3 +25,23 @@ def test_configure_logging_redacts_bot_token(tmp_path):
     assert token not in content
     assert "1234567890:AA" not in content   # not even a fragment, incl. traceback
     assert "<REDACTED_TG_TOKEN>" in content
+
+
+def test_configure_logging_survives_unwritable_log_path(tmp_path):
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("x", encoding="utf-8")
+    configure_logging(blocked / "nested.log")
+    logging.getLogger("enospc-log").info("must not raise")
+
+
+def test_configure_logging_redacts_bearer_and_api_keys(tmp_path):
+    from chat_daily_tg.logging_setup import redact
+    sample = (
+        "Authorization: Bearer sk-abcDEF1234567890xxxx "
+        "AIzaSyA-test-google-key-123456789012 Cookie: session=secret"
+    )
+    out = redact(sample)
+    assert "sk-abcDEF" not in out
+    assert "AIzaSyA" not in out
+    assert "session=secret" not in out
+    assert "<REDACTED_SECRET>" in out

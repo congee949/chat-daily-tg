@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from chat_daily_tg.health_briefing import HealthReport
+from chat_daily_tg.health_briefing import HealthReport, SLEEP_PENDING_MESSAGE
 
 log = logging.getLogger(__name__)
 
@@ -77,10 +77,10 @@ def _metric_row(
 
 
 def _sleep_timeline(draw: ImageDraw.ImageDraw, report: HealthReport, y: int) -> int:
-    sleep = report.sleep
+    sleep = report.last_night_sleep
     draw.text((66, y), "睡眠构成", font=_font(31), fill=TEXT)
     if sleep is None:
-        draw.text((66, y + 55), "尚无完整睡眠记录", font=_font(27), fill=MUTED)
+        draw.text((66, y + 55), SLEEP_PENDING_MESSAGE, font=_font(27), fill=MUTED)
         return y + 115
     total = max(
         sleep.core_hours + sleep.deep_hours + sleep.rem_hours + sleep.awake_hours,
@@ -149,7 +149,7 @@ def render_health_card(report: HealthReport, out_path: Path) -> Path | None:
 
         draw.rounded_rectangle((46, 165, 1154, 522), radius=26, fill=PANEL)
         draw.text((76, 193), "昨日状态 · 相对个人近期中位数", font=_font(25), fill=MUTED)
-        sleep = report.sleep
+        sleep = report.last_night_sleep
         _metric_row(
             draw, 252, "睡眠",
             _ratio(sleep.asleep_hours if sleep else None, report.medians.get("sleep")),

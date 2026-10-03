@@ -80,7 +80,7 @@ def test_card_caption_omits_summary_and_duration_when_absent():
 
 def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     seen = SeenStore(tmp_path / "seen.txt")
     videos = [_video("newestvid01", publish_time=datetime(2026, 7, 2, 10)),
@@ -99,9 +99,25 @@ def test_push_digest_sends_oldest_first_and_marks_seen(monkeypatch, tmp_path):
     assert "https://www.youtube.com/watch?v=" not in sender.photos[0][1]
 
 
+def test_selection_note_replaces_extra_summary_call(monkeypatch, tmp_path):
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
+                        lambda *args, **kwargs: None)
+    sender = FakeSender()
+    seen = SeenStore(tmp_path / "seen")
+
+    def unused(*args):
+        raise AssertionError("selection already supplied the viewing guide")
+
+    assert push_digest([_video(selection_note="视频看点：API演示与技术问答")],
+                       sender=sender, seen=seen, cfg=_cfg(), summarizer=unused,
+                       workdir=tmp_path) == 1
+    assert "视频看点：API演示与技术问答" in sender.cards[0][0]
+    assert "youtube:testvid0001" in SeenStore(tmp_path / "seen")
+
+
 def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender(photo_fails=True)
     seen = SeenStore(tmp_path / "seen.txt")
     n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
@@ -116,7 +132,7 @@ def test_push_digest_photo_failure_falls_back_to_text_card(monkeypatch, tmp_path
 
 def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(link_enabled=False), summarizer=None, workdir=tmp_path)
@@ -125,7 +141,7 @@ def test_push_digest_link_disabled_omits_button(monkeypatch, tmp_path):
 
 def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: None)
+                        lambda url, dest, **kwargs: None)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(), summarizer=None, workdir=tmp_path)
@@ -134,7 +150,7 @@ def test_push_digest_cover_download_failure_uses_text_card(monkeypatch, tmp_path
 
 def test_push_digest_total_failure_leaves_unseen_for_retry(monkeypatch, tmp_path):
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: None)
+                        lambda url, dest, **kwargs: None)
 
     class DeadSender(FakeSender):
         def send_card(self, text_html, *, link=None, button=None):
@@ -161,7 +177,7 @@ def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "MEDIA_SENT_LEDGER", ledger)
     monkeypatch.setattr("chat_daily_tg.sent_ledger.MEDIA_SENT_LEDGER", ledger)
     monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
-                        lambda url, dest: dest)
+                        lambda url, dest, **kwargs: dest)
     sender = FakeSender()
     n = push_digest([_video()], sender=sender, seen=SeenStore(tmp_path / "s.txt"),
                     cfg=_cfg(), summarizer=None, workdir=tmp_path)
@@ -181,3 +197,48 @@ def test_push_digest_writes_sent_ledger(monkeypatch, tmp_path):
         assert hit["url"] == "https://www.youtube.com/watch?v=testvid0001"
         assert hit["producer"] == "youtube"
         assert hit["id"] == "youtube:testvid0001"
+
+
+def test_push_digest_empty_msg_ids_leave_unseen(monkeypatch, tmp_path):
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
+                        lambda url, dest, **kwargs: dest)
+
+    class EmptyIdSender(FakeSender):
+        def send_photo(self, path, caption="", parse_mode=None, button=None):
+            self.photos.append((path, caption, parse_mode, button))
+            return None
+        def send_card(self, text_html, *, link=None, button=None):
+            self.cards.append((text_html, link, button))
+            return []
+
+    sender = EmptyIdSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+    n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
+                    summarizer=None, workdir=tmp_path)
+    assert n == 0
+    assert "youtube:testvid0001" not in seen
+
+
+def test_push_digest_ambiguous_photo_is_terminal_no_text_fallback(monkeypatch, tmp_path):
+    import httpx
+    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+
+    monkeypatch.setattr("chat_daily_tg.youtube_digest.download_cover",
+                        lambda url, dest, **kwargs: dest)
+    journal = []
+    monkeypatch.setattr("chat_daily_tg.dedup_journal.record",
+                        lambda entry, path=None: journal.append(entry))
+    monkeypatch.setattr("chat_daily_tg.notifier.notify_failure", lambda *a, **k: None)
+
+    class AmbiguousPhotoSender(FakeSender):
+        def send_photo(self, path, caption="", parse_mode=None, button=None):
+            raise AmbiguousDeliveryError("sendPhoto", httpx.ReadTimeout("lost"))
+
+    sender = AmbiguousPhotoSender()
+    seen = SeenStore(tmp_path / "seen.txt")
+    n = push_digest([_video()], sender=sender, seen=seen, cfg=_cfg(),
+                    summarizer=None, workdir=tmp_path)
+    assert n == 0
+    assert sender.cards == []
+    assert "youtube:testvid0001" in seen
+    assert journal and journal[0]["action"] == "ambiguous"

@@ -32,9 +32,15 @@ STATE_DIR = DATA_DIR / "state"
 CONTENT_SEEN_DB = STATE_DIR / "content_seen.db"
 DELIVERED_INDEX_DB = STATE_DIR / "delivered_index.db"
 XMONITOR_INDEX_COPY = STATE_DIR / "xmonitor_pushed_index.json"
+XMONITOR_SENT_COPY = STATE_DIR / "xmonitor_sent_snapshot.json"
 DEDUP_JOURNAL = STATE_DIR / "dedup_journal.jsonl"
 # message_id → canonical URL for subscription cards (Podcast 👍 handoff).
 MEDIA_SENT_LEDGER = STATE_DIR / "media_sent_ledger.jsonl"
+# General delivered-content records.  Unlike MEDIA_SENT_LEDGER, this is local
+# Mac-owned state and must never be replaced by the r4s media-ledger sync.
+SENT_CONTENT_LEDGER = STATE_DIR / "sent_content_ledger.jsonl"
+JEV_DEDUP_SHADOW = STATE_DIR / "jev-dedup-shadow.jsonl"
+JEV_DEDUP_JUDGE = STATE_DIR / "jev-dedup-judge.jsonl"
 
 # Growth mining (个人成长 topic) artifacts.
 GROWTH_DIR = DATA_DIR / "growth"

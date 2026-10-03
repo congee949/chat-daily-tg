@@ -142,7 +142,7 @@ def test_article_card_fallback_writes_canonical_ledger_and_marks_seen(monkeypatc
 
     ledger = tmp_path / "media_sent_ledger.jsonl"
     monkeypatch.setattr(sent_ledger, "MEDIA_SENT_LEDGER", ledger)
-    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover", lambda _url, dest: dest)
+    monkeypatch.setattr("chat_daily_tg.bilibili_digest.download_cover", lambda _url, dest, **kwargs: dest)
     sender = _Sender(photo_fails=True)
     seen = SeenStore(tmp_path / "seen.txt")
     sent = push_digest([_article()], sender=sender, seen=seen, cfg=_cfg(),
@@ -150,7 +150,8 @@ def test_article_card_fallback_writes_canonical_ledger_and_marks_seen(monkeypatc
                        workdir=tmp_path)
     assert sent == 1 and "bilibili:article:51618753" in seen
     text, link, button = sender.cards[0]
-    assert "📄 专栏" in text and "❤️ 标记后" in text
+    assert "📄 专栏" in text
+    assert "标记后发送到 Podcast4Bot 分析" not in text
     assert link == "https://www.bilibili.com/read/cv51618753"
     assert button == ("📖 阅读全文", link)
     row = json.loads(ledger.read_text(encoding="utf-8"))
@@ -163,3 +164,19 @@ def test_no_push_article_does_not_write_seen_or_ledger(tmp_path) -> None:
     assert push_digest([_article()], sender=None, seen=seen, cfg=_cfg(), summarizer=None,
                        workdir=tmp_path, no_push=True) == 0
     assert _article().seen_key not in seen
+
+
+def test_partial_article_page_failure_remains_failed_receipt(tmp_path,monkeypatch):
+    import chat_daily_tg.bilibili_fetcher as bili
+    monkeypatch.setattr(bili.time,'sleep',lambda *_:None)
+    calls=[]
+    def api(*a,**k):
+        calls.append(1)
+        if len(calls)==2:raise BiliApiError('transport')
+        return {'rows':[{'publish_time':NOW_TS}],'has_more':True}
+    monkeypatch.setattr(bili,'_api_get',api)
+    monkeypatch.setattr(bili,'_article_rows',lambda data:data['rows'])
+    monkeypatch.setattr(bili,'_parse_article_item',lambda *a,**k:None)
+    with pytest.raises(BiliApiError):fetch_new_articles(_src(),SeenStore(tmp_path/'seen'),now=NOW)
+    rows=[json.loads(line) for line in (tmp_path/'fetch_health.jsonl').read_text().splitlines()]
+    assert len(rows)==1 and rows[0]['status']=='failed' and rows[0]['source_count']==1

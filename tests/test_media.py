@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 from chat_daily_tg.media import (
+    _is_valid_image_file,
     extract_wx_media_candidates,
     media_paths_from_raw_json,
     score_media_context,
@@ -47,3 +48,20 @@ def test_media_paths_from_raw_json_finds_existing_image(tmp_path: Path):
     raw = json.dumps({"message": {"photo": {"path": str(image)}}})
 
     assert media_paths_from_raw_json(raw) == [str(image)]
+
+
+def test_is_valid_image_file_labels_wxgf_container(tmp_path: Path):
+    wxgf_file = tmp_path / "wx.jpg"
+    wxgf_file.write_bytes(b"wxgf" + b"\x00" * (11 * 1024))
+    ok, reason = _is_valid_image_file(str(wxgf_file))
+    assert not ok
+    assert reason == "undecodable image (wxgf container)"
+
+
+def test_is_valid_image_file_keeps_generic_reason_for_other_garbage(tmp_path: Path):
+    junk = tmp_path / "junk.jpg"
+    junk.write_bytes(b"\x00" * (11 * 1024))
+    ok, reason = _is_valid_image_file(str(junk))
+    assert not ok
+    assert reason.startswith("undecodable image")
+    assert "wxgf" not in reason

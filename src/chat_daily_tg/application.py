@@ -10,14 +10,17 @@ block is scheduling-dead (launchd owns timing), but `schedule.timezone` IS read
 """
 from __future__ import annotations
 import argparse
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+import errno
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import signal
+from time import perf_counter
 from typing import Sequence
 
 from chat_daily_tg.archive import safe_filename, prepare_archive_day, cleanup_old_media
@@ -36,7 +39,11 @@ from chat_daily_tg.vision import (
     write_vision_audit,
 )
 from chat_daily_tg.wx_exporter import export_group
-from chat_daily_tg.telegram_exporter import export_chat
+from chat_daily_tg.telegram_exporter import (
+    SyncManyUnsupported,
+    export_chat,
+    sync_many_chats,
+)
 from chat_daily_tg.sanitize import sanitize_for_llm
 from chat_daily_tg.cross_group_cluster import (
     cluster_cross_group_topics,
@@ -44,13 +51,25 @@ from chat_daily_tg.cross_group_cluster import (
     validate_clusters_in_output,
 )
 from chat_daily_tg.evidence_index import (
-    GeminiEmbedder,
+    build_embedder,
     build_evidence_context_for_summary,
     build_evidence_index,
+    build_reranker,
 )
 from chat_daily_tg.post_process import abbreviate_sources, post_process_concise
+from chat_daily_tg.source_dispatch import SourceLane, run_source_lanes
 
 log = logging.getLogger("run_daily")
+
+
+@contextmanager
+def _stage_timing(stage: str):
+    """Wall-clock log for one _run stage; the finally also covers failure paths."""
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        log.info("stage timing: %s %.1fs", stage, perf_counter() - started)
 
 
 def yesterday_iso() -> str:
@@ -235,38 +254,104 @@ def _build_dedup_gates(cfg, *, no_push: bool):
             log.warning("content dedup store unavailable (layer off this run): %s", e)
     if dedup.topic.enabled:
         try:
-            from chat_daily_tg.evidence_index import GeminiEmbedder
+            from chat_daily_tg.evidence_index import build_embedder
             from chat_daily_tg.paths import DELIVERED_INDEX_DB
             from chat_daily_tg.topic_dedup import (
-                DeliveredIndex, SameEventJudge, TopicDedupGate,
+                DEFAULT_CALIBRATION_RECEIPT,
+                DeliveredIndex,
+                SameEventJudge,
+                TopicDedupGate,
             )
             t = dedup.topic
             em = cfg.models.embedding if cfg.models else None
             if not (em and em.enabled):
                 raise RuntimeError("models.embedding disabled — L2 needs it")
-            embedder = GeminiEmbedder.from_config(em)
-            index = DeliveredIndex(DELIVERED_INDEX_DB, window_days=t.index_window_days)
-            # SameEventJudge applies model/timeout overrides to a replace() COPY.
-            judge = SameEventJudge(
-                _llm_from_block(cfg, cfg.resolve_model_alias(t.judge_model_alias)),
-                model=t.judge_model, timeout=t.judge_timeout_seconds,
+            embedder = build_embedder(em)
+            index = DeliveredIndex(
+                DELIVERED_INDEX_DB,
+                window_days=t.index_window_days,
+                generation=getattr(embedder, "generation", None),
             )
+            from chat_daily_tg.jev_judge import build_jev_judge
+            from chat_daily_tg.jev_shadow import build_shadow
+            fallback_judge = None
+            try:
+                fallback_judge = SameEventJudge(
+                    _llm_from_block(cfg, cfg.resolve_model_alias(t.judge_model_alias)),
+                    model=t.judge_model, timeout=t.judge_timeout_seconds,
+                )
+            except Exception as exc:
+                log.warning("L2 chat judge unavailable error_type=%s", type(exc).__name__)
+            primary = build_jev_judge(cfg, fallback=fallback_judge)
+            judge = primary if primary is not None else fallback_judge
+            # The provider selector also prevents a second Jev request as shadow.
+            jev_shadow = (
+                build_shadow(cfg) if getattr(t, "judge_provider", "llm") != "jev" else None
+            )
+            log.info(
+                "L2 judge selected requested=%s active=%s mode=%s",
+                getattr(t, "judge_provider", "llm"),
+                type(judge).__name__ if judge is not None else "none", t.mode,
+            )
+            l2_reranker = None
+            if getattr(t, "reranker_enabled", False) is True:
+                reranker_model = cfg.models.reranker if cfg.models else None
+                if not (reranker_model and reranker_model.enabled):
+                    log.warning(
+                        "L2 reranker requested but models.reranker is disabled; "
+                        "retaining dense candidate order and disabling enforce"
+                    )
+                else:
+                    try:
+                        l2_reranker = build_reranker(reranker_model)
+                    except Exception as e:
+                        # A failed client must not take the whole fail-open
+                        # gate down; TopicDedupGate remains report-only.
+                        log.warning(
+                            "L2 reranker unavailable; disabling enforce: %s",
+                            e,
+                        )
+            requested_mode = t.mode
+            if requested_mode == "enforce":
+                if getattr(t, "enforce_enabled", False) is not True:
+                    requested_mode = "report"
+                elif l2_reranker is None:
+                    log.warning(
+                        "L2 enforce requested without an available reranker; "
+                        "downgrading to report"
+                    )
+                    requested_mode = "report"
             topic_gate = TopicDedupGate(
-                index, embedder, judge, mode=t.mode,
+                index, embedder, judge, mode=requested_mode,
+                jev_shadow=jev_shadow,
+                reranker=l2_reranker,
+                rerank_top_k=t.reranker_top_k,
                 candidate_min_sim=t.candidate_min_sim, strong_sim=t.strong_sim,
                 retrieval_window_hours=t.retrieval_window_hours,
                 exclude_producers=frozenset(t.exclude_producers),
                 max_judge_calls_per_run=t.max_judge_calls_per_run,
+                min_embedding_coverage=t.min_embedding_coverage,
+                calibrated_generation_id=t.calibrated_generation_id,
+                calibration_receipt_path=DEFAULT_CALIBRATION_RECEIPT,
+                online_backfill_cap=t.online_backfill_cap,
                 # The annotation deep-link base and the ingest target are the
                 # SAME group — derived, not restated, so a forum migration
                 # can't leave 前文↗ links pointing into the dead group.
                 group_internal_id=str(t.forum_chat_id).removeprefix("-100").lstrip("-"),
-                # Ingest+backfill run lazily at the first prepare() with real
-                # cards: a zero-new-card run costs zero network calls.
+                # Text ingest runs lazily at the first prepare() with real
+                # cards. Embedding backfill is a separate bounded sidecar job.
                 ingest={
                     "db_path": Path(cfg.sources.telegram.db_path).expanduser(),
                     "forum_chat_id": t.forum_chat_id,
                     "sync_limit": t.sync_limit,
+                    "sent_ledger_path": (
+                        getattr(t, "xmonitor_ledger_path", None).expanduser()
+                        if getattr(t, "xmonitor_ledger_enabled", False)
+                        and getattr(t, "xmonitor_ledger_path", None) is not None
+                        else None
+                    ),
+                    "sent_ledger_max_age_hours": getattr(
+                        t, "xmonitor_ledger_max_age_hours", 24),
                 },
             )
         except Exception as e:
@@ -287,7 +372,10 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
     channels = cfg.sources.telegram.raw_channels if cfg.sources.telegram.enabled else []
     if not channels:
         return
+    from chat_daily_tg.qwen_runtime import channel_runtime
+    resources = ExitStack()
     try:
+        resources.enter_context(channel_runtime(cfg, no_push=no_push))
         from collections import OrderedDict
         from chat_daily_tg.raw_channels import push_raw_channel_cards
         from chat_daily_tg.tg_sender import TelegramSender
@@ -298,6 +386,26 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
         # One store/gate pair per run (the L2 judge budget is global across
         # channels); construction failure = that layer off, delivery proceeds.
         content_store, topic_gate = _build_dedup_gates(cfg, no_push=no_push)
+        if topic_gate is not None:
+            closer = getattr(topic_gate.judge, "close", None)
+            if callable(closer):
+                resources.callback(closer)
+        auth_cfg = getattr(cfg.sources.telegram.dedup, "authority", None)
+        authority = dict(getattr(auth_cfg, "weights", {}) or {})
+        # First-arrival URL collapse no longer depends on weights: once any
+        # channel delivered a canonical URL, later rewrites are skipped.
+        url_authority_skip = bool(getattr(auth_cfg, "url_authority_skip", False))
+        xmon = None
+        if not no_push and content_store is not None:
+            try:
+                from chat_daily_tg.content_seen import XMonitorIndex
+                from chat_daily_tg.paths import XMONITOR_INDEX_COPY
+                xmon = XMonitorIndex(XMONITOR_INDEX_COPY)
+            except Exception as e:
+                log.warning("xmonitor index unavailable (cross-producer off): %s", e)
+                xmon = None
+        # Keep config order for grouping. Within a topic batch, public cards are
+        # sent by source timestamp so first-arrival wins across channels.
         groups: "OrderedDict[str, list]" = OrderedDict()
         for ch in channels:
             groups.setdefault(ch.topic or "channels_news", []).append(ch)
@@ -329,6 +437,9 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
                 incremental=incremental,
                 content_store=content_store,
                 topic_gate=topic_gate,
+                authority=authority or None,
+                url_authority_skip=url_authority_skip,
+                xmon=xmon,
             )
             total += n
             log.info("raw channel cards pushed: %d -> topic=%s %s", n, topic_key, target)
@@ -336,6 +447,11 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
     except Exception as e:
         log.exception("raw channel stage failed: %s", e)
         notify_failure("chat-daily-tg 频道原文卡片失败", f"{type(e).__name__}: {e}")
+    finally:
+        try:
+            resources.close()
+        except Exception as exc:
+            log.warning("channel resource cleanup failed error_type=%s", type(exc).__name__)
 
 
 def run_channels(no_push: bool = False) -> int:
@@ -434,7 +550,14 @@ def run_bilibili(no_push: bool = False) -> int:
                                f"opencli daemon/Chrome bridge 不在线，本轮 digest 跳过（下轮自动追回）。{e}")
                 return 1
 
-        seen = SeenStore(BILIBILI_SEEN_PATH)
+        seen = SeenStore(BILIBILI_SEEN_PATH, overflow_dir=_digest_seen_overflow_dir())
+        try:
+            from chat_daily_tg.sent_ledger import content_ids
+            hydrated = seen.absorb(content_ids(producer="bilibili"))
+            if hydrated:
+                log.info("bilibili seen hydrated from ledger: %d keys", hydrated)
+        except Exception:
+            log.warning("bilibili ledger hydrate skipped", exc_info=True)
         contents = fetch_new_content(
             src, seen,
             retry_max_attempts=cfg.retry.max_attempts,
@@ -458,9 +581,10 @@ def run_bilibili(no_push: bool = False) -> int:
             )
             log.info("bilibili digest target: %s/thread=%s", chat_id, thread_id)
         workdir = prepare_archive_day(tag)
-        sent = push_digest(contents, sender=sender, seen=seen, cfg=cfg,
-                           summarizer=build_summarizer(cfg), workdir=workdir,
-                           no_push=no_push)
+        with ExitStack() as resources:
+            sent = push_digest(contents, sender=sender, seen=seen, cfg=cfg,
+                               summarizer=build_summarizer(cfg, stack=resources), workdir=workdir,
+                               no_push=no_push)
         log.info("✓ bilibili digest complete: %d/%d cards sent (no_push=%s)",
                  sent, len(contents), no_push)
         if not no_push and sent != len(contents):
@@ -470,8 +594,11 @@ def run_bilibili(no_push: bool = False) -> int:
         return 0
     except Exception as e:
         log.exception("bilibili digest failed: %s", e)
-        notify_failure("chat-daily-tg B站digest失败", f"{type(e).__name__}: {e}")
-        return 1
+        if _alert_throttle_allow("bilibili-digest", window_s=1200):
+            notify_failure("chat-daily-tg B站digest失败", f"{type(e).__name__}: {e}")
+        else:
+            log.info("bilibili digest failure alert throttled")
+        return 2 if _is_enospc(e) else 1
 
 
 
@@ -493,6 +620,7 @@ def run_youtube(no_push: bool = False) -> int:
         from chat_daily_tg.tg_sender import TelegramSender
         from chat_daily_tg.youtube_digest import build_summarizer, push_digest
         from chat_daily_tg.youtube_fetcher import fetch_new_videos
+        from chat_daily_tg.youtube_selection import select_videos
 
         load_env_file(DATA_DIR / ".env")
         cfg = load_config(CONFIG_PATH)
@@ -501,8 +629,19 @@ def run_youtube(no_push: bool = False) -> int:
             log.info("youtube source disabled or whitelist empty, nothing to do")
             return 0
 
-        seen = SeenStore(YOUTUBE_SEEN_PATH)
-        videos = fetch_new_videos(src, seen, api_key=os.environ.get(src.api_key_env))
+        seen = SeenStore(YOUTUBE_SEEN_PATH, overflow_dir=_digest_seen_overflow_dir())
+        try:
+            from chat_daily_tg.sent_ledger import content_ids
+            hydrated = seen.absorb(content_ids(producer="youtube"))
+            if hydrated:
+                log.info("youtube seen hydrated from ledger: %d keys", hydrated)
+        except Exception:
+            log.warning("youtube ledger hydrate skipped", exc_info=True)
+        videos = fetch_new_videos(
+            src, seen, api_key=os.environ.get(src.api_key_env),
+            selector=lambda candidates: select_videos(
+                candidates, cfg=cfg, seen=seen, no_push=no_push),
+        )
         log.info("youtube new videos: %d", len(videos))
         if not videos:
             return 0
@@ -512,24 +651,25 @@ def run_youtube(no_push: bool = False) -> int:
             by_topic.setdefault(v.topic or src.digest.topic, []).append(v)
 
         workdir = prepare_archive_day(tag)
-        summarizer = build_summarizer(cfg)
-        sent = 0
-        for topic_key, group in by_topic.items():
-            sender = None
-            if not no_push:
-                dm_chat_id = os.environ[cfg.telegram.chat_id_env]
-                chat_id, thread_id = resolve_tg_target(topic_key, dm_chat_id)
-                sender = TelegramSender(
-                    bot_token=os.environ[cfg.telegram.bot_token_env],
-                    chat_id=chat_id, message_thread_id=thread_id,
-                    retry_max_attempts=cfg.retry.max_attempts,
-                    retry_backoff_seconds=cfg.retry.backoff_seconds,
-                )
-                log.info("youtube digest target: %s/thread=%s (topic=%s, %d cards)",
-                         chat_id, thread_id, topic_key, len(group))
-            sent += push_digest(group, sender=sender, seen=seen, cfg=cfg,
-                                summarizer=summarizer, workdir=workdir,
-                                no_push=no_push)
+        with ExitStack() as resources:
+            summarizer = build_summarizer(cfg, stack=resources)
+            sent = 0
+            for topic_key, group in by_topic.items():
+                sender = None
+                if not no_push:
+                    dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+                    chat_id, thread_id = resolve_tg_target(topic_key, dm_chat_id)
+                    sender = TelegramSender(
+                        bot_token=os.environ[cfg.telegram.bot_token_env],
+                        chat_id=chat_id, message_thread_id=thread_id,
+                        retry_max_attempts=cfg.retry.max_attempts,
+                        retry_backoff_seconds=cfg.retry.backoff_seconds,
+                    )
+                    log.info("youtube digest target: %s/thread=%s (topic=%s, %d cards)",
+                             chat_id, thread_id, topic_key, len(group))
+                sent += push_digest(group, sender=sender, seen=seen, cfg=cfg,
+                                    summarizer=summarizer, workdir=workdir,
+                                    no_push=no_push)
         log.info("✓ youtube digest complete: %d/%d cards sent (no_push=%s)",
                  sent, len(videos), no_push)
         if not no_push and sent != len(videos):
@@ -546,7 +686,7 @@ def run_youtube(no_push: bool = False) -> int:
             notify_failure("chat-daily-tg YouTube digest失败", f"{type(e).__name__}: {e}")
         else:
             log.info("youtube digest failure alert throttled")
-        return 1
+        return 2 if _is_enospc(e) else 1
 
 
 def _llm_from_block(cfg, m):
@@ -633,6 +773,7 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
         if not g.enabled or g.source is None:
             log.info("growth mining disabled, nothing to do")
             return 0
+
         llm = _growth_llm(cfg)
         # 异源 judge：B 卡作者与评审分属两厂，消除同源自评偏好。评审可有
         # 独立次选模型；矿工与 B 卡生成则始终保持主模型。
@@ -735,7 +876,41 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
                 # 原文回查一律走本地切片（slice_path）。
                 try:
                     sender.send_card(winner_card)
-                except Exception:
+                except Exception as e:
+                    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+                    if isinstance(e, AmbiguousDeliveryError):
+                        # May already be on Telegram — do NOT release for replay.
+                        if claim_run_id is not None:
+                            if not growth_store.mark_ambiguous(
+                                DB_PATH, seg.id, run_id=claim_run_id
+                            ):
+                                log.error(
+                                    "growth card %s ambiguous but claim was no longer owned",
+                                    seg.id,
+                                )
+                        try:
+                            from chat_daily_tg import dedup_journal
+                            dedup_journal.record({
+                                "layer": "delivery", "action": "ambiguous",
+                                "reason": "telegram_transport_timeout",
+                                "method": e.method, "producer": "growth",
+                                "segment_id": seg.id,
+                            })
+                        except Exception:
+                            pass
+                        try:
+                            notify_failure(
+                                "chat-daily-tg 成长卡投递结果待确认",
+                                f"segment {seg.id} 的 {e.method} 响应超时；"
+                                "已停止自动重试，请核对目标话题后手动补。",
+                            )
+                        except Exception:
+                            pass
+                        log.error(
+                            "ambiguous growth delivery terminalized (%s via %s)",
+                            seg.id, e.method,
+                        )
+                        return 0
                     if claim_run_id is not None:
                         growth_store.release_claim(DB_PATH, seg.id, claim_run_id)
                     raise
@@ -771,7 +946,7 @@ def run_growth(no_push: bool = False, dm_test: bool = False,
         # longest-lived clients in the process, so close their pooled sockets
         # explicitly even when an early return or delivery exception occurs.
         closed: set[int] = set()
-        for candidate in (llm, judge_llm):
+        for candidate in (llm, judge_llm, judge_fallback_llm):
             # The default judge shares the main model.  Close a shared client
             # once, while still releasing a separately configured judge.
             if candidate is not None and id(candidate) not in closed:
@@ -867,6 +1042,18 @@ def run_growth_weekly(no_push: bool = False, model_alias: str | None = None) -> 
         if not g.enabled or g.source is None:
             log.info("growth mining disabled, nothing to do")
             return 0
+
+        from chat_daily_tg.paths import DATA_DIR as _data
+        week_key = date.today().strftime("%G-W%V")
+        weekly_marker = _data / "growth" / f"weekly-{week_key}.sent"
+        # Multiple Saturday/Sunday launchd triggers provide catch-up after a
+        # transient model/network outage. Once one real send (or an ambiguous
+        # terminal outcome) has written the marker, later triggers must be
+        # zero-cost and must not consume feedback or call the LLM.
+        if not no_push and weekly_marker.exists():
+            log.info("growth weekly already sent for %s, skipping before LLM", week_key)
+            return 0
+
         llm = _growth_llm(cfg)
         bot_token = os.environ[cfg.telegram.bot_token_env]
         dm_chat_id = os.environ[cfg.telegram.chat_id_env]
@@ -877,9 +1064,17 @@ def run_growth_weekly(no_push: bool = False, model_alias: str | None = None) -> 
         except Exception as e:
             log.warning("weekly feedback poll failed: %s", e)
         feedback = consume_inbox(GROWTH_FEEDBACK_INBOX)
+        try:
+            from chat_daily_tg.content_feedback import configured_intake, pending_filter_feedback
+            intake = configured_intake(bot_token, dm_chat_id)
+            if intake is not None:
+                feedback.extend(pending_filter_feedback(intake, GROWTH_RUBRIC_HISTORY / "candidates"))
+        except Exception as exc:
+            log.warning("content filter feedback unavailable error_type=%s", type(exc).__name__)
         texts = [f["text"] for f in feedback]
         try:
-            _, version, changed = merge_rubric(llm, GROWTH_RUBRIC, GROWTH_RUBRIC_HISTORY, texts)
+            _, version, changed = merge_rubric(llm, GROWTH_RUBRIC, GROWTH_RUBRIC_HISTORY, texts,
+                feedback_ids=[str(f["update_id"]) for f in feedback])
         except Exception:
             # consume_inbox already rotated the inbox away; put the drained
             # entries back so next week's run retries the merge instead of
@@ -892,15 +1087,48 @@ def run_growth_weekly(no_push: bool = False, model_alias: str | None = None) -> 
         if changed:
             log.info("rubric updated to %s from %d feedback item(s)", version, len(texts))
 
-        report = build_weekly_report(DB_PATH, _store_chat_id(g.source.id), llm, version, changed)
+        report = build_weekly_report(DB_PATH, _store_chat_id(g.source.id), llm, version, changed,
+            candidate_root=GROWTH_RUBRIC_HISTORY / "candidates")
         if no_push:
             print(report)
         else:
-            TelegramSender(
+            from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+            sender = TelegramSender(
                 bot_token=bot_token, chat_id=dm_chat_id,
                 retry_max_attempts=cfg.retry.max_attempts,
                 retry_backoff_seconds=cfg.retry.backoff_seconds,
-            ).send(report, parse_mode="HTML")
+            )
+            try:
+                message_ids = sender.send(report, parse_mode="HTML")
+            except AmbiguousDeliveryError as e:
+                weekly_marker.parent.mkdir(parents=True, exist_ok=True)
+                weekly_marker.write_text(json.dumps({
+                    "status": "ambiguous",
+                    "method": e.method,
+                    "date": date.today().isoformat(),
+                }, ensure_ascii=False), encoding="utf-8")
+                try:
+                    notify_failure(
+                        "chat-daily-tg 成长周报投递结果待确认",
+                        f"{week_key} 周报发送超时；已抑制自动重发，请核对 DM。",
+                    )
+                except Exception:
+                    pass
+                log.error("ambiguous weekly delivery terminalized (%s)", week_key)
+            else:
+                weekly_marker.parent.mkdir(parents=True, exist_ok=True)
+                delivered_at = datetime.now().astimezone().isoformat()
+                weekly_marker.write_text(json.dumps({
+                    "status": "delivered",
+                    "chat_id": sender.chat_id,
+                    "thread_id": sender.message_thread_id,
+                    "message_ids": message_ids,
+                    "delivered_at": delivered_at,
+                }, ensure_ascii=False), encoding="utf-8")
+                log.info(
+                    "growth weekly delivery status=delivered message_ids=%s at=%s",
+                    message_ids, delivered_at,
+                )
         log.info("✓ growth weekly report done (rubric %s, changed=%s)", version, changed)
         return 0
     except Exception as e:
@@ -941,6 +1169,40 @@ def _drop_rich_media_reference(markdown: str, media_id: str) -> str:
         lambda match: "" if match.group("id") == media_id else match.group(0),
         markdown,
     )
+
+
+MORNING_CARD_MARKER = ".morning-card-sent"
+
+
+def _send_morning_card(tg, archive_dir: Path, report_day: date, health_report,
+                       energy_records, health_card_marker: Path) -> bool:
+    """Send the energy + sleep photo card. False means the digest keeps the text."""
+    from chat_daily_tg.morning_card import build_panel, morning_caption, render_morning_card
+    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+
+    marker = archive_dir / MORNING_CARD_MARKER
+    try:
+        panel = build_panel(report_day, health_report, energy_records)
+        png = render_morning_card(panel, archive_dir / "morning-card.png")
+        if png is None:
+            return False
+        message_id = tg.send_photo(png, caption=morning_caption(panel), parse_mode="HTML")
+    except AmbiguousDeliveryError as e:
+        # The photo may exist; never send a second card the same day.
+        marker.write_text(json.dumps({"message_id": None, "sleep": False}), encoding="utf-8")
+        log.error("morning card delivery ambiguous (%s); not resending", e.method)
+        return True
+    except Exception as e:
+        log.warning("morning card failed, digest keeps health/energy text: %s", e)
+        return False
+    marker.write_text(json.dumps({
+        "message_id": message_id, "sleep": panel.sleep is not None,
+        "sent_at": datetime.now().isoformat(),
+    }), encoding="utf-8")
+    if panel.sleep is not None:
+        health_card_marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+    log.info("morning card sent (message %s, sleep=%s)", message_id, panel.sleep is not None)
+    return True
 
 
 def _push_rich_digest(
@@ -994,6 +1256,11 @@ def _push_rich_digest(
         tg.send_rich_message(markdown="".join(parts), media=media)
         return True
     except Exception as e:
+        from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+        if isinstance(e, AmbiguousDeliveryError):
+            # Caller must NOT fall back to text — that would double the digest.
+            log.error("rich digest outcome ambiguous (%s); refusing text fallback", e)
+            raise
         log.warning("rich digest push failed, falling back to text+photo: %s", e)
         return False
 
@@ -1020,6 +1287,184 @@ def _fact_risk_report(verification: dict) -> str:
                 lines.append(f"  - {item}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _export_wechat_lane(cfg, *, date_str: str, archive_dir: Path):
+    """Export WeChat groups serially; image extraction is bounded separately."""
+    groups_with_content: list[tuple[str, str]] = []
+    media_candidates = []
+    # Keep the download gate aligned with the vision prefilter configured for
+    # this run.  Older/minimal configs may omit a vision block entirely; in
+    # that case leave the exporter default in force rather than dereferencing
+    # a missing optional model.
+    vision_cfg = getattr(getattr(cfg, "models", None), "vision", None)
+    min_download_score = getattr(vision_cfg, "min_prefilter_score", None)
+    with _stage_timing("wechat export"):
+        for group in cfg.sources.wechat.groups:
+            out_path = archive_dir / f"wechat-{safe_filename(group)}.md"
+            try:
+                # wx-cli: date-only --until is that day's 23:59:59. Passing
+                # next_day leaked this morning into "yesterday".
+                export_kwargs = {
+                    "group_name": group,
+                    "since": date_str,
+                    "until": date_str,
+                    "out_path": out_path,
+                }
+                if min_download_score is not None:
+                    export_kwargs["min_download_score"] = min_download_score
+                if vision_cfg is not None and not getattr(vision_cfg, "enabled", True):
+                    export_kwargs["download_images"] = False
+                result = export_group(**export_kwargs)
+                log.info("exported wechat %s: %d msgs", group, result.message_count)
+            except Exception as e:
+                log.warning("wechat export failed for %s: %s", group, e)
+                continue
+            if result.content.strip():
+                content = (sanitize_for_llm(result.content)
+                           if cfg.sanitize.enabled else result.content)
+                groups_with_content.append((f"微信 / {group}", content))
+            media_candidates.extend(getattr(result, "media_candidates", None) or [])
+    return groups_with_content, media_candidates
+
+
+def _export_telegram_lane(cfg, *, date_str: str, next_day: str, archive_dir: Path):
+    """Export Telegram chats serially; batch the optional media side path.
+
+    Text exports and their SQLite reads remain ordered. When vision is enabled,
+    media requests are collected only for chats whose text export succeeded and
+    then sent through one downloader subprocess/session. This keeps the primary
+    text lane fail-soft while removing repeated Telethon startup/auth overhead.
+    """
+    groups_with_content: list[tuple[str, str]] = []
+    media_candidates = []
+    media_requests: list[dict] = []
+    tg_export_started = perf_counter()
+    tg_media_seconds = 0.0
+    vision_enabled = bool(cfg.models.vision and cfg.models.vision.enabled)
+    # A single batch sync removes one Python/SQLite/Telethon startup per chat.
+    # Keep the subsequent exports local and serial because they share the same
+    # messages.db and media/session state.  Only an explicitly unsupported old
+    # tg-cli falls back to the historical per-chat sync path; a runtime batch
+    # failure is fail-soft and must not trigger a second burst of API calls.
+    sync_each_chat = False
+    if cfg.sources.telegram.sync_before_export and cfg.sources.telegram.chats:
+        from chat_daily_tg.fetch_health import fetch_started, record_fetch
+        batch_started=fetch_started()
+        try:
+            batch_results = sync_many_chats(
+                [(chat.id, chat.limit) for chat in cfg.sources.telegram.chats],
+                delay=0,
+            )
+            for result in batch_results:
+                count=result.get('synced')
+                valid_count=type(count) is int and count>=0
+                fetch_status=('failed' if result.get('status')!='ok' else
+                              'sync_completed' if not valid_count else 'no_update' if count==0 else 'success')
+                record_fetch(archive_dir/'fetch_health.jsonl',producer='telegram-sync',source_ref=str(result.get('chat')),
+                             started_at=batch_started,status=fetch_status,count=count if valid_count else None,count_basis='synced_messages',
+                             error_type=str(result.get('status')) if fetch_status=='failed' else None)
+                if result.get("status") != "ok":
+                    log.warning(
+                        "telegram batch sync %s for %s: %s",
+                        result.get("status", "failed"),
+                        result.get("chat"),
+                        result.get("error") or "no detail",
+                    )
+        except SyncManyUnsupported:
+            # Compatibility with an older installed tg-cli.  This branch is
+            # intentionally narrow; an ordinary batch error must not be
+            # converted into three repeated network attempts.
+            sync_each_chat = True
+            log.warning("tg-cli lacks sync-many; using per-chat sync fallback")
+        except Exception as exc:
+            for chat in cfg.sources.telegram.chats:
+                record_fetch(archive_dir/'fetch_health.jsonl',producer='telegram-sync',source_ref=chat.id,
+                             started_at=batch_started,status='failed',error_type=type(exc).__name__)
+            log.warning(
+                "telegram batch sync failed; continuing from local messages.db: %s", exc
+            )
+    try:
+        for chat in cfg.sources.telegram.chats:
+            out_path = archive_dir / f"telegram-{safe_filename(chat.name)}.md"
+            try:
+                result = export_chat(
+                    chat_id=chat.id,
+                    chat_name=chat.name,
+                    since=date_str,
+                    until=next_day,
+                    out_path=out_path,
+                    db_path=cfg.sources.telegram.db_path,
+                    limit=chat.limit,
+                    sync_before_export=sync_each_chat,
+                    include_patterns=getattr(chat, "include_patterns", []),
+                    exclude_senders=getattr(chat, "exclude_senders", []),
+                    exclude_patterns=getattr(chat, "exclude_patterns", []),
+                )
+                log.info(
+                    "exported telegram %s: %d msgs, skipped=%d",
+                    chat.name,
+                    result.message_count,
+                    result.skipped_count,
+                )
+            except Exception as e:
+                log.warning("telegram export failed for %s: %s", chat.name, e)
+                continue
+            if result.content.strip():
+                content = (sanitize_for_llm(result.content)
+                           if cfg.sanitize.enabled else result.content)
+                groups_with_content.append((f"Telegram / {chat.name}", content))
+            media_candidates.extend(getattr(result, "media_candidates", None) or [])
+            if vision_enabled:
+                # tg-cli's messages.db carries no media. Defer the photo side path
+                # until all text chats have been read so one subprocess/session can
+                # serve the complete ordered set.
+                media_requests.append({
+                    "chat_id": chat.id,
+                    "chat_name": chat.name,
+                    "since": date_str,
+                    "until": next_day,
+                    "out_dir": archive_dir,
+                    "limit": chat.limit,
+                })
+        if media_requests:
+            media_started = perf_counter()
+            try:
+                from chat_daily_tg.private_media import DumpManyUnsupported
+                from chat_daily_tg.telegram_media import (
+                    export_chat_media,
+                    export_chat_media_batch,
+                )
+                try:
+                    # The batch adapter isolates per-chat failures and returns
+                    # successful candidates in request/configuration order.
+                    media_candidates.extend(export_chat_media_batch(media_requests))
+                except DumpManyUnsupported:
+                    # Compatibility is intentionally narrow: only an old script
+                    # lacking the protocol may trigger the historical per-chat
+                    # calls. Runtime batch failures must not cause a second burst.
+                    log.warning("tg media downloader lacks batch mode; using per-chat fallback")
+                    for request in media_requests:
+                        try:
+                            media_candidates.extend(export_chat_media(**request))
+                        except Exception as exc:
+                            log.warning(
+                                "telegram media export failed for %s: %s",
+                                request["chat_name"], exc,
+                            )
+            except Exception as exc:
+                # Text export is the primary daily source. Keep it when the
+                # optional media adapter/import unexpectedly fails.
+                log.warning("telegram media batch adapter failed: %s", exc)
+            finally:
+                tg_media_seconds += perf_counter() - media_started
+    finally:
+        tg_elapsed = perf_counter() - tg_export_started
+        log.info("stage timing: telegram text export %.1fs",
+                 max(0.0, tg_elapsed - tg_media_seconds))
+        log.info("stage timing: telegram media %.1fs", tg_media_seconds)
+        log.info("stage timing: telegram export %.1fs", tg_elapsed)
+    return groups_with_content, media_candidates
 
 
 def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False,
@@ -1073,61 +1518,35 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     archive_dir = prepare_archive_day(date_str)
     # Channel cards are handled by the separate 2-hourly forwarder (run_channels), not
     # by this daily summary run.
+    citation_map = {}
+    lanes: list[SourceLane[tuple[list[tuple[str, str]], list]]] = []
+    if cfg.sources.wechat.groups:
+        lanes.append(SourceLane(
+            name="wechat",
+            target_mode="wechat_cli",
+            runner=lambda: _export_wechat_lane(
+                cfg, date_str=date_str, archive_dir=archive_dir,
+            ),
+        ))
+    if cfg.sources.telegram.enabled and cfg.sources.telegram.chats:
+        lanes.append(SourceLane(
+            name="telegram",
+            target_mode="telegram_cli",
+            runner=lambda: _export_telegram_lane(
+                cfg, date_str=date_str, next_day=next_day, archive_dir=archive_dir,
+            ),
+        ))
+
+    # WeChat and Telegram are independent I/O lanes.  Their source-export loops
+    # remain serial (see the helpers above); bounded image/media sub-work is
+    # deliberately separate. This ordered result merge preserves configured
+    # source order for prompts, citations, and media audit logs.
     groups_with_content: list[tuple[str, str]] = []
     media_candidates = []
-    citation_map = {}
-    for group in cfg.sources.wechat.groups:
-        out_path = archive_dir / f"wechat-{safe_filename(group)}.md"
-        try:
-            result = export_group(
-                group_name=group, since=date_str, until=next_day, out_path=out_path,
-            )
-            log.info("exported wechat %s: %d msgs", group, result.message_count)
-        except Exception as e:
-            log.warning("wechat export failed for %s: %s", group, e)
-            continue
-        if result.content.strip():
-            content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
-            groups_with_content.append((f"微信 / {group}", content))
-        media_candidates.extend(getattr(result, "media_candidates", None) or [])
-
-    if cfg.sources.telegram.enabled:
-        for chat in cfg.sources.telegram.chats:
-            out_path = archive_dir / f"telegram-{safe_filename(chat.name)}.md"
-            try:
-                result = export_chat(
-                    chat_id=chat.id,
-                    chat_name=chat.name,
-                    since=date_str,
-                    until=next_day,
-                    out_path=out_path,
-                    db_path=cfg.sources.telegram.db_path,
-                    limit=chat.limit,
-                    sync_before_export=cfg.sources.telegram.sync_before_export,
-                )
-                log.info(
-                    "exported telegram %s: %d msgs, skipped=%d",
-                    chat.name,
-                    result.message_count,
-                    result.skipped_count,
-                )
-            except Exception as e:
-                log.warning("telegram export failed for %s: %s", chat.name, e)
-                continue
-            if result.content.strip():
-                content = sanitize_for_llm(result.content) if cfg.sanitize.enabled else result.content
-                groups_with_content.append((f"Telegram / {chat.name}", content))
-            media_candidates.extend(getattr(result, "media_candidates", None) or [])
-            if cfg.models.vision and cfg.models.vision.enabled:
-                # tg-cli's messages.db carries no media — pull this chat's photos via
-                # telethon (image-only side path) so the vision pipeline below can see
-                # them. Failure-isolated: returns [] on any error, text export stands.
-                from chat_daily_tg.telegram_media import export_chat_media
-                media_candidates.extend(export_chat_media(
-                    chat_id=chat.id, chat_name=chat.name,
-                    since=date_str, until=next_day,
-                    out_dir=archive_dir, limit=chat.limit,
-                ))
+    with _stage_timing("source export"):
+        for lane_groups, lane_media in run_source_lanes(lanes, max_workers=2):
+            groups_with_content.extend(lane_groups)
+            media_candidates.extend(lane_media)
 
     if not groups_with_content:
         log.error("no content exported, aborting")
@@ -1138,57 +1557,60 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     log.info("media candidates: %d", len(media_candidates))
 
     if cfg.models.vision and cfg.models.vision.enabled:
-        try:
-            vision_api_key = os.environ[cfg.models.vision.api_key_env]
-            vision_client = VisionClient(
-                endpoint=cfg.models.vision.endpoint,
-                model=cfg.models.vision.model,
-                api_key=vision_api_key,
-                timeout=cfg.models.vision.timeout,
-            )
-            vision_stats: dict[str, int] = {}
-            vision_audit: list[dict] = []
-            analyses = analyze_media_candidates(
-                client=vision_client, candidates=media_candidates,
-                stats_out=vision_stats, audit_out=vision_audit,
-                min_prefilter_score=cfg.models.vision.min_prefilter_score,
-                min_include_score=cfg.models.vision.min_include_score,
-                fallback_min_score=cfg.models.vision.fallback_min_score)
-            failure = vision_zero_image_failure(vision_stats)
-            if failure:
-                # Distinguish "no high-value images today" (normal, roughly half
-                # of days under the 0.8 bar) from a compromised pipeline — the
-                # verdict predicate is shared with vision.py's ERROR log so the
-                # TG alert and the log can never disagree (PR #8 review C4).
-                notify_failure(
-                    "chat-daily-tg 图片管线受损",
-                    f"{date_str}: {failure}，日报可能无图（报告仍照常推送）。"
-                    f"breakdown: {vision_stats}。日志: {log_file_for(date_str)}")
-            write_vision_analyses(archive_dir / "vision.jsonl", analyses)
+        with _stage_timing("vision"):
             try:
-                # AFTER vision.jsonl: the audit trail is diagnostics — a failure
-                # writing it must never discard the day's images (review A2).
-                write_vision_audit(archive_dir / "vision-audit.jsonl", vision_audit)
+                vision_api_key = os.environ[cfg.models.vision.api_key_env]
+                vision_client = VisionClient(
+                    endpoint=cfg.models.vision.endpoint,
+                    model=cfg.models.vision.model,
+                    api_key=vision_api_key,
+                    timeout=cfg.models.vision.timeout,
+                    extra_body=cfg.models.vision.extra_body,
+                )
+                vision_stats: dict[str, int] = {}
+                vision_audit: list[dict] = []
+                analyses = analyze_media_candidates(
+                    client=vision_client, candidates=media_candidates,
+                    stats_out=vision_stats, audit_out=vision_audit,
+                    min_prefilter_score=cfg.models.vision.min_prefilter_score,
+                    min_include_score=cfg.models.vision.min_include_score,
+                    fallback_min_score=cfg.models.vision.fallback_min_score)
+                failure = vision_zero_image_failure(vision_stats)
+                if failure:
+                    # Distinguish "no high-value images today" (normal, roughly half
+                    # of days under the 0.8 bar) from a compromised pipeline — the
+                    # verdict predicate is shared with vision.py's ERROR log so the
+                    # TG alert and the log can never disagree (PR #8 review C4).
+                    notify_failure(
+                        "chat-daily-tg 图片管线受损",
+                        f"{date_str}: {failure}，日报可能无图（报告仍照常推送）。"
+                        f"breakdown: {vision_stats}。日志: {log_file_for(date_str)}")
+                write_vision_analyses(archive_dir / "vision.jsonl", analyses)
+                try:
+                    # AFTER vision.jsonl: the audit trail is diagnostics — a failure
+                    # writing it must never discard the day's images (review A2).
+                    write_vision_audit(archive_dir / "vision-audit.jsonl", vision_audit)
+                except Exception as e:
+                    log.warning("vision audit write failed (non-fatal): %s", e)
+                vision_md = vision_markdown(analyses)
+                (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")
+                if vision_md.strip():
+                    groups_with_content.append(("图片理解 / 多来源", vision_md))
+                citation_md, citation_map = build_citation_block(analyses)
+                if citation_md:
+                    groups_with_content.append(("可引用图片列表", citation_md))
+                log.info("vision analyses included: %d (citable: %d)",
+                         len(analyses), len(citation_map))
             except Exception as e:
-                log.warning("vision audit write failed (non-fatal): %s", e)
-            vision_md = vision_markdown(analyses)
-            (archive_dir / "vision.md").write_text(vision_md, encoding="utf-8")
-            if vision_md.strip():
-                groups_with_content.append(("图片理解 / 多来源", vision_md))
-            citation_md, citation_map = build_citation_block(analyses)
-            if citation_md:
-                groups_with_content.append(("可引用图片列表", citation_md))
-            log.info("vision analyses included: %d (citable: %d)", len(analyses), len(citation_map))
-        except Exception as e:
-            # A stage-level failure (missing api_key_env, client construction,
-            # a raise before the per-image loop) produces the same imageless
-            # digest as a low-value day — it must page, not just log, or the
-            # 2026-07-14 silent-zero signature survives (PR #8 review C2).
-            log.warning("vision analysis skipped: %s", e)
-            notify_failure(
-                "chat-daily-tg 图片阶段异常跳过",
-                f"{date_str}: vision 阶段整体失败（{type(e).__name__}: {e}），"
-                f"日报将无图（报告仍照常推送）。日志: {log_file_for(date_str)}")
+                # A stage-level failure (missing api_key_env, client construction,
+                # a raise before the per-image loop) produces the same imageless
+                # digest as a low-value day — it must page, not just log, or the
+                # 2026-07-14 silent-zero signature survives (PR #8 review C2).
+                log.warning("vision analysis skipped: %s", e)
+                notify_failure(
+                    "chat-daily-tg 图片阶段异常跳过",
+                    f"{date_str}: vision 阶段整体失败（{type(e).__name__}: {e}），"
+                    f"日报将无图（报告仍照常推送）。日志: {log_file_for(date_str)}")
 
     summary_model = cfg.models.summary
     summary_candidates = [("primary", _llm_from_block(cfg, summary_model))]
@@ -1212,102 +1634,189 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
     repeat_ctx = active_repeat_topics_summary(DB_PATH, today=date_str)
 
     # Cross-group clustering (preprocessing)
-    clusters = cluster_cross_group_topics(groups_with_content)
-    cluster_text = build_cluster_context(clusters)
+    with _stage_timing("cluster"):
+        clusters = cluster_cross_group_topics(groups_with_content)
+        cluster_text = build_cluster_context(clusters)
     log.info("cross-group clusters: %d total (%d cross-group)",
              len(clusters), sum(1 for c in clusters if c.is_cross_group))
 
     evidence_context_builder = None
     evidence_context_for_archive = ""
     evidence_index = None
+    evidence_reranker = None
     embedding_model = cfg.models.embedding if cfg.models else None
     if embedding_model and embedding_model.enabled:
-        try:
-            embedder = GeminiEmbedder.from_config(embedding_model)
-            evidence_index = build_evidence_index(
-                index_path=archive_dir / "evidence.sqlite",
-                groups_with_content=groups_with_content,
-                embedder=embedder,
-            )
-
-            def evidence_context_builder(summary_output):
-                nonlocal evidence_context_for_archive
-                context = build_evidence_context_for_summary(
-                    index=evidence_index,
+        with _stage_timing("evidence index"):
+            try:
+                embedder = build_embedder(embedding_model)
+                evidence_index = build_evidence_index(
+                    index_path=archive_dir / "evidence.sqlite",
+                    groups_with_content=groups_with_content,
                     embedder=embedder,
-                    summary_text=f"{summary_output.concise_md}\n\n{summary_output.detailed_md}",
-                    top_k=embedding_model.top_k,
-                    min_similarity=embedding_model.min_similarity,
                 )
-                evidence_context_for_archive = context
-                (archive_dir / "evidence-context.md").write_text(context, encoding="utf-8")
-                log.info("embedding evidence context built: %d chars", len(context))
-                return context
-        except Exception as e:
-            log.warning("embedding evidence index skipped: %s", e)
+                reranker_model = cfg.models.reranker if cfg.models else None
+                semantic_features = getattr(cfg, "semantic_features", None)
+                daily_reranker_enabled = (
+                    getattr(
+                        semantic_features,
+                        "daily_evidence_reranker_enabled",
+                        False,
+                    )
+                    is True
+                )
+                if (
+                    daily_reranker_enabled
+                    and reranker_model
+                    and reranker_model.enabled
+                ):
+                    try:
+                        evidence_reranker = build_reranker(reranker_model)
+                    except Exception as e:
+                        log.warning(
+                            "embedding evidence reranker unavailable; dense fallback: %s", e
+                        )
+
+                def evidence_context_builder(summary_output):
+                    nonlocal evidence_context_for_archive
+                    context = build_evidence_context_for_summary(
+                        index=evidence_index,
+                        embedder=embedder,
+                        summary_text=f"{summary_output.concise_md}\n\n{summary_output.detailed_md}",
+                        top_k=(
+                            reranker_model.top_k
+                            if evidence_reranker is not None
+                            else embedding_model.top_k
+                        ),
+                        min_similarity=embedding_model.min_similarity,
+                        reranker=evidence_reranker,
+                        dense_top_k=(
+                            reranker_model.candidate_top_k
+                            if evidence_reranker is not None
+                            else None
+                        ),
+                    )
+                    evidence_context_for_archive = context
+                    try:
+                        (archive_dir / "evidence-context.md").write_text(
+                            context, encoding="utf-8"
+                        )
+                    except Exception as e:
+                        # The verifier can still use the in-memory evidence and
+                        # the daily summary can still be delivered. Archival is
+                        # best-effort and must not become a query-time gate.
+                        log.warning("embedding evidence context archive failed: %s", e)
+                    log.info("embedding evidence context built: %d chars", len(context))
+                    return context
+            except Exception as e:
+                log.warning("embedding evidence index skipped: %s", e)
 
     log.info("LLM context: permanent=%d chars, hot_leads=%d chars, repeat=%d chars, clusters=%d chars, embedding=%s",
              len(perm_ctx), len(hot_ctx), len(repeat_ctx), len(cluster_text), bool(evidence_context_builder))
 
     log.info("calling LLM for summary…")
-    try:
-        out = _run_summary_with_fallback(
-            run_summary, summary_candidates, date=date_str,
-            groups_with_content=groups_with_content, detail_path=detail_path,
-            active_permanent_summary=perm_ctx,
-            active_hot_leads_summary=hot_ctx,
-            active_repeat_topics_summary=repeat_ctx,
-            cross_group_cluster_text=cluster_text,
-            evidence_context_builder=evidence_context_builder,
-        )
-    finally:
-        if evidence_index is not None:
-            evidence_index.close()
-        for _alias, client in summary_candidates:
-            client.close()
+    with _stage_timing("LLM summary+verify"):
+        try:
+            out = _run_summary_with_fallback(
+                run_summary, summary_candidates, date=date_str,
+                groups_with_content=groups_with_content, detail_path=detail_path,
+                active_permanent_summary=perm_ctx,
+                active_hot_leads_summary=hot_ctx,
+                active_repeat_topics_summary=repeat_ctx,
+                cross_group_cluster_text=cluster_text,
+                evidence_context_builder=evidence_context_builder,
+            )
+        finally:
+            if evidence_index is not None:
+                evidence_index.close()
+            for _alias, client in summary_candidates:
+                client.close()
 
     health_plain = ""
     health_rich_md = ""
     health_chart_path: Path | None = None
     health_card_marker = archive_dir / ".health-card-sent"
+    health_last_night_ready = False
+    health_report = None
+    energy_records: dict | None = None
+    # Health + energy text prepended to the digest; removed again when the
+    # morning card carries the same facts as a photo.
+    personal_prefix = ""
 
     # Personal Health/Watch context is deterministic and remains outside the LLM
     # trust boundary. Failure is isolated so stale iCloud sync never blocks the
     # group-chat digest.
     if cfg.health_briefing.enabled:
-        try:
-            from chat_daily_tg.health_briefing import (
-                build_health_report,
-                format_health_briefing,
-            )
-            from chat_daily_tg.health_card import render_health_card
-            from chat_daily_tg.health_rich import build_health_rich_markdown
+        with _stage_timing("health"):
+            try:
+                from chat_daily_tg.health_briefing import (
+                    build_health_report,
+                    format_health_briefing,
+                    write_health_gap_record,
+                )
+                from chat_daily_tg.health_card import render_health_card
+                from chat_daily_tg.health_rich import build_health_rich_markdown
 
-            health_report = build_health_report(
-                date.fromisoformat(date_str), cfg.health_briefing, cfg.schedule.timezone,
+                health_report = build_health_report(
+                    date.fromisoformat(date_str), cfg.health_briefing, cfg.schedule.timezone,
+                )
+                if health_report:
+                    health_last_night_ready = health_report.last_night_sleep is not None
+                    try:
+                        write_health_gap_record(
+                            health_report, archive_dir / "health-data-gaps.json"
+                        )
+                    except Exception as e:
+                        log.warning("health data-gap audit write skipped (non-fatal): %s", e)
+                    health_plain = format_health_briefing(health_report)
+                    (archive_dir / "health-briefing.md").write_text(
+                        health_plain, encoding="utf-8"
+                    )
+                    health_chart_path = render_health_card(
+                        health_report, archive_dir / "health-card.png"
+                    )
+                    health_rich_md = build_health_rich_markdown(
+                        health_report,
+                        chart_media_id=(
+                            "health_chart"
+                            if health_chart_path and not health_card_marker.exists()
+                            else None
+                        ),
+                    )
+                    (archive_dir / "health-rich.md").write_text(
+                        health_rich_md, encoding="utf-8"
+                    )
+                    out = replace(out, concise_md=f"{health_plain}\n\n{out.concise_md}")
+                    personal_prefix = f"{health_plain}\n\n"
+            except Exception as e:
+                log.warning("health briefing skipped (non-fatal): %s", e)
+
+    energy_cfg = getattr(cfg, "energy_usage", None)
+    if energy_cfg is not None and energy_cfg.enabled:
+        with _stage_timing("energy"):
+            from chat_daily_tg.energy_usage import (
+                UNAVAILABLE, format_energy_briefing, refresh_energy_records,
             )
-            if health_report:
-                health_plain = format_health_briefing(health_report)
-                (archive_dir / "health-briefing.md").write_text(
-                    health_plain, encoding="utf-8"
+
+            try:
+                energy_records = refresh_energy_records(date.fromisoformat(date_str), energy_cfg)
+                energy_plain = format_energy_briefing(date.fromisoformat(date_str), energy_records)
+            except Exception as e:
+                log.warning("energy briefing unavailable (non-fatal): %s", e)
+                energy_plain = UNAVAILABLE
+            try:
+                (archive_dir / "energy-briefing.md").write_text(energy_plain, encoding="utf-8")
+            except Exception as e:
+                log.warning("energy briefing archive skipped (non-fatal): %s", e)
+            health_prefix = f"{health_plain}\n\n"
+            if health_plain and out.concise_md.startswith(health_prefix):
+                out = replace(
+                    out, concise_md=f"{health_prefix}{energy_plain}\n\n"
+                    f"{out.concise_md[len(health_prefix):]}",
                 )
-                health_chart_path = render_health_card(
-                    health_report, archive_dir / "health-card.png"
-                )
-                health_rich_md = build_health_rich_markdown(
-                    health_report,
-                    chart_media_id=(
-                        "health_chart"
-                        if health_chart_path and not health_card_marker.exists()
-                        else None
-                    ),
-                )
-                (archive_dir / "health-rich.md").write_text(
-                    health_rich_md, encoding="utf-8"
-                )
-                out = replace(out, concise_md=f"{health_plain}\n\n{out.concise_md}")
-        except Exception as e:
-            log.warning("health briefing skipped (non-fatal): %s", e)
+                personal_prefix = f"{health_prefix}{energy_plain}\n\n"
+            else:
+                out = replace(out, concise_md=f"{energy_plain}\n\n{out.concise_md}")
+                personal_prefix = f"{energy_plain}\n\n"
 
     # Dedup audit footer: silence must be auditable — the user should learn
     # "N cards were withheld today" from the report itself, not from grepping
@@ -1385,128 +1894,200 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
                        f"{type(e).__name__}: {e}（报告已照常推送，当天机会可能未入库）")
 
     if not no_push:
-        bot_token = os.environ[cfg.telegram.bot_token_env]
-        dm_chat_id = os.environ[cfg.telegram.chat_id_env]
-        chat_id, thread_id = resolve_tg_target("chat_daily", dm_chat_id)
-        tg = TelegramSender(
-            bot_token=bot_token, chat_id=chat_id, message_thread_id=thread_id,
-            retry_max_attempts=cfg.retry.max_attempts,
-            retry_backoff_seconds=cfg.retry.backoff_seconds,
-        )
-        # Per-stage sent markers: COMPLETE_MARKER is only written after the WHOLE
-        # push, so a failure between a delivered stage and that marker made the
-        # same-day catch-up re-send the already-delivered card/digest. The rich
-        # and card sends have no chunk-level resume (unlike .text-push-state.json),
-        # so day-level "this stage already delivered" is the right idempotency
-        # granularity — a catch-up rerun regenerates DIFFERENT text, and the day's
-        # digest must still go out at most once.
-        card_marker = archive_dir / ".card-sent"
-        digest_marker = archive_dir / ".digest-sent"
-        image_sent = card_marker.exists()
-        if image_sent:
-            log.info("card already sent for %s, skipping (catch-up)", date_str)
-        elif cfg.telegram.send_image and digest_marker.exists():
-            # A prior run delivered the digest but its card failed — a catch-up
-            # card would now arrive AFTER the text, inverting the card-first
-            # contract. The card is a glanceable add-on; drop the late one.
-            log.info("digest already sent for %s, skipping late card (catch-up)", date_str)
-        elif cfg.telegram.send_image:
-            # Render a glanceable PNG card and send it BEFORE the text. Any failure
-            # (render/Chrome/sendPhoto) only logs and falls through to the text push.
-            try:
-                from chat_daily_tg.card_renderer import (
-                    card_caption, parse_concise_to_card, render_card_png,
+        with _stage_timing("push"):
+            bot_token = os.environ[cfg.telegram.bot_token_env]
+            dm_chat_id = os.environ[cfg.telegram.chat_id_env]
+            chat_id, thread_id = resolve_tg_target("chat_daily", dm_chat_id)
+            tg = TelegramSender(
+                bot_token=bot_token, chat_id=chat_id, message_thread_id=thread_id,
+                retry_max_attempts=cfg.retry.max_attempts,
+                retry_backoff_seconds=cfg.retry.backoff_seconds,
+            )
+            # Per-stage sent markers: COMPLETE_MARKER is only written after the WHOLE
+            # push, so a failure between a delivered stage and that marker made the
+            # same-day catch-up re-send the already-delivered card/digest. The rich
+            # and card sends have no chunk-level resume (unlike .text-push-state.json),
+            # so day-level "this stage already delivered" is the right idempotency
+            # granularity — a catch-up rerun regenerates DIFFERENT text, and the day's
+            # digest must still go out at most once.
+            card_marker = archive_dir / ".card-sent"
+            digest_marker = archive_dir / ".digest-sent"
+            morning_marker = archive_dir / MORNING_CARD_MARKER
+            morning_sent = morning_marker.exists()
+            if not morning_sent and cfg.telegram.morning_card and (
+                health_report is not None or energy_records is not None
+            ):
+                morning_sent = _send_morning_card(
+                    tg, archive_dir, date.fromisoformat(date_str), health_report,
+                    energy_records, health_card_marker,
                 )
-                card = parse_concise_to_card(out.concise_md, date_str)
-                png = render_card_png(card, archive_dir / "card.png")
-                if png:
-                    caption = card_caption(card) if cfg.telegram.image_caption else ""
-                    tg.send_photo(png, caption=caption)
-                    image_sent = True
-                    card_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
-                    log.info("TG card image sent")
-            except Exception as e:
-                log.warning("card image push failed, falling back to text: %s", e)
-        if digest_marker.exists():
-            log.info("digest already sent for %s, skipping (catch-up)", date_str)
-        elif image_sent and cfg.telegram.send_image and cfg.telegram.image_only:
-            # send_image gates the skip too: if the operator turned the card off
-            # after a day's card already went out, they want the text after all —
-            # a stale .card-sent must not turn the day into a silent no-op.
-            # Image-only mode: the card was delivered, so skip the full text message.
-            # (Text still sends below if the image failed — image_sent would be False.)
-            log.info("image_only mode: skipping text push")
-        else:
-            # The LLM's [IMGn] markers only PICK the image (at most one, AI-preferred);
-            # the digest text itself always goes out as one intact message (markers
-            # stripped), so the multi-chunk resume via state_path stays safe (review
-            # finding #42). The chosen photo follows as its own trailing message —
-            # Telegram has no single-message text+image format that fits a full
-            # digest (caption cap is 1024 visible chars; user decision 2026-07-02).
-            segments = resolve_citations(concise_processed, citation_map) if citation_map else []
-            cited_list = [analysis for _, analysis in segments if analysis]
-            if citation_map and not cited_list:
-                # Images were included/promoted but the summary LLM emitted no
-                # [IMGn] marker — the digest ships imageless while stats and
-                # vision.jsonl claim otherwise. Leave the true attribution in
-                # the log or this misattribution recurs (PR #8 review, sweep).
-                log.warning("vision included %d citable image(s) but the digest "
-                            "cites none — LLM declined to cite", len(citation_map))
-            rich_digest_md = out.concise_md
-            if health_plain and rich_digest_md.startswith(f"{health_plain}\n\n"):
-                rich_digest_md = rich_digest_md[len(health_plain) + 2:]
-            chart_for_rich = (
-                health_chart_path
-                if health_chart_path and not health_card_marker.exists()
-                else None
-            )
-            rich_ok = _push_rich_digest(
-                tg,
-                cfg,
-                rich_digest_md,
-                citation_map,
-                health_rich_md=health_rich_md,
-                health_chart_path=chart_for_rich,
-            )
-            if rich_ok:
-                digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
-                if chart_for_rich:
-                    health_card_marker.write_text(
-                        _dt.now().isoformat(), encoding="utf-8"
+            if morning_sent and personal_prefix and out.concise_md.startswith(personal_prefix):
+                # The card already carries health and energy; the digest keeps
+                # only the group summary.
+                out = replace(out, concise_md=out.concise_md[len(personal_prefix):])
+                concise_processed = post_process_concise(out.concise_md, cfg.source_abbreviations)
+                if not citation_map:
+                    from chat_daily_tg.vision import strip_citation_markers
+                    concise_processed = strip_citation_markers(concise_processed)
+                health_plain = ""
+                health_rich_md = ""
+                health_chart_path = None
+            image_sent = card_marker.exists()
+            if image_sent:
+                log.info("card already sent for %s, skipping (catch-up)", date_str)
+            elif cfg.telegram.send_image and digest_marker.exists():
+                # A prior run delivered the digest but its card failed — a catch-up
+                # card would now arrive AFTER the text, inverting the card-first
+                # contract. The card is a glanceable add-on; drop the late one.
+                log.info("digest already sent for %s, skipping late card (catch-up)", date_str)
+            elif cfg.telegram.send_image:
+                # Render a glanceable PNG card and send it BEFORE the text. Any failure
+                # (render/Chrome/sendPhoto) only logs and falls through to the text push.
+                try:
+                    from chat_daily_tg.card_renderer import (
+                        card_caption, parse_concise_to_card, render_card_png,
                     )
-                log.info(
-                    "TG push complete (single rich message, health_chart=%s, %d cited image(s))",
-                    bool(chart_for_rich), len(cited_list),
-                )
+                    card = parse_concise_to_card(out.concise_md, date_str)
+                    png = render_card_png(card, archive_dir / "card.png")
+                    if png:
+                        caption = card_caption(card) if cfg.telegram.image_caption else ""
+                        tg.send_photo(png, caption=caption)
+                        image_sent = True
+                        card_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+                        log.info("TG card image sent")
+                except Exception as e:
+                    from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+                    if isinstance(e, AmbiguousDeliveryError):
+                        # Photo may exist; mark stage so catch-up does not re-send card.
+                        card_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+                        image_sent = True
+                        try:
+                            notify_failure(
+                                "chat-daily-tg 日报卡片投递结果待确认",
+                                f"{date_str} card sendPhoto 响应超时；已抑制自动重发卡片。",
+                            )
+                        except Exception:
+                            pass
+                        log.error("ambiguous daily card terminalized for %s", date_str)
+                    else:
+                        log.warning("card image push failed, falling back to text: %s", e)
+            if digest_marker.exists():
+                log.info("digest already sent for %s, skipping (catch-up)", date_str)
+            elif image_sent and cfg.telegram.send_image and cfg.telegram.image_only:
+                # send_image gates the skip too: if the operator turned the card off
+                # after a day's card already went out, they want the text after all —
+                # a stale .card-sent must not turn the day into a silent no-op.
+                # Image-only mode: the card was delivered, so skip the full text message.
+                # (Text still sends below if the image failed — image_sent would be False.)
+                log.info("image_only mode: skipping text push")
             else:
-                if health_chart_path and not health_card_marker.exists():
-                    try:
-                        tg.send_photo(
-                            health_chart_path,
-                            caption=f"📊 昨日健康概览 · {date_str} · {health_report.sleep_label}",
-                        )
+                # The LLM's [IMGn] markers only PICK the image (at most one, AI-preferred);
+                # the digest text itself always goes out as one intact message (markers
+                # stripped), so the multi-chunk resume via state_path stays safe (review
+                # finding #42). The chosen photo follows as its own trailing message —
+                # Telegram has no single-message text+image format that fits a full
+                # digest (caption cap is 1024 visible chars; user decision 2026-07-02).
+                segments = (resolve_citations(concise_processed, citation_map)
+                            if citation_map else [])
+                cited_list = [analysis for _, analysis in segments if analysis]
+                if citation_map and not cited_list:
+                    # Images were included/promoted but the summary LLM emitted no
+                    # [IMGn] marker — the digest ships imageless while stats and
+                    # vision.jsonl claim otherwise. Leave the true attribution in
+                    # the log or this misattribution recurs (PR #8 review, sweep).
+                    log.warning("vision included %d citable image(s) but the digest "
+                                "cites none — LLM declined to cite", len(citation_map))
+                rich_digest_md = out.concise_md
+                if health_plain and rich_digest_md.startswith(f"{health_plain}\n\n"):
+                    rich_digest_md = rich_digest_md[len(health_plain) + 2:]
+                chart_for_rich = (
+                    health_chart_path
+                    if (
+                        health_last_night_ready
+                        and health_chart_path
+                        and not health_card_marker.exists()
+                    )
+                    else None
+                )
+                from chat_daily_tg.tg_sender import AmbiguousDeliveryError
+                try:
+                    rich_ok = _push_rich_digest(
+                        tg,
+                        cfg,
+                        rich_digest_md,
+                        citation_map,
+                        health_rich_md=health_rich_md,
+                        health_chart_path=chart_for_rich,
+                    )
+                except AmbiguousDeliveryError as e:
+                    # Treat as delivered to block same-day text fallback / catch-up double.
+                    digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+                    if health_last_night_ready:
                         health_card_marker.write_text(
                             _dt.now().isoformat(), encoding="utf-8"
                         )
-                    except Exception as e:
-                        log.warning(
-                            "health card fallback send failed; continuing text-only: %s",
-                            e,
-                        )
-                full_text = "".join(chunk for chunk, _ in segments) if segments else concise_processed
-                tg.send(full_text, parse_mode="HTML",
-                        state_path=archive_dir / ".text-push-state.json")
-                digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
-                sent = 0
-                for cited in cited_list:
                     try:
-                        tg.send_media(cited.candidate.local_path, "photo",
-                                      caption=_citation_caption(cited))
-                        sent += 1
-                    except Exception as e:
-                        log.warning("citation image send failed (%s): %s",
-                                    cited.candidate.raw_ref, e)
-                log.info("TG push complete (%d/%d trailing cited image(s))", sent, len(cited_list))
+                        from chat_daily_tg import dedup_journal
+                        dedup_journal.record({
+                            "layer": "delivery", "action": "ambiguous",
+                            "reason": "telegram_transport_timeout",
+                            "method": e.method, "producer": "daily_rich",
+                            "date": date_str,
+                        })
+                    except Exception:
+                        pass
+                    try:
+                        notify_failure(
+                            "chat-daily-tg 日报投递结果待确认",
+                            f"{date_str} sendRichMessage 响应超时；已停止自动降级/重试，"
+                            "请核对 chat_daily 话题后手动补。",
+                        )
+                    except Exception:
+                        pass
+                    log.error("ambiguous rich digest terminalized for %s", date_str)
+                    rich_ok = True  # skip text fallback path below
+                if rich_ok:
+                    digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+                    if health_last_night_ready:
+                        health_card_marker.write_text(
+                            _dt.now().isoformat(), encoding="utf-8"
+                        )
+                    log.info(
+                        "TG push complete (single rich message, health_chart=%s, "
+                        "%d cited image(s))",
+                        bool(chart_for_rich), len(cited_list),
+                    )
+                else:
+                    if health_last_night_ready and health_chart_path and not health_card_marker.exists():
+                        try:
+                            tg.send_photo(
+                                health_chart_path,
+                                caption=f"📊 昨日健康概览 · {date_str} · {health_report.sleep_label}",
+                            )
+                            health_card_marker.write_text(
+                                _dt.now().isoformat(), encoding="utf-8"
+                            )
+                        except Exception as e:
+                            log.warning(
+                                "health card fallback send failed; continuing text-only: %s",
+                                e,
+                            )
+                    full_text = ("".join(chunk for chunk, _ in segments)
+                                 if segments else concise_processed)
+                    tg.send(full_text, parse_mode="HTML",
+                            state_path=archive_dir / ".text-push-state.json")
+                    digest_marker.write_text(_dt.now().isoformat(), encoding="utf-8")
+                    sent = 0
+                    for cited in cited_list:
+                        try:
+                            tg.send_media(cited.candidate.local_path, "photo",
+                                          caption=_citation_caption(cited))
+                            sent += 1
+                        except Exception as e:
+                            log.warning("citation image send failed (%s): %s",
+                                        cited.candidate.raw_ref, e)
+                    log.info("TG push complete (%d/%d trailing cited image(s))",
+                             sent, len(cited_list))
     else:
         log.info("TG push skipped (--no-push)")
 
@@ -1521,28 +2102,46 @@ def _run(date_str: str, *, model_alias: str | None = None, no_push: bool = False
 _TERM_ALERTED = False
 
 
+def _digest_seen_overflow_dir() -> Path:
+    """tmpfs fallback when overlay ENOSPC makes DATA_DIR seen files unwritable."""
+    return Path(os.environ.get("CHAT_DAILY_SEEN_OVERFLOW_DIR", "/tmp/chat-daily-seen"))
+
+
+def _is_enospc(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+
+
 def _alert_throttle_allow(key: str, *, window_s: int = 1200) -> bool:
     """Return True if an alert for ``key`` may fire now; records the stamp.
 
-    Used to absorb YouTube RSS multi-tick storms that would otherwise re-notify
-    every due_gate reopen (*/5). Fail-open: any I/O error allows the alert.
+    Used to absorb digest */5 reopen storms. Reads primary + /tmp fallback so
+    overlay ENOSPC cannot fail-open every tick. Writes DATA_DIR first, /tmp
+    if that fails.
     """
     import time as _time
-    stamp = DATA_DIR / "state" / f"alert-throttle-{key}"
+    now = _time.time()
+    primary = DATA_DIR / "state" / f"alert-throttle-{key}"
+    fallback = Path("/tmp") / f"chat-daily-alert-throttle-{key}"
+    last = 0.0
+    for stamp in (primary, fallback):
+        try:
+            if stamp.is_file():
+                last = max(last, float(stamp.read_text(encoding="utf-8").strip() or "0"))
+        except (OSError, ValueError):
+            continue
+    if last > 0 and (now - last) < window_s:
+        return False
+    payload = f"{now:.0f}\n"
     try:
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        now = _time.time()
-        if stamp.is_file():
-            try:
-                last = float(stamp.read_text(encoding="utf-8").strip() or "0")
-            except ValueError:
-                last = 0.0
-            if last > 0 and (now - last) < window_s:
-                return False
-        stamp.write_text(f"{now:.0f}\n", encoding="utf-8")
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        primary.write_text(payload, encoding="utf-8")
         return True
     except OSError:
-        return True
+        try:
+            fallback.write_text(payload, encoding="utf-8")
+            return True
+        except OSError:
+            return True
 
 
 def _install_termination_alert() -> None:

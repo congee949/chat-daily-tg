@@ -236,6 +236,8 @@ def _api_get(client: httpx.Client, url: str, params: dict) -> dict:
     return d.get("data") or {}
 
 
+from chat_daily_tg.fetch_health import fetch_started, record_seen_fetch
+
 def _fetch_via_api(src: BilibiliSource, seen: SeenStore, *, now: datetime) -> list[BiliVideo]:
     """One medialist call per whitelisted UP (precise pubtime → exact lookback
     filtering, no day-granularity pass), then one view call per NEW video for
@@ -254,6 +256,7 @@ def _fetch_via_api(src: BilibiliSource, seen: SeenStore, *, now: datetime) -> li
         for i, up in enumerate(ups):
             if i:
                 time.sleep(_API_CALL_SPACING_SECONDS)
+            started=fetch_started()
             try:
                 data = _api_get(client, _MEDIALIST_URL, params={
                     "mobi_app": "web", "type": 1, "biz_id": up.uid, "otype": 2,
@@ -261,6 +264,8 @@ def _fetch_via_api(src: BilibiliSource, seen: SeenStore, *, now: datetime) -> li
                     "desc": "true", "sort_field": 1, "tid": 0, "with_current": "false",
                 })
             except BiliApiError as e:
+                record_seen_fetch(seen,producer='bilibili-video-api',source_ref=str(up.uid),
+                                  started_at=started,status='failed',error_type=type(e).__name__)
                 if "code=-352" in str(e):
                     # 风控 is an IP-level verdict, not per-UP state — hammering the
                     # remaining UPs would keep pressuring a flagged IP (降频不绕过).
@@ -269,19 +274,27 @@ def _fetch_via_api(src: BilibiliSource, seen: SeenStore, *, now: datetime) -> li
                 failures += 1
                 continue
             except Exception as e:
+                record_seen_fetch(seen,producer='bilibili-video-api',source_ref=str(up.uid),
+                                  started_at=started,status='failed',error_type=type(e).__name__)
                 log.warning("medialist failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
                 failures += 1
                 continue
-            for m in data.get("media_list") or []:
+            media_rows=data.get("media_list") or []
+            parse_errors=0
+            for m in media_rows:
                 # Per-item isolation: one dirty entry (string pubtime, ms-scale
                 # timestamp, bad duration) must not kill the whole run.
                 try:
                     video = _parse_media_item(m, up, seen, cutoff, client)
                 except Exception as e:
+                    parse_errors+=1
                     log.warning("bad medialist item for uid=%s skipped: %s", up.uid, e)
                     continue
                 if video is not None:
                     videos.append(video)
+            record_seen_fetch(seen,producer='bilibili-video-api',source_ref=str(up.uid),started_at=started,
+                              status=('no_update' if not media_rows else 'parsed_empty' if parse_errors==len(media_rows) else 'success'),
+                              count=len(media_rows))
     if ups and failures == len(ups):
         raise BiliApiError(f"all {len(ups)} UP medialist fetches failed — transport dead?")
     return videos
@@ -447,6 +460,9 @@ def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
             if up_index:
                 time.sleep(_API_CALL_SPACING_SECONDS)
             page = 1
+            started=fetch_started()
+            source_count=0
+            parse_errors=0
             try:
                 while page <= src.fetch.article_max_pages:
                     data = _api_get(client, _ARTICLE_LIST_URL, params={
@@ -456,6 +472,7 @@ def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
                         "sort": "publish_time",
                     })
                     rows = _article_rows(data)
+                    source_count+=len(rows)
                     oldest: datetime | None = None
                     for row in rows:
                         try:
@@ -464,6 +481,7 @@ def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
                                 oldest = pub
                             article = _parse_article_item(row, up, seen, cutoff)
                         except Exception as e:
+                            parse_errors+=1
                             log.warning("bad article item for uid=%s skipped: %s", up.uid, e)
                             continue
                         if article is not None:
@@ -477,14 +495,19 @@ def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
                     page += 1
                     time.sleep(_API_CALL_SPACING_SECONDS)
             except BiliApiError as e:
+                record_seen_fetch(seen,producer='bilibili-article-api',source_ref=str(up.uid),started_at=started,status='failed',count=source_count,error_type=type(e).__name__)
                 failures += 1
                 if "code=-352" in str(e):
                     log.warning("article list hit -352 for uid=%s; stopping article round", up.uid)
                     break
                 log.warning("article list failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
             except Exception as e:
+                record_seen_fetch(seen,producer='bilibili-article-api',source_ref=str(up.uid),started_at=started,status='failed',count=source_count,error_type=type(e).__name__)
                 failures += 1
                 log.warning("article list failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
+            else:
+                record_seen_fetch(seen,producer='bilibili-article-api',source_ref=str(up.uid),started_at=started,
+                                  status='no_update' if source_count==0 else 'parsed_empty' if parse_errors==source_count else 'success',count=source_count)
     if failures == len(ups):
         raise BiliApiError(f"all {len(ups)} opted-in UP article lists failed")
     return _finalize_content(articles, src.fetch.max_per_digest)
@@ -551,13 +574,17 @@ def _fetch_via_opencli(src: BilibiliSource, seen: SeenStore, *, now: datetime,
     failures = 0
     candidates: list[tuple[int, str]] = []  # (uid, bvid)
     for up in ups:
+        started=fetch_started()
         try:
             rows = run_opencli(["user-videos", str(up.uid),
                                 "--limit", str(src.fetch.per_up_limit)], **opts)
         except OpencliError as e:
+            record_seen_fetch(seen,producer='bilibili-opencli',source_ref=str(up.uid),started_at=started,status='failed',error_type=type(e).__name__)
             log.warning("user-videos failed for uid=%s (%s): %s", up.uid, up.name or "?", e)
             failures += 1
             continue
+        record_seen_fetch(seen,producer='bilibili-opencli',source_ref=str(up.uid),started_at=started,
+                          status='success' if rows else 'no_update',count=len(rows or []))
         for row in rows or []:
             m = _BVID_RE.search(str(row.get("url", "")))
             if not m:

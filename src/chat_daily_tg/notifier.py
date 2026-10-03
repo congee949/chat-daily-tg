@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from chat_daily_tg.incident_client import report_warning
 from chat_daily_tg.logging_setup import redact
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,10 @@ def notify_failure(title: str, message: str) -> None:
     _notify_macos(title, message)
     if os.environ.get("CHAT_DAILY_TG_ALERTS", "").lower() in ("1", "true", "yes"):
         _notify_telegram(f"{title}: {message}")
+    try:
+        report_warning(title, message)
+    except Exception as e:  # defense in depth: preserve the original alert path
+        log.warning("Hermes incident bridge failed: %s", redact(str(e)))
 
 
 def _notify_macos(title: str, message: str) -> None:

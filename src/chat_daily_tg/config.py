@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import re
+import os
 from typing import Any
 from typing import Literal
 import yaml
@@ -33,10 +34,64 @@ class OptionalModel(LLM):
     enabled: bool = False
 
 
+class JevModel(BaseModel):
+    enabled: bool = False
+    endpoint: Literal["https://api.typesafe.ai/v1/systemone"] = Field(default_factory=lambda: os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1").rstrip("/") + "/systemone", validate_default=True)
+    model: Literal["jev-latest"] = "jev-latest"
+    api_key_env: str = "TYPESAFE_API_KEY"
+    timeout: float = Field(default=3, gt=0, le=3)
+    retry_max_attempts: int = Field(default=2, ge=1, le=2)
+    zero_data_retention: bool = False
+
+
+class JevPolicy(BaseModel):
+    jev_shadow_sample_rate: float = Field(default=1.0, ge=0, le=1)
+
+
+class JevJudgePolicy(BaseModel):
+    jev_same_event_threshold: float = Field(default=0.5, gt=0, lt=1)
+
+
 class EmbeddingModel(OptionalModel):
-    dimension: int = 768
+    provider: Literal["gemini", "openai"] = "gemini"
+    # Local OpenAI-compatible embedding servers commonly require no key.
+    api_key_env: str = ""
+    batch_size: int = Field(default=100, ge=1, le=100)
+    # Generation identity is persisted beside every vector.  For the bundled
+    # loopback Qwen runtime model_revision can be discovered from its local
+    # runtime config; other providers should set it explicitly.
+    generation_id: str | None = None
+    model_revision: str = ""
+    normalized: bool = True
+    query_template: str = "query-v1"
+    document_template: str = "document-v1"
+    symmetric_query_document: bool = False
+    dimension: int = Field(default=768, ge=1)
     top_k: int = 8
     min_similarity: float = 0.35
+
+
+class RerankerModel(OptionalModel):
+    """Optional OpenAI-compatible reranker for daily evidence enhancement.
+
+    It is deliberately disabled by default. A runtime failure falls back to
+    the already-computed dense order and cannot affect report delivery.
+    """
+
+    api_key_env: str = ""
+    # Optional strict response-attestation contract. The bundled loopback
+    # runtime can discover this fingerprint from runtime.json when omitted;
+    # generic OpenAI-compatible providers remain compatible with the default.
+    model_revision: str = ""
+    timeout: float = 8.0
+    candidate_top_k: int = Field(default=24, ge=1, le=64)
+    top_k: int = Field(default=8, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def validate_candidate_limit(self):
+        if self.top_k > self.candidate_top_k:
+            raise ValueError("reranker.top_k cannot exceed candidate_top_k")
+        return self
 
 
 class ImageModel(OptionalModel):
@@ -61,6 +116,24 @@ class Models(BaseModel):
     vision: VisionModel | None = None
     image: ImageModel | None = None
     embedding: EmbeddingModel | None = None
+    reranker: RerankerModel | None = None
+    # Validate optional Jev settings when the selected consumer initializes.
+    jev: Any = Field(default_factory=lambda: JevModel().model_dump())
+
+
+class SemanticFeatures(BaseModel):
+    """Independent release switches for semantic consumers.
+
+    Candidate canary traffic and generally available knowledge retrieval have
+    separate switches so a promoted pointer cannot accidentally open regular
+    retrieval before the canary promotion gate passes.  The application
+    intentionally consumes only the daily-evidence switch below.  No switch is
+    inferred from a configured/enabled model.
+    """
+
+    knowledge_canary_enabled: bool = False
+    knowledge_retrieval_enabled: bool = False
+    daily_evidence_reranker_enabled: bool = False
 
 
 class Telegram(BaseModel):
@@ -70,6 +143,7 @@ class Telegram(BaseModel):
     image_only: bool = False  # if send_image and the photo sends OK, skip the text message
                               # (text is still sent as fallback when rendering/sendPhoto fails)
     image_caption: bool = True  # attach a short text caption to the photo; False = pure image
+    morning_card: bool = True  # send energy + sleep as one photo card before the digest
 
 
 class WechatSource(BaseModel):
@@ -80,6 +154,22 @@ class TelegramChat(BaseModel):
     id: str
     name: str
     limit: int = 500
+    # Daily-summary-only filters. Sender names use exact, case-sensitive
+    # matching; include_patterns require at least one match when configured;
+    # exclude_patterns suppress a whole message when its text matches.
+    exclude_senders: list[str] = Field(default_factory=list)
+    include_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("include_patterns", "exclude_patterns")
+    @classmethod
+    def telegram_patterns_are_valid(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"invalid Telegram message regex {pattern!r}: {exc}")
+        return patterns
 
 
 class RawChannel(BaseModel):
@@ -124,6 +214,17 @@ class DedupTopic(BaseModel):
     without a deploy)."""
     enabled: bool = False
     mode: Literal["report", "annotate", "enforce"] = "report"
+    # ``mode=enforce`` is only a requested policy. This independent release
+    # switch must also be true before application wiring can suppress a card.
+    enforce_enabled: bool = False
+    # L2 candidate reranking is independent from daily evidence reranking and
+    # enforce. It only reorders candidates for SameEventJudge.
+    reranker_enabled: bool = False
+    reranker_top_k: int = Field(default=3, ge=1, le=3)
+    # Confirmed BWG captions write to the index; opt in after sync and backfill.
+    xmonitor_ledger_enabled: bool = False
+    xmonitor_ledger_path: Path = Path("~/chat-daily/state/xmonitor_sent_snapshot.json")
+    xmonitor_ledger_max_age_hours: float = Field(default=24, gt=0, le=24)
     forum_chat_id: str = "-1004424841223"
     index_window_days: int = Field(default=14, ge=1, le=90)
     retrieval_window_hours: int = Field(default=48, ge=1, le=336)
@@ -131,17 +232,39 @@ class DedupTopic(BaseModel):
     candidate_min_sim: float = Field(default=0.80, ge=0.0, le=1.0)
     strong_sim: float = Field(default=0.93, ge=0.0, le=1.0)
     max_judge_calls_per_run: int = Field(default=5, ge=0, le=50)
+    min_embedding_coverage: float = Field(default=0.995, ge=0.0, le=1.0)
+    calibrated_generation_id: str | None = None
+    online_backfill_cap: int = Field(default=32, ge=0, le=200)
+    qwen_runtime_on_demand: bool = False
+    qwen_runtime_start_timeout_seconds: float = Field(default=180.0, gt=0, le=300)
+    judge_provider: Literal["llm", "jev"] = "llm"
     judge_model_alias: str = "vibekey"       # resolve_model_alias name
     judge_model: str = "gpt-5.6-terra"       # overrides the alias's model
     judge_timeout_seconds: float = 25.0
     exclude_producers: list[str] = Field(
         default_factory=lambda: ["alert", "daily_summary", "growth", "bilibili"]
     )
+    jev_same_event_threshold: Any = 0.5
+    jev_shadow_enabled: Any = False
+    jev_shadow_sample_rate: Any = 1.0
+
+
+class DedupAuthority(BaseModel):
+    """Cross-channel first-arrival when the same URL collides.
+
+    When `url_authority_skip` is true, a non-bare post whose canonical URL was
+    already delivered (any channel) is skipped (journal reason `url_first`)
+    instead of always delivering. Weights are retained for observability /
+    future ranking experiments but do not decide delivery order.
+    """
+    weights: dict[str, int] = Field(default_factory=dict)
+    url_authority_skip: bool = True
 
 
 class DedupConfig(BaseModel):
     content: DedupContent = Field(default_factory=DedupContent)
     topic: DedupTopic = Field(default_factory=DedupTopic)
+    authority: DedupAuthority = Field(default_factory=DedupAuthority)
 
 
 class TelegramSource(BaseModel):
@@ -207,6 +330,7 @@ class YoutubeChannel(BaseModel):
     is a human-readable annotation, never a match key."""
     channel_id: str
     name: str | None = None
+    selection: Literal["all", "ai_official"] = "all"
     # 话题路由预留：非科技簇（英语学习、运动康复等）以后可按频道改发别的
     # forum topic；None = 跟随 digest.topic。当前白名单全部走默认。
     topic: str | None = None
@@ -222,6 +346,7 @@ class YoutubeChannel(BaseModel):
 class YoutubeFetch(BaseModel):
     whitelist: list[YoutubeChannel] = Field(default_factory=list)
     blacklist: list[YoutubeChannel] = Field(default_factory=list)
+    selection_model_alias: str | None = None
     max_per_digest: int = 30
     # Same wide-window rationale as Bilibili: video_id dedup makes overlap free,
     # a failed/missed round is caught up by the next one.
@@ -285,6 +410,34 @@ class HealthBriefing(BaseModel):
     min_baseline_samples: int = Field(default=7, ge=3, le=30)
 
 
+class EnergyUsage(BaseModel):
+    """Daily closing readings from the R4S Home Assistant Recorder."""
+    enabled: bool = False
+    ssh_host: str = "r4s"
+    recorder_uri: str = "file:/opt/homeassistant/config/home-assistant_v2.db?mode=ro"
+    entity_id: str = "sensor.cuco_v3_1a15_power_cost_today"
+    ledger_path: Path = Path("~/chat-daily/state/energy/daily.json")
+    timeout_seconds: float = Field(default=20, gt=0, le=120)
+
+    @field_validator("recorder_uri")
+    @classmethod
+    def recorder_is_readonly(cls, value: str) -> str:
+        from urllib.parse import parse_qs, urlsplit
+
+        parsed = urlsplit(value)
+        if parsed.scheme != "file" or parse_qs(parsed.query).get("mode") != ["ro"]:
+            raise ValueError("energy_usage.recorder_uri must use file: and mode=ro")
+        return value
+
+    @field_validator("ssh_host", "entity_id")
+    @classmethod
+    def energy_source_is_nonempty(cls, value: str) -> str:
+        value = value.strip()
+        if not value or value.startswith("-") or any(c.isspace() for c in value):
+            raise ValueError("energy source must be a nonempty host or entity ID")
+        return value
+
+
 class ImgRelay(BaseModel):
     """Legacy Cloudflare KV relay settings.
 
@@ -340,13 +493,16 @@ class Config(BaseModel):
     grok: LLM | None = None
     opus: LLM | None = None
     sonnet: LLM | None = None
+    sol: LLM | None = None
     vibekey: LLM | None = None
     models: Models | None = None
+    semantic_features: SemanticFeatures = Field(default_factory=SemanticFeatures)
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
     archive: Archive = Field(default_factory=Archive)
     health_briefing: HealthBriefing = Field(default_factory=HealthBriefing)
+    energy_usage: EnergyUsage = Field(default_factory=EnergyUsage)
     img_relay: ImgRelay = Field(default_factory=ImgRelay)
     growth: Growth = Field(default_factory=Growth)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 import base64
 import json
 import logging
+import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,8 @@ import httpx
 from chat_daily_tg.media import MediaCandidate
 
 log = logging.getLogger(__name__)
+
+_RESERVED_BODY_KEYS = frozenset({"model", "messages", "max_tokens"})
 
 
 @dataclass(frozen=True)
@@ -40,11 +45,34 @@ class VisionClient:
     # image (~35/day), so the big-LLM schedule would add a worst case of ~45 min.
     RETRYABLE_BACKOFF = [2.0, 5.0]
 
-    def __init__(self, *, endpoint: str, model: str, api_key: str, timeout: float = 120.0):
+    def __init__(self, *, endpoint: str, model: str, api_key: str,
+                 timeout: float = 120.0, extra_body: dict[str, Any] | None = None):
         self.endpoint = endpoint
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.extra_body = dict(extra_body or {})
+        conflict = _RESERVED_BODY_KEYS.intersection(self.extra_body)
+        if conflict:
+            names = ", ".join(sorted(conflict))
+            raise ValueError(f"extra_body cannot override request field(s): {names}")
+        self._client: httpx.Client | None = None
+        self._client_lock = threading.Lock()
+
+    def _http_client(self) -> httpx.Client:
+        """One shared pool for the whole run (httpx.Client is thread-safe), so
+        ~35 images/day stop paying a fresh TLS+connection setup per call. Lazily
+        recreated after close(), keeping close() safe to call between runs."""
+        with self._client_lock:
+            if self._client is None:
+                self._client = httpx.Client(timeout=self.timeout)
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     def analyze(self, candidate: MediaCandidate) -> VisionAnalysis:
         if not candidate.local_path:
@@ -62,6 +90,7 @@ class VisionClient:
                 }
             ],
             "max_tokens": 1200,
+            **self.extra_body,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -89,21 +118,21 @@ class VisionClient:
         4xx (bad payload, auth) won't heal on retry and raise immediately."""
         import time
         attempts = len(self.RETRYABLE_BACKOFF) + 1
-        with httpx.Client(timeout=self.timeout) as client:
-            for attempt in range(attempts):
-                try:
-                    response = client.post(
-                        f"{self.endpoint}/chat/completions", json=payload, headers=headers)
-                    response.raise_for_status()
-                    return response.json()["choices"][0]["message"]["content"]
-                except httpx.HTTPStatusError as e:
-                    status = e.response.status_code
-                    if not (status == 429 or status >= 500) or attempt == attempts - 1:
-                        raise
-                except (httpx.HTTPError, ValueError, KeyError, IndexError):
-                    if attempt == attempts - 1:
-                        raise
-                time.sleep(self.RETRYABLE_BACKOFF[attempt])
+        client = self._http_client()
+        for attempt in range(attempts):
+            try:
+                response = client.post(
+                    f"{self.endpoint}/chat/completions", json=payload, headers=headers)
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if not (status == 429 or status >= 500) or attempt == attempts - 1:
+                    raise
+            except (httpx.HTTPError, ValueError, KeyError, IndexError):
+                if attempt == attempts - 1:
+                    raise
+            time.sleep(self.RETRYABLE_BACKOFF[attempt])
         raise RuntimeError("unreachable")  # pragma: no cover
 
 
@@ -189,7 +218,17 @@ def analyze_media_candidates(
     via stats_out so the caller can alert on total API failure. audit_out (when
     given) collects one dict per ATTEMPTED image — score, type, veto flag and
     gate decision, including api_failed rows — so the 0.8 bar and the model's
-    veto rate stay auditable from the archive, not just from log retention."""
+    veto rate stay auditable from the archive, not just from log retention.
+
+    Analyze calls run on a bounded thread pool (default _VISION_MAX_WORKERS,
+    env CHAT_DAILY_VISION_CONCURRENCY overrides) sharing one httpx.Client.
+    Analyses, audit rows, per-image logs and the fallback pick are aggregated
+    in candidate order after the pool drains, so every output (vision.jsonl,
+    vision-audit.jsonl, stats) is ordered exactly like the serial loop was.
+    The breaker counter is lock-protected and the dispatcher never keeps more
+    calls in flight than the breaker has failures left, so a dead endpoint
+    still costs at most _CIRCUIT_BREAKER_FAILURES calls before the remaining
+    candidates are skipped; in-flight calls finish naturally after the trip."""
     from chat_daily_tg.media import _is_valid_image_file
     analyses: list[VisionAnalysis] = []
     stats = {"skipped_prefilter": 0, "skipped_invalid": 0, "attempted": 0,
@@ -198,45 +237,90 @@ def analyze_media_candidates(
              "included": 0}
     fallback_best: VisionAnalysis | None = None
     fallback_audit_row: dict | None = None
-    consecutive_failures = 0
-    remaining = list(candidates)
-    while remaining:
-        candidate = remaining.pop(0)
-        if candidate.score < min_prefilter_score or not candidate.local_path:
-            stats["skipped_prefilter"] += 1
-            continue
-        # Thumbnail/quality gate: WeChat's local cache often holds only a
-        # 96x210 thumbnail (wx extract can't get more unless the original was
-        # viewed on-device) — a blurry thumb must never reach vision or the
-        # digest, so require real-image size AND resolution here.
-        ok, _reason = _is_valid_image_file(candidate.local_path)
-        if not ok:
-            stats["skipped_invalid"] += 1
-            continue
-        stats["attempted"] += 1
+    breaker = _VisionBreaker(threshold=_CIRCUIT_BREAKER_FAILURES,
+                             workers=_vision_concurrency())
+    outcomes: dict[int, tuple[str, Any]] = {}
+
+    def _attempt(index: int, candidate: MediaCandidate) -> None:
         try:
             analysis = client.analyze(candidate)
         except Exception as e:
+            breaker.record_failure()
+            outcomes[index] = ("api_failed", e)
+        else:
+            breaker.record_success()
+            outcomes[index] = ("analysis", analysis)
+
+    total = len(candidates)
+    dispatched = 0
+    aborted_at: int | None = None
+    executor = ThreadPoolExecutor(max_workers=breaker.workers)
+    try:
+        pending: set = set()
+        while True:
+            if breaker.tripped:
+                aborted_at = dispatched
+                break
+            while dispatched < total and breaker.open_slots(len(pending)) > 0:
+                index = dispatched
+                candidate = candidates[index]
+                dispatched += 1
+                if candidate.score < min_prefilter_score or not candidate.local_path:
+                    stats["skipped_prefilter"] += 1
+                    continue
+                # Thumbnail/quality gate: WeChat's local cache often holds only a
+                # 96x210 thumbnail (wx extract can't get more unless the original was
+                # viewed on-device) — a blurry thumb must never reach vision or the
+                # digest, so require real-image size AND resolution here.
+                ok, _reason = _is_valid_image_file(candidate.local_path)
+                if not ok:
+                    stats["skipped_invalid"] += 1
+                    continue
+                stats["attempted"] += 1
+                pending.add(executor.submit(_attempt, index, candidate))
+            if not pending:
+                if dispatched >= total:
+                    break
+                continue
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                future.result()
+        if pending:
+            done, _ = wait(pending)
+            for future in done:
+                future.result()
+    finally:
+        executor.shutdown(wait=True)
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    # Circuit breaker: with per-call retries, N straight images failing means
+    # 3N consecutive HTTP failures — the endpoint is down, and a hang-shaped
+    # outage costs 3×timeout per image (PR #8 review R2). Cut the stage short
+    # instead of grinding hours through a dead API.
+    if aborted_at is not None or breaker.tripped:
+        stats["aborted_early"] = total - (aborted_at if aborted_at is not None else total)
+        log.error("vision stage: %d consecutive API failures — endpoint "
+                  "looks dead, skipping the %d remaining candidate(s)",
+                  breaker.tripped_failures, stats["aborted_early"])
+
+    for index, candidate in enumerate(candidates):
+        outcome = outcomes.get(index)
+        if outcome is None:
+            continue
+        kind, payload = outcome
+        if kind == "api_failed":
             stats["api_failed"] += 1
-            consecutive_failures += 1
             log.warning("vision analyze failed for %s: %s: %s",
-                        candidate.local_path, type(e).__name__, e)
+                        candidate.local_path, type(payload).__name__, payload)
             if audit_out is not None:
                 audit_out.append({"decision": "api_failed",
-                                  "error": f"{type(e).__name__}: {e}",
+                                  "error": f"{type(payload).__name__}: {payload}",
                                   "local_path": candidate.local_path})
-            # Circuit breaker: with per-call retries, N straight images failing
-            # means 3N consecutive HTTP failures — the endpoint is down, and a
-            # hang-shaped outage costs 3×timeout per image (PR #8 review R2).
-            # Cut the stage short instead of grinding hours through a dead API.
-            if consecutive_failures >= _CIRCUIT_BREAKER_FAILURES:
-                stats["aborted_early"] = len(remaining)
-                log.error("vision stage: %d consecutive API failures — endpoint "
-                          "looks dead, skipping the %d remaining candidate(s)",
-                          consecutive_failures, len(remaining))
-                break
             continue
-        consecutive_failures = 0
+        analysis = payload
         # Layer 3: OCR / empty image filter
         if _is_empty_vision(analysis):
             stats["filtered_empty"] += 1
@@ -287,6 +371,59 @@ def analyze_media_candidates(
 
 
 _CIRCUIT_BREAKER_FAILURES = 5
+
+_VISION_MAX_WORKERS = 3
+
+
+def _vision_concurrency() -> int:
+    raw = os.environ.get("CHAT_DAILY_VISION_CONCURRENCY", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _VISION_MAX_WORKERS
+    return value if value > 0 else _VISION_MAX_WORKERS
+
+
+class _VisionBreaker:
+    """Consecutive-failure circuit state shared by the vision worker threads."""
+
+    def __init__(self, *, threshold: int, workers: int) -> None:
+        self.workers = workers
+        self._threshold = threshold
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._tripped_failures: int | None = None
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._tripped_failures is None and self._failures >= self._threshold:
+                self._tripped_failures = self._failures
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+
+    @property
+    def tripped(self) -> bool:
+        with self._lock:
+            return self._tripped_failures is not None
+
+    @property
+    def tripped_failures(self) -> int:
+        with self._lock:
+            return self._tripped_failures or 0
+
+    def open_slots(self, in_flight: int) -> int:
+        """Submission budget left. Capping in-flight calls at the breaker's
+        remaining failure allowance keeps a dead endpoint's worst case at
+        exactly `threshold` wasted calls — identical to the serial loop —
+        while a healthy endpoint always gets the full worker count."""
+        with self._lock:
+            if self._tripped_failures is not None:
+                return 0
+            return min(self.workers, self._threshold - self._failures) - in_flight
+
 
 # attempted==0 alerts only when this many images died at the validity gate —
 # a couple of wx thumbnails is normal noise; dozens means the extraction

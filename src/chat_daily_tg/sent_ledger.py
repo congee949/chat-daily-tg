@@ -20,7 +20,15 @@ log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _index: dict[tuple[int, int], dict[str, Any]] | None = None
 _index_path: Path | None = None
-_index_size: int = -1
+_index_signature: tuple[int, int, int, int, int] | None = None
+
+
+def _file_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def _now_iso() -> str:
@@ -73,14 +81,12 @@ def append_sent(
         dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("a", encoding="utf-8") as fh:
             fh.write(line)
-        # Keep in-memory index warm if it was already loaded for this path.
-        global _index, _index_path, _index_size
+        # An external writer may have appended since the last lookup. Do not
+        # mark those unread rows as cached by merely advancing the file size.
+        global _index, _index_signature
         if _index is not None and _index_path == dest.resolve():
-            _index[(cid, mid)] = row
-            try:
-                _index_size = dest.stat().st_size
-            except OSError:
-                _index_size = -1
+            _index = None
+            _index_signature = None
     return row
 
 
@@ -120,11 +126,7 @@ def _load_index(path: Path) -> dict[tuple[int, int], dict[str, Any]]:
     index: dict[tuple[int, int], dict[str, Any]] = {}
     if not path.exists():
         return index
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("sent_ledger read failed %s: %s", path, e)
-        return index
+    text = path.read_text(encoding="utf-8")
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -153,32 +155,72 @@ def lookup(
     if cid is None or mid is None:
         return None
     dest = Path(path) if path is not None else MEDIA_SENT_LEDGER
-    global _index, _index_path, _index_size
+    global _index, _index_path, _index_signature
     with _lock:
         resolved = dest.resolve() if dest.exists() else dest
-        size = -1
-        try:
-            size = dest.stat().st_size if dest.exists() else 0
-        except OSError:
-            size = -1
+        signature = _file_signature(dest)
         if (
             _index is None
             or _index_path != resolved
-            or _index_size != size
+            or signature is None
+            or _index_signature != signature
         ):
-            _index = _load_index(dest)
-            _index_path = resolved
-            _index_size = size
+            try:
+                loaded = _load_index(dest)
+            except OSError as exc:
+                log.warning("sent_ledger read failed %s: %s", dest, exc)
+                _index = None
+                _index_signature = None
+                return None
+            if signature is not None and _file_signature(dest) == signature:
+                _index = loaded
+                _index_path = resolved
+                _index_signature = signature
+            else:
+                # Return this read without pretending it was a stable snapshot.
+                _index = None
+                _index_signature = None
+                return loaded.get((cid, mid))
         return _index.get((cid, mid))
+
+
+def content_ids(*, producer: str | None = None, path: Path | None = None) -> set[str]:
+    """Return persisted ``id`` values, skipping a truncated trailing line."""
+    dest = Path(path) if path is not None else MEDIA_SENT_LEDGER
+    ids: set[str] = set()
+    if not dest.exists():
+        return ids
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("sent_ledger content_ids read failed %s: %s", dest, e)
+        return ids
+    if text and not text.endswith("\n"):
+        text = text.rsplit("\n", 1)[0] if "\n" in text else ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        cid = row.get("id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        if producer and row.get("producer") != producer:
+            continue
+        ids.add(cid)
+    return ids
 
 
 def clear_cache() -> None:
     """Test helper: drop in-memory index."""
-    global _index, _index_path, _index_size
+    global _index, _index_path, _index_signature
     with _lock:
         _index = None
         _index_path = None
-        _index_size = -1
+        _index_signature = None
 
 
 DEFAULT_PATH = MEDIA_SENT_LEDGER

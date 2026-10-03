@@ -1,6 +1,129 @@
 from pathlib import Path
 import pytest
-from chat_daily_tg.config import Config, load_config
+from chat_daily_tg.config import Config, RerankerModel, load_config
+
+
+def test_energy_usage_defaults_are_opt_in_and_readonly():
+    from chat_daily_tg.config import EnergyUsage
+
+    cfg = EnergyUsage()
+    assert cfg.enabled is False
+    assert cfg.ssh_host == "r4s"
+    assert cfg.recorder_uri == "file:/opt/homeassistant/config/home-assistant_v2.db?mode=ro"
+    assert cfg.entity_id == "sensor.cuco_v3_1a15_power_cost_today"
+    assert cfg.ledger_path == Path("~/chat-daily/state/energy/daily.json")
+    assert cfg.timeout_seconds == 20
+
+
+def test_load_config_reads_energy_usage(tmp_path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+groups: [G1]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K"}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+energy_usage:
+  enabled: true
+  ssh_host: fixture-host
+  recorder_uri: "file:/fixtures/ha.db?mode=ro"
+  entity_id: sensor.fixture_energy
+  ledger_path: "/fixtures/daily.json"
+  timeout_seconds: 8
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.energy_usage.enabled is True
+    assert cfg.energy_usage.ssh_host == "fixture-host"
+    assert cfg.energy_usage.ledger_path == Path("/fixtures/daily.json")
+    assert cfg.energy_usage.timeout_seconds == 8
+
+
+@pytest.mark.parametrize("uri", [
+    "/tmp/ha.db", "file:/tmp/ha.db", "file:/tmp/ha.db?mode=rw",
+    "file:/tmp/ha.db?mode=ro&mode=rw",
+])
+def test_energy_usage_rejects_writable_recorder_uri(uri):
+    from chat_daily_tg.config import EnergyUsage
+
+    with pytest.raises(ValueError, match="mode=ro"):
+        EnergyUsage(recorder_uri=uri)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"timeout_seconds": 0}, {"timeout_seconds": 121},
+    {"ssh_host": ""}, {"ssh_host": "-oProxyCommand=bad"},
+    {"entity_id": "sensor.bad entity"},
+])
+def test_energy_usage_rejects_invalid_source_settings(kwargs):
+    from chat_daily_tg.config import EnergyUsage
+
+    with pytest.raises(ValueError):
+        EnergyUsage(**kwargs)
+
+
+def test_xmonitor_ledger_import_is_opt_in_by_default():
+    from chat_daily_tg.config import DedupTopic
+
+    assert DedupTopic().xmonitor_ledger_enabled is False
+
+
+def test_jev_defaults_are_disabled_and_bounded():
+    from chat_daily_tg.config import JevModel
+    model = JevModel()
+    assert model.enabled is False
+    assert model.endpoint.endswith('/v1/systemone')
+    assert model.model == 'jev-latest'
+    assert model.api_key_env == 'TYPESAFE_API_KEY'
+    assert model.retry_max_attempts == 2
+
+
+@pytest.mark.parametrize("retired_value", [0, "retired"])
+def test_retired_jev_limits_are_ignored_in_legacy_config(tmp_path, monkeypatch, retired_value):
+    import yaml
+    from chat_daily_tg import paths
+    from chat_daily_tg.jev_judge import build_jev_judge
+    from chat_daily_tg.jev_shadow import build_shadow
+
+    retired = dict.fromkeys((
+        "jev_judge_max_attempts_per_run", "jev_judge_daily_cap",
+        "jev_shadow_max_calls_per_run", "jev_shadow_daily_cap",
+    ), retired_value)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.safe_dump({
+        "groups": ["Test group"],
+        "models": {
+            "summary": {"endpoint": "https://example.test/v1", "model": "test", "api_key_env": "TEST_KEY"},
+            "jev": {"enabled": True},
+        },
+        "telegram": {"bot_token_env": "TG_TEST_KEY", "chat_id_env": "TG_TEST_CHAT"},
+        "sources": {"telegram": {"dedup": {"topic": {
+            **retired, "judge_provider": "jev", "jev_shadow_enabled": True,
+        }}}},
+    }))
+    cfg = load_config(cfg_file)
+    topic = cfg.sources.telegram.dedup.topic
+    assert not retired.keys() & topic.model_dump().keys()
+    assert topic.max_judge_calls_per_run == 5
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    monkeypatch.setattr(paths, "JEV_DEDUP_JUDGE", tmp_path / "judge.jsonl")
+    monkeypatch.setattr(paths, "STATE_DIR", tmp_path)
+    judge = build_jev_judge(cfg)
+    shadow = build_shadow(cfg)
+    assert judge is not None and shadow is not None
+    judge.close()
+    shadow.client.close()
+    assert not list(tmp_path.glob("*.budget.json"))
+
+
+def test_reranker_revision_attestation_is_opt_in_by_default():
+    model = RerankerModel(
+        endpoint="https://generic-reranker.test/v1",
+        model="generic-reranker",
+        api_key_env="",
+    )
+
+    assert model.model_revision == ""
 
 
 def test_load_config_reads_yaml(tmp_path: Path):
@@ -73,6 +196,9 @@ sources:
       - id: "-1001234567890"
         name: "示例TG群A"
         limit: 50
+        include_patterns: ["(?i)有效信息"]
+        exclude_senders: ["Group Help Bot"]
+        exclude_patterns: ["(?i)入群验证"]
 llm:
   endpoint: "http://127.0.0.1:8317/v1"
   model: "m"
@@ -88,7 +214,31 @@ telegram:
     assert cfg.sources.telegram.enabled is True
     assert cfg.sources.telegram.chats[0].id == "-1001234567890"
     assert cfg.sources.telegram.chats[0].limit == 50
+    assert cfg.sources.telegram.chats[0].include_patterns == ["(?i)有效信息"]
+    assert cfg.sources.telegram.chats[0].exclude_senders == ["Group Help Bot"]
+    assert cfg.sources.telegram.chats[0].exclude_patterns == ["(?i)入群验证"]
     assert cfg.sources.telegram.sync_before_export is False
+
+
+def test_load_config_rejects_invalid_daily_telegram_exclude_regex(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  telegram:
+    enabled: true
+    chats:
+      - id: "-1001"
+        name: "TG"
+        exclude_patterns: ["["]
+llm: {endpoint: "http://x", model: "m", api_key_env: "K"}
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid Telegram message regex"):
+        load_config(cfg_file)
 
 
 def test_load_config_reads_multi_model_yaml(tmp_path: Path):
@@ -136,8 +286,62 @@ telegram:
     assert cfg.models.image.mode == "auto"
     assert cfg.models.embedding.enabled is True
     assert cfg.models.embedding.model == "gemini-embedding-2"
+    assert cfg.models.embedding.provider == "gemini"
+    assert cfg.models.embedding.batch_size == 100
     assert cfg.models.embedding.top_k == 6
     assert cfg.models.embedding.min_similarity == 0.4
+
+
+def test_load_config_reads_local_openai_embedding_without_api_key(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["微信 A"]
+models:
+  summary: {endpoint: "http://summary", model: "gpt-5.6-sol", api_key_env: "K"}
+  embedding:
+    enabled: true
+    provider: openai
+    endpoint: "http://127.0.0.1:8790/v1"
+    model: "qwen3-vl-embedding-8b-4bit"
+    batch_size: 32
+    dimension: 4096
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.models.embedding.provider == "openai"
+    assert cfg.models.embedding.api_key_env == ""
+    assert cfg.models.embedding.batch_size == 32
+    assert cfg.models.embedding.dimension == 4096
+
+
+def test_load_config_resolves_sol_alias(tmp_path: Path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat:
+    groups: ["微信 A"]
+sol: &sol
+  endpoint: "http://127.0.0.1:8317/v1"
+  model: "gpt-5.6-sol"
+  api_key_env: "CLIPROXY_API_KEY"
+models:
+  summary: *sol
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.resolve_model_alias("sol").model == "gpt-5.6-sol"
 
 
 def test_load_config_reads_channel_exclusions_and_health_briefing(tmp_path: Path):
@@ -293,6 +497,12 @@ telegram:
     assert d.content.enabled is True                # default holds in partial section
     assert d.topic.enabled is True
     assert d.topic.mode == "annotate"
+    assert d.topic.enforce_enabled is False
+    assert d.topic.reranker_enabled is False
+    assert d.topic.reranker_top_k == 3
+    assert cfg.semantic_features.knowledge_canary_enabled is False
+    assert cfg.semantic_features.knowledge_retrieval_enabled is False
+    assert cfg.semantic_features.daily_evidence_reranker_enabled is False
     assert d.topic.judge_model == "gpt-5.6-terra"   # unset field keeps its default
     assert cfg.sources.telegram.raw_channels[0].dedup is True   # default opt-in
     assert cfg.sources.telegram.raw_channels[1].dedup is False  # explicit opt-out
@@ -336,5 +546,49 @@ telegram:
     assert d2.content.window_days == 14
     assert d2.topic.enabled is False
     assert d2.topic.mode == "report"
+    assert d2.topic.enforce_enabled is False
+    assert d2.topic.reranker_enabled is False
     assert d2.topic.judge_model == "gpt-5.6-terra"
     assert cfg2.sources.telegram.raw_channels[0].dedup is True
+
+
+def test_semantic_release_flags_are_explicit_and_independent(tmp_path: Path):
+    cfg_file = tmp_path / "flags.yaml"
+    cfg_file.write_text(
+        """
+sources:
+  wechat: {groups: [test]}
+  telegram:
+    dedup:
+      topic:
+        mode: enforce
+        enforce_enabled: false
+        reranker_enabled: true
+semantic_features:
+  knowledge_canary_enabled: true
+  knowledge_retrieval_enabled: true
+  daily_evidence_reranker_enabled: false
+models:
+  summary: {endpoint: "http://summary", model: "summary", api_key_env: "K"}
+  reranker:
+    enabled: true
+    endpoint: "http://127.0.0.1:8790/v1"
+    model: "qwen-reranker"
+    model_revision: "reranker-fingerprint-test"
+telegram: {bot_token_env: "TT", chat_id_env: "TC"}
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_file)
+
+    assert cfg.semantic_features.knowledge_canary_enabled is True
+    assert cfg.semantic_features.knowledge_retrieval_enabled is True
+    assert cfg.semantic_features.daily_evidence_reranker_enabled is False
+    assert cfg.sources.telegram.dedup.topic.enforce_enabled is False
+    assert cfg.sources.telegram.dedup.topic.reranker_enabled is True
+    # Merely enabling the shared reranker model toggles neither daily rerank
+    # nor L2 enforcement.
+    assert cfg.models.reranker.enabled is True
+    assert cfg.models.reranker.model_revision == "reranker-fingerprint-test"
+    assert cfg.models.reranker.timeout == 8.0

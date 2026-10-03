@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 import logging
 import random
+import re
 import time
 from typing import Any
 
@@ -13,10 +14,21 @@ log = logging.getLogger(__name__)
 
 _RESERVED_BODY_KEYS = frozenset({"model", "messages", "max_tokens"})
 _RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 501, 502, 503, 504})
+_SAFE_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+# Cap server Retry-After so multi-hour proxy cooldowns cannot amplify a single
+# client call into hours of sleep. Bounded attempts still exhaust quickly.
+_RETRY_AFTER_MIN_CAP_SECONDS = 60.0
+_MAX_RETRY_AFTER_SECONDS = _RETRY_AFTER_MIN_CAP_SECONDS  # alias
 
 
 class LLMResponseError(ValueError):
     """A successful HTTP response that is not a usable chat-completions response."""
+
+    def __init__(self, message: str, *, code: str | None = None, error_code: str | None = None) -> None:
+        super().__init__(message)
+        # ``code`` and ``error_code`` are aliases (matrix + contract tests use both).
+        self.code = code if code is not None else error_code
+        self.error_code = self.code
 
 
 @dataclass(frozen=True)
@@ -36,19 +48,34 @@ def _retry_after(response: httpx.Response) -> float | None:
     if not raw:
         return None
     try:
-        return max(0.0, float(raw))
+        delay = max(0.0, float(raw))
     except ValueError:
         try:
             target = parsedate_to_datetime(raw)
             if target.tzinfo is None:
                 return None
-            return max(0.0, target.timestamp() - time.time())
+            delay = max(0.0, target.timestamp() - time.time())
         except (TypeError, ValueError, IndexError, OverflowError):
             return None
+    return min(delay, _RETRY_AFTER_MIN_CAP_SECONDS)
 
 
 def _is_retryable_http_error(error: httpx.HTTPStatusError) -> bool:
+    # 401/403/400 must never be retried — auth and client errors are terminal.
     return error.response.status_code in _RETRYABLE_STATUSES
+
+
+def _proxy_error_code(data: dict[str, Any]) -> str | None:
+    """Extract machine-readable error.code from OpenAI-ish or proxy error bodies."""
+    err = data.get("error")
+    if isinstance(err, dict):
+        code = err.get("code")
+        if isinstance(code, str) and _SAFE_ERROR_CODE.fullmatch(code):
+            return code
+    code = data.get("code")
+    if isinstance(code, str) and _SAFE_ERROR_CODE.fullmatch(code):
+        return code
+    return None
 
 
 @dataclass
@@ -128,18 +155,45 @@ class LLMClient:
         try:
             data = response.json()
         except ValueError as exc:
-            raise LLMResponseError("chat-completions response was not valid JSON") from exc
+            raise LLMResponseError(
+                "chat-completions response was not valid JSON",
+                code="invalid_json",
+            ) from exc
         if not isinstance(data, dict):
-            raise LLMResponseError("chat-completions response must be a JSON object")
+            raise LLMResponseError(
+                "chat-completions response must be a JSON object",
+                code="invalid_json",
+            )
+        # Proxy may return HTTP 200 with {"error":{"code":...}} — treat as invalid.
+        proxy_code = _proxy_error_code(data)
+        if proxy_code and "choices" not in data:
+            raise LLMResponseError(
+                f"chat-completions error body code={proxy_code}",
+                code=proxy_code,
+            )
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise LLMResponseError("chat-completions response has no choices")
+            raise LLMResponseError(
+                "chat-completions response has no choices",
+                code=proxy_code or "malformed_choices",
+            )
         first = choices[0]
         if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
-            raise LLMResponseError("chat-completions response has an invalid choice")
+            raise LLMResponseError(
+                "chat-completions response has an invalid choice",
+                code="malformed_choices",
+            )
         content = first["message"].get("content")
         if not isinstance(content, str):
-            raise LLMResponseError("chat-completions response has no text content")
+            raise LLMResponseError(
+                "chat-completions response has no text content",
+                code="empty_content",
+            )
+        if not content.strip():
+            raise LLMResponseError(
+                "chat-completions response has empty text content",
+                code="empty_content",
+            )
         usage = data.get("usage", {})
         return content, usage if isinstance(usage, dict) else {}
 
@@ -179,13 +233,28 @@ class LLMClient:
                     usage=usage,
                     request_id=response.headers.get("x-request-id"),
                 )
+                log.info("llm call ok: model=%s attempts=%d latency_ms=%d",
+                         self.model, attempt, self.last_metrics.latency_ms)
                 return content, usage
             except httpx.HTTPStatusError as exc:
-                last_exc = exc
+                # Preserve response/request for callers while keeping proxy body,
+                # endpoint URL and request prompt out of logs and notifications.
+                status = exc.response.status_code
+                code = "unavailable"
+                try:
+                    data = exc.response.json()
+                    if isinstance(data, dict):
+                        code = _proxy_error_code(data) or code
+                except ValueError:
+                    pass
+                last_exc = httpx.HTTPStatusError(
+                    f"chat-completions HTTP {status} error_code={code}",
+                    request=exc.request, response=exc.response,
+                )
                 if not _is_retryable_http_error(exc):
-                    log.warning("llm call failed with non-retryable HTTP %d: %s",
-                                exc.response.status_code, exc)
-                    raise
+                    log.warning("llm call failed (attempt %d/%d): %s",
+                                attempt, self.retry_max_attempts, last_exc)
+                    raise last_exc from None
             except (httpx.TransportError, LLMResponseError) as exc:
                 # Includes malformed 200 bodies from proxies and interrupted
                 # transport streams. Both are transient in the deployed routes.
@@ -200,4 +269,6 @@ class LLMClient:
             if attempt < self.retry_max_attempts:
                 self._sleep_before_retry(attempt=attempt, response=response)
         assert last_exc is not None
+        if isinstance(last_exc, httpx.HTTPStatusError):
+            raise last_exc from None
         raise last_exc

@@ -9,6 +9,8 @@ run instead of dropping it.
 """
 from __future__ import annotations
 
+from chat_daily_tg.tg_sender import delivery_identity
+from contextlib import ExitStack
 import logging
 import os
 from pathlib import Path
@@ -19,7 +21,8 @@ import httpx
 
 from chat_daily_tg.bilibili_fetcher import BiliArticle, BiliVideo, BilibiliContent
 from chat_daily_tg.config import Config
-from chat_daily_tg.raw_seen import SeenStore
+from chat_daily_tg.resource_util import enter_optional_client
+from chat_daily_tg.raw_seen import SeenStore, mark_after_send
 from chat_daily_tg.sent_ledger import append_message_ids
 from chat_daily_tg.tg_sender import TelegramSender, escape_html
 from chat_daily_tg.vision import _image_data_url
@@ -36,7 +39,7 @@ _SUMMARY_PROMPT = (
 )
 
 
-def build_summarizer(cfg: Config) -> Summarizer | None:
+def build_summarizer(cfg: Config, *, stack: ExitStack | None = None) -> Summarizer | None:
     """Tiered one-line summary: vision model on cover+title+desc when
     models.vision is enabled; else the text summary LLM on metadata alone.
     Returns None when summaries are disabled. Never raises from the returned
@@ -46,26 +49,37 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
     vision = cfg.models.vision if cfg.models else None
     use_vision = bool(vision and vision.enabled and vision.api_key_env in os.environ)
 
+    vision_client = None
+    text_client = None
+
     def summarize(video: BiliVideo, cover_path: Path | None) -> str | None:
+        nonlocal vision_client, text_client
         desc = (video.description or "")[:500]
         try:
-            if use_vision and cover_path is not None:
-                prompt = _SUMMARY_PROMPT.format(cover_hint="和封面图", title=video.title,
-                                                description=desc)
-                payload = {
-                    "model": vision.model,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": _image_data_url(cover_path)}},
-                    ]}],
-                    "max_tokens": 200,
-                    # gemini-3.5-flash 的内部思考按 max_tokens 计费：默认档会把
-                    # 预算吃到 finish=length，content 只剩截断碎渣（如") * **"）。
-                    # 一句话摘要无需思考，显式关闭。
-                    "reasoning_effort": "none",
-                }
-                headers = {"Authorization": f"Bearer {os.environ[vision.api_key_env]}"}
-                with httpx.Client(timeout=vision.timeout) as c:
+            # A caller-owned stack shares pools across the whole digest.
+            # Standalone calls still close every resource before returning.
+            with ExitStack() as local_stack:
+                owner = stack if stack is not None else local_stack
+                if use_vision and cover_path is not None:
+                    prompt = _SUMMARY_PROMPT.format(cover_hint="和封面图", title=video.title,
+                                                    description=desc)
+                    payload = {
+                        "model": vision.model,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": _image_data_url(cover_path)}},
+                        ]}],
+                        "max_tokens": 200,
+                        # Model-specific request controls, including reasoning effort,
+                        # come from the active vision route instead of being hard-coded.
+                        **vision.extra_body,
+                    }
+                    headers = {"Authorization": f"Bearer {os.environ[vision.api_key_env]}"}
+                    c = vision_client
+                    if c is None:
+                        c = enter_optional_client(owner, httpx.Client(timeout=vision.timeout))
+                        if stack is not None:
+                            vision_client = c
                     r = c.post(f"{vision.endpoint}/chat/completions", json=payload, headers=headers)
                     r.raise_for_status()
                     choice = r.json()["choices"][0]
@@ -74,16 +88,21 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
                         log.warning("summary truncated for %s, dropping", video.bvid)
                         return None
                     text = choice["message"]["content"]
-            else:
-                from chat_daily_tg.llm_client import LLMClient
-                m = cfg.models.summary
-                llm = LLMClient(endpoint=m.endpoint, model=m.model,
-                                api_key=os.environ[m.api_key_env],
-                                max_tokens=500, timeout=m.timeout,
-                                extra_body=m.extra_body)
-                prompt = _SUMMARY_PROMPT.format(cover_hint="", title=video.title,
-                                                description=desc)
-                text, _ = llm.chat(prompt)
+                else:
+                    from chat_daily_tg.llm_client import LLMClient
+                    m = cfg.models.summary
+                    llm = text_client
+                    if llm is None:
+                        llm = enter_optional_client(owner, LLMClient(
+                            endpoint=m.endpoint, model=m.model,
+                            api_key=os.environ[m.api_key_env], max_tokens=500,
+                            timeout=m.timeout, extra_body=m.extra_body,
+                        ))
+                        if stack is not None:
+                            text_client = llm
+                    prompt = _SUMMARY_PROMPT.format(cover_hint="", title=video.title,
+                                                    description=desc)
+                    text, _ = llm.chat(prompt)
             line = " ".join(text.strip().split())
             return line[:120] or None
         except Exception as e:
@@ -93,15 +112,20 @@ def build_summarizer(cfg: Config) -> Summarizer | None:
     return summarize
 
 
-def download_cover(url: str, dest: Path) -> Path | None:
+def _cover_client() -> httpx.Client:
+    return httpx.Client(timeout=30.0, follow_redirects=True, trust_env=False,
+                          headers={"User-Agent": "Mozilla/5.0",
+                                   "Referer": "https://www.bilibili.com/"})
+
+
+def download_cover(url: str, dest: Path, *, client: httpx.Client | None = None) -> Path | None:
     """Best-effort cover download; None on any failure (card falls back to text).
 
     trust_env=False: hdslb.com is Bilibili CDN — same direct-connection invariant
     as the fetcher (the guard's HTTPS_PROXY would route it via an overseas exit)."""
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True, trust_env=False,
-                          headers={"User-Agent": "Mozilla/5.0",
-                                   "Referer": "https://www.bilibili.com/"}) as c:
+        with ExitStack() as local_stack:
+            c = client if client is not None else local_stack.enter_context(_cover_client())
             r = c.get(url)
             r.raise_for_status()
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +165,6 @@ def article_card_caption(article: BiliArticle) -> str:
         lines.append("👤 " + " · ".join(meta))
     if article.summary:
         lines.append(f"📝 {escape_html(article.summary)}")
-    lines.append("❤️ 标记后发送到 Podcast4Bot 分析")
     return "\n".join(lines)
 
 
@@ -161,70 +184,110 @@ def push_digest(contents: list[BilibiliContent], *, sender: TelegramSender | Non
     WITHOUT marking them seen, so a later real run still pushes them."""
     digest = cfg.sources.bilibili.digest
     sent = 0
-    for content in reversed(contents):
-        if no_push or sender is None:
-            # Dry-run short-circuits before cover download / LLM spend.
-            log.info("[no-push] %s %s (%s)", content.seen_key, content.title, content.author)
-            continue
-        cover_path: Path | None = None
-        if digest.cover_enabled and content.cover:
-            cover_path = download_cover(
-                content.cover, workdir / f"bili-{content.kind}-{content.content_id}.jpg"
-            )
-        if isinstance(content, BiliVideo):
-            summary = summarizer(content, cover_path) if summarizer else None
-            caption = card_caption(content, summary)
-            # 视频 CTA 继续走自有跳转页，保持既有 PiliPlus 唤起体验。
-            button = (
-                ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{content.bvid}")
-                if digest.link_enabled else None
-            )
-        else:
-            caption = article_card_caption(content)
-            button = ("📖 阅读全文", content.url) if digest.link_enabled else None
-        msg_ids: list[int] = []
-        try:
-            if cover_path is not None:
+    with ExitStack() as resources:
+        cover_client = None
+        for content in reversed(contents):
+            with delivery_identity('bilibili', content.seen_key):
+                if no_push or sender is None:
+                    # Dry-run short-circuits before cover download / LLM spend.
+                    log.info("[no-push] %s %s (%s)", content.seen_key, content.title, content.author)
+                    continue
+                cover_path: Path | None = None
+                if digest.cover_enabled and content.cover:
+                    try:
+                        if cover_client is None:
+                            cover_client = enter_optional_client(resources, _cover_client())
+                        cover_path = download_cover(
+                            content.cover, workdir / f"bili-{content.kind}-{content.content_id}.jpg",
+                            client=cover_client,
+                        )
+                    except Exception as exc:
+                        log.warning("cover unavailable; sending text card: %s", exc)
+                if isinstance(content, BiliVideo):
+                    summary = summarizer(content, cover_path) if summarizer else None
+                    caption = card_caption(content, summary)
+                    # 视频 CTA 继续走自有跳转页，保持既有 PiliPlus 唤起体验。
+                    button = (
+                        ("▶️ 在 B 站观看", f"https://kanban.congeelife.top:8443/b/{content.bvid}")
+                        if digest.link_enabled else None
+                    )
+                else:
+                    caption = article_card_caption(content)
+                    button = ("📖 阅读全文", content.url) if digest.link_enabled else None
+                msg_ids: list[int] = []
+                from chat_daily_tg.tg_sender import AmbiguousDeliveryError
                 try:
-                    mid = sender.send_photo(cover_path, caption=caption, parse_mode="HTML",
-                                            button=button)
-                    msg_ids = _message_ids(mid)
+                    if cover_path is not None:
+                        try:
+                            mid = sender.send_photo(cover_path, caption=caption, parse_mode="HTML",
+                                                    button=button)
+                            msg_ids = _message_ids(mid)
+                        except AmbiguousDeliveryError:
+                            # Photo may already exist remotely — never fall back to a second POST.
+                            raise
+                        except Exception as e:
+                            log.warning("sendPhoto failed for %s, falling back to text: %s",
+                                        content.content_id, e)
+                            ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
+                                                   button=button)
+                            msg_ids = _message_ids(ids)
+                    else:
+                        ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
+                                               button=button)
+                        msg_ids = _message_ids(ids)
+                except AmbiguousDeliveryError as e:
+                    # Suppress automatic replay of a likely-delivered card (same policy as channels).
+                    if not mark_after_send(seen, content.seen_key):
+                        log.error("seen persist failed after ambiguous send for %s", content.seen_key)
+                    try:
+                        from chat_daily_tg import dedup_journal
+                        dedup_journal.record({
+                            "layer": "delivery", "action": "ambiguous",
+                            "reason": "telegram_transport_timeout", "method": e.method,
+                            "producer": "bilibili", "content_id": content.seen_key,
+                            "url": content.url,
+                        })
+                    except Exception:
+                        pass
+                    try:
+                        from chat_daily_tg.notifier import notify_failure
+                        notify_failure(
+                            "chat-daily-tg B站投递结果待确认",
+                            f"{content.seen_key} 的 {e.method} 响应超时；已停止自动重试，请核对后手动补。",
+                        )
+                    except Exception:
+                        pass
+                    log.error("ambiguous bilibili delivery terminalized (%s via %s)",
+                              content.seen_key, e.method)
+                    continue
                 except Exception as e:
-                    log.warning("sendPhoto failed for %s, falling back to text: %s",
-                                content.content_id, e)
-                    ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
-                                           button=button)
-                    msg_ids = _message_ids(ids)
-            else:
-                ids = sender.send_card(caption, link=content.url if digest.link_enabled else None,
-                                       button=button)
-                msg_ids = _message_ids(ids)
-        except Exception as e:
-            # This card failed both paths — leave it unseen so the next run
-            # retries it, and keep going with the rest of the digest.
-            log.error("card push failed for %s: %s", content.content_id, e)
-            continue
-        if not msg_ids:
-            log.error("card push returned no message id for %s; leaving unseen", content.content_id)
-            continue
-        # Write-after-send: message_id → canonical URL for Podcast thumbs-up handoff.
-        try:
-            written = append_message_ids(
-                msg_ids,
-                chat_id=sender.chat_id,
-                thread_id=getattr(sender, "message_thread_id", None),
-                url=content.url,
-                producer="bilibili",
-                content_id=content.seen_key,
-            )
-            if written != len(msg_ids):
-                log.error("sent_ledger incomplete for %s: %s/%s message ids", content.content_id,
-                          written, len(msg_ids))
-        except Exception as e:
-            # The visible card already exists.  Do not resend it, but make the
-            # reaction-routing loss highly visible.
-            log.error("sent_ledger write failed for %s: %s", content.content_id, e)
-        seen.add(content.seen_key)
-        sent += 1
-        time.sleep(digest.card_delay_seconds)
+                    # This card failed both paths — leave it unseen so the next run
+                    # retries it, and keep going with the rest of the digest.
+                    log.error("card push failed for %s: %s", content.content_id, e)
+                    continue
+                if not msg_ids:
+                    log.error("card push returned no message id for %s; leaving unseen", content.content_id)
+                    continue
+                # Write-after-send: message_id → canonical URL for Podcast thumbs-up handoff.
+                try:
+                    written = append_message_ids(
+                        msg_ids,
+                        chat_id=sender.chat_id,
+                        thread_id=getattr(sender, "message_thread_id", None),
+                        url=content.url,
+                        producer="bilibili",
+                        content_id=content.seen_key,
+                    )
+                    if written != len(msg_ids):
+                        log.error("sent_ledger incomplete for %s: %s/%s message ids", content.content_id,
+                                  written, len(msg_ids))
+                except Exception as e:
+                    # The visible card already exists.  Do not resend it, but make the
+                    # reaction-routing loss highly visible.
+                    log.error("sent_ledger write failed for %s: %s", content.content_id, e)
+                if not mark_after_send(seen, content.seen_key):
+                    log.error("seen persist failed after send for %s; in-memory/overflow/ledger must suppress retry",
+                              content.seen_key)
+                sent += 1
+                time.sleep(digest.card_delay_seconds)
     return sent

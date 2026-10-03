@@ -377,3 +377,15 @@ def test_finalize_dedupes_co_published_bvid(httpx_mock: HTTPXMock, tmp_path):
     assert [v.bvid for v in videos] == ["BV1sharedvid"]
     # whitelist order decides the provenance retained for a shared BV.
     assert videos[0].uid == 111 and videos[0].subscription_name == "UP甲"
+
+
+def test_api_health_counts_raw_items_before_seen_filter(tmp_path,monkeypatch):
+    import chat_daily_tg.bilibili_fetcher as bili
+    monkeypatch.setattr(bili.time,'sleep',lambda *_:None)
+    monkeypatch.setattr(bili,'_api_get',lambda *a,**k:{'media_list':[{'id':'already-seen'}]})
+    monkeypatch.setattr(bili,'_parse_media_item',lambda *a,**k:None)
+    seen=SeenStore(tmp_path/'seen.txt')
+    assert bili._fetch_via_api(_src(transport='api'),seen,now=datetime(2026,9,29))==[]
+    rows=[json.loads(line) for line in (tmp_path/'fetch_health.jsonl').read_text().splitlines()]
+    assert len(rows)==2 and all(r['status']=='success' and r['source_count']==1 for r in rows)
+    assert not seen.path.exists()

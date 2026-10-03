@@ -1,0 +1,469 @@
+{
+  "captured_on": "2026-09-27",
+  "git_head": "65bcde09d5152d5a69ec1909b54b804baab8379a",
+  "basis": "dirty working tree; per-file SHA-256 is authoritative for this audit",
+  "features": [
+    {
+      "feature": "F01",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/config.py",
+          "symbol": "Config",
+          "line": 461,
+          "sha256": "7804d044a311a6e6585186f6406f3841e2ef381c6d0e11365d9f29b8a7e4e148"
+        },
+        {
+          "path": "src/chat_daily_tg/cli.py",
+          "symbol": "build_parser",
+          "line": 26,
+          "sha256": "4daa7cc335b8a161a567edfecd9b02dcca877bb4558867d676082f4170583fe0"
+        }
+      ]
+    },
+    {
+      "feature": "F02",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/wx_exporter.py",
+          "symbol": "export_group",
+          "line": 405,
+          "sha256": "869dea31298884fff3a4a807d6b209e27b30ccad5578ceb6c30eae65f1469038"
+        }
+      ]
+    },
+    {
+      "feature": "F03",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/telegram_exporter.py",
+          "symbol": "read_messages",
+          "line": 257,
+          "sha256": "0c1dd998af1a2037f896924b0e855e60c731f621b326ef831f3c7682569b5576"
+        },
+        {
+          "path": "src/chat_daily_tg/telegram_exporter.py",
+          "symbol": "export_chat",
+          "line": 59,
+          "sha256": "0c1dd998af1a2037f896924b0e855e60c731f621b326ef831f3c7682569b5576"
+        }
+      ]
+    },
+    {
+      "feature": "F04",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/application.py",
+          "symbol": "_run",
+          "line": 1410,
+          "sha256": "25a193316620776a27413caaa3a0cf056c08b28fb40567b530e44b919e9bc096"
+        },
+        {
+          "path": "src/chat_daily_tg/summarizer.py",
+          "symbol": "run_summary",
+          "line": 148,
+          "sha256": "2b2d4ff408ed2b44eb93566e6cf198e0ab64e227dd43d6b8f4a0795c875a0237"
+        }
+      ]
+    },
+    {
+      "feature": "F05",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/vision.py",
+          "symbol": "analyze_media_candidates",
+          "line": 194,
+          "sha256": "8e1e8cd86992cc0b785092ddbbf7fc02a4fe2d4ae20f5fe85cf92212bb38df27"
+        },
+        {
+          "path": "src/chat_daily_tg/vision.py",
+          "symbol": "resolve_citations",
+          "line": 608,
+          "sha256": "8e1e8cd86992cc0b785092ddbbf7fc02a4fe2d4ae20f5fe85cf92212bb38df27"
+        }
+      ]
+    },
+    {
+      "feature": "F06",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/raw_channels.py",
+          "symbol": "push_raw_channel_cards",
+          "line": 521,
+          "sha256": "1cf403d5c19667c77b64b31ebeeac67eed37427a1a573c0a3075a48c90a5fc1f"
+        },
+        {
+          "path": "src/chat_daily_tg/private_media.py",
+          "symbol": "push_private_channel",
+          "line": 301,
+          "sha256": "30ab08c8ea7512ea723f3ec8b79e4ea3ab3101ec8bf4978e2722337ecae3598e"
+        }
+      ]
+    },
+    {
+      "feature": "F07",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/tg_sender.py",
+          "symbol": "TelegramSender._send_resumable",
+          "line": 347,
+          "sha256": "39c5e9c831433b40132e67c806ec22476ca5d0975b8a341176bd616946d33412"
+        },
+        {
+          "path": "src/chat_daily_tg/tg_sender.py",
+          "symbol": "AmbiguousDeliveryError",
+          "line": 13,
+          "sha256": "39c5e9c831433b40132e67c806ec22476ca5d0975b8a341176bd616946d33412"
+        }
+      ]
+    },
+    {
+      "feature": "F08",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/content_seen.py",
+          "symbol": "check_duplicate",
+          "line": 566,
+          "sha256": "00a16f154133bfa4593a20302809bfb43e53cac8ade1da81c8e5d82afb6ccdcf"
+        },
+        {
+          "path": "src/chat_daily_tg/dedup_journal.py",
+          "symbol": "record",
+          "line": 24,
+          "sha256": "c0172b078ef299d2354df35ed39f61fd2532b6e88cb71e00fda1e732db9fa253"
+        }
+      ]
+    },
+    {
+      "feature": "F09",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/topic_dedup.py",
+          "symbol": "TopicDedupGate",
+          "line": 1003,
+          "sha256": "80b9896266fb0c1ca9c700dcc37e57a5434bceb1e3eeec1a69f69b9c382e85b7"
+        },
+        {
+          "path": "src/chat_daily_tg/application.py",
+          "symbol": "_build_dedup_gates",
+          "line": 238,
+          "sha256": "25a193316620776a27413caaa3a0cf056c08b28fb40567b530e44b919e9bc096"
+        }
+      ]
+    },
+    {
+      "feature": "F10",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/bilibili_fetcher.py",
+          "symbol": "fetch_new_content",
+          "line": 502,
+          "sha256": "92f624a5a9c24bed2218578e82f8c33f9de4387801a1d9fd6ceac7f043cce7c6"
+        },
+        {
+          "path": "src/chat_daily_tg/bilibili_digest.py",
+          "symbol": "push_digest",
+          "line": 178,
+          "sha256": "30b978166ea4a9227b32949f7fb6182fc958cad1cf7e756f39c42fa79db578e1"
+        }
+      ]
+    },
+    {
+      "feature": "F11",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/youtube_fetcher.py",
+          "symbol": "fetch_new_videos",
+          "line": 509,
+          "sha256": "7cb67c2554238a146d44bc31867e29951ae12038e33322e847ad5783ec4a95a0"
+        },
+        {
+          "path": "src/chat_daily_tg/youtube_digest.py",
+          "symbol": "push_digest",
+          "line": 157,
+          "sha256": "6bed3fecd0328f1cea80acde3a7b81b74b10e3dd34e118a5cebd618a9af747e2"
+        }
+      ]
+    },
+    {
+      "feature": "F12",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/application.py",
+          "symbol": "_persist_opportunities",
+          "line": 148,
+          "sha256": "25a193316620776a27413caaa3a0cf056c08b28fb40567b530e44b919e9bc096"
+        },
+        {
+          "path": "src/chat_daily_tg/db.py",
+          "symbol": "PermanentDB.upsert_many",
+          "line": 135,
+          "sha256": "6d9ccdb688f12b7f506480a893881f43a1f5ba82b7c31236384f09fe9a69cf43"
+        }
+      ]
+    },
+    {
+      "feature": "F13",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/growth_miner.py",
+          "symbol": "mine_day",
+          "line": 327,
+          "sha256": "8c836b6fcfa21310b1bfc2cf8ffdbf7a6e0285fd65422e5ed00aeb7fca03f027"
+        },
+        {
+          "path": "src/chat_daily_tg/growth_store.py",
+          "symbol": "claim_next",
+          "line": 180,
+          "sha256": "b68af2698dbe1b6da958aaf98a70f7f4f214c52299bb83eaf150d8ffc74f1add"
+        }
+      ]
+    },
+    {
+      "feature": "F14",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/application.py",
+          "symbol": "run_growth_weekly",
+          "line": 1014,
+          "sha256": "25a193316620776a27413caaa3a0cf056c08b28fb40567b530e44b919e9bc096"
+        },
+        {
+          "path": "src/chat_daily_tg/growth_weekly.py",
+          "symbol": "consume_inbox",
+          "line": 224,
+          "sha256": "e1d3533c49445cbf57a22287b236af65edeefa2233f9089c4d43730f0fbeddc4"
+        }
+      ]
+    },
+    {
+      "feature": "F15",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/config.py",
+          "symbol": "HealthBriefing",
+          "line": 407,
+          "sha256": "7804d044a311a6e6585186f6406f3841e2ef381c6d0e11365d9f29b8a7e4e148"
+        },
+        {
+          "path": "src/chat_daily_tg/health_briefing.py",
+          "symbol": "HealthReport",
+          "line": 79,
+          "sha256": "bf1b4ec9826ba8ac410746cfaebcc9976785addb95c157c3fc98538cc39a8fa8"
+        }
+      ]
+    },
+    {
+      "feature": "F16",
+      "status": "现有索引与发布工具；机会库直收及访问范围过滤为新目标",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/knowledge_sources.py",
+          "symbol": "collect_sources",
+          "line": 1142,
+          "sha256": "aa1b453cc4a51942fa776789ed786692c8683e48074be3b05655834ec93768fd"
+        },
+        {
+          "path": "src/chat_daily_tg/knowledge_cli.py",
+          "symbol": "main",
+          "line": 2722,
+          "sha256": "14a93a2c2e5d0c8070d40b1ecf515dbd970c158c91d06e4b1dd89bdd7e3cd02c"
+        },
+        {
+          "path": "src/chat_daily_tg/knowledge_index.py",
+          "symbol": "GenerationReader",
+          "line": 2942,
+          "sha256": "830cf03c5ff61ce2f053561c33e5b71ed060b11866879313bb8f1a9811a4c7e4"
+        }
+      ]
+    },
+    {
+      "feature": "F17",
+      "status": "事件库/API已实现；助手自动接入未列作已有能力",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/intent_feedback.py",
+          "symbol": "FeedbackStore",
+          "line": 573,
+          "sha256": "8d1378319abfa1deb86de19d2a6d1289ad39ed749b3850f3c82ef7037cbff611"
+        },
+        {
+          "path": "src/chat_daily_tg/intent_feedback.py",
+          "symbol": "record_feedback",
+          "line": 896,
+          "sha256": "8d1378319abfa1deb86de19d2a6d1289ad39ed749b3850f3c82ef7037cbff611"
+        }
+      ]
+    },
+    {
+      "feature": "F18",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "scripts/schedule.py",
+          "symbol": "entries_for",
+          "line": 68,
+          "sha256": "145710b122d786ce9e33dd4ca4aa02a5757dd7920041bf14e658cd06f1c8bec8"
+        },
+        {
+          "path": "scripts/schedule.py",
+          "symbol": "cmd_apply",
+          "line": 204,
+          "sha256": "145710b122d786ce9e33dd4ca4aa02a5757dd7920041bf14e658cd06f1c8bec8"
+        },
+        {
+          "path": "scripts/guard_common.sh",
+          "symbol": null,
+          "line": 1,
+          "sha256": "95d8d8964725e75e595487024059527e7814c74b1f4de994f27a3f775227321f"
+        },
+        {
+          "path": "scripts/due_gate.sh",
+          "symbol": null,
+          "line": 1,
+          "sha256": "47e0fb63e2e190301d4b00d470b084b4c162c10bd43326b52926d61d1a96d0f6"
+        }
+      ]
+    },
+    {
+      "feature": "F19",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/notifier.py",
+          "symbol": "notify_failure",
+          "line": 16,
+          "sha256": "a769ad618d07c5f217243a834fe3d5dc55787de6542025dbe7c2b94ebf3bd1d6"
+        },
+        {
+          "path": "src/chat_daily_tg/logging_setup.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "988694d3b0afcfeea304a988f42f9bd6cb3a56b923e112e5427133033242f6c7"
+        }
+      ]
+    },
+    {
+      "feature": "F20",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/sent_ledger.py",
+          "symbol": "append_sent",
+          "line": 47,
+          "sha256": "701ad7649cce7ac87679b8d60ef18817fa725b294875004219c5bc664d052940"
+        },
+        {
+          "path": "src/chat_daily_tg/sent_content_ledger.py",
+          "symbol": "append_message_ids",
+          "line": 38,
+          "sha256": "6d4168c3c62106c190f1803ce63c0b5226af8de5681f569d01701189188d4d16"
+        },
+        {
+          "path": "src/chat_daily_tg/sent_content_mirror.py",
+          "symbol": "read_snapshot",
+          "line": 89,
+          "sha256": "3d13fe70d3fb1859bd38ef1bde473ee9e334de368dd7311b016247323473586c"
+        }
+      ]
+    },
+    {
+      "feature": "F21",
+      "status": "已有 CLI 与静态定时设计器；完整网页为新目标",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/cli.py",
+          "symbol": "build_parser",
+          "line": 26,
+          "sha256": "4daa7cc335b8a161a567edfecd9b02dcca877bb4558867d676082f4170583fe0"
+        },
+        {
+          "path": "docs/schedule-designer.html",
+          "symbol": null,
+          "line": 1,
+          "sha256": "941e3f6b961417cad39ca2453cff14d6fa9577bac189b13d7ecc9d6400b96a97"
+        }
+      ]
+    },
+    {
+      "feature": "F22",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "src/chat_daily_tg/sqlite_util.py",
+          "symbol": "Database.initialize",
+          "line": 154,
+          "sha256": "21ed1ba6537816362ab2c45f27538b2a3b9270a51cabb5d9361c6a0a402ec419"
+        },
+        {
+          "path": "scripts/migrate_jsonl_to_sqlite.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "902417716df91c9142d04db897063deb75d3e8290046feb773b7f1fa82673303"
+        },
+        {
+          "path": "src/chat_daily_tg/paths.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "342e93a8aa1d9f4e63c91c33c7853c2f831906d9ba5094a8cd4628beee4c93d6"
+        }
+      ]
+    },
+    {
+      "feature": "F23",
+      "status": "现有实现，运行情况按对应证据另判定",
+      "references": [
+        {
+          "path": "scripts/ai91shop_codex_monitor.py",
+          "symbol": "classify_codex_stock",
+          "line": 124,
+          "sha256": "210f328d203497a20adf0d74a6c647051b84de24bf7e416c055ae1d2a26f97b7"
+        },
+        {
+          "path": "scripts/ai91shop_codex_monitor.py",
+          "symbol": "StockMonitor",
+          "line": 250,
+          "sha256": "210f328d203497a20adf0d74a6c647051b84de24bf7e416c055ae1d2a26f97b7"
+        }
+      ]
+    },
+    {
+      "feature": "F24",
+      "status": "实验或兼容遗留，逐项决定是否替代",
+      "references": [
+        {
+          "path": "scripts/research_loop.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "1394570a70fb4722531de8fa605dbe7c50ce4866692e38a276a3c6d0569bedc3"
+        },
+        {
+          "path": "src/chat_daily_tg/research_loop.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "e88b682853ff8bb29265d969dd73e9327bf95ebf25f1e342b0cf0b1e22671ea1"
+        },
+        {
+          "path": "src/chat_daily_tg/img_relay.py",
+          "symbol": null,
+          "line": 1,
+          "sha256": "e3587eb2eba0fc4771109fe4f284333b79d3a58b9df878c81942c1db10470ecd"
+        }
+      ]
+    }
+  ]
+}

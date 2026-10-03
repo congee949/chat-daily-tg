@@ -1,0 +1,596 @@
+{
+  "schema": "chatdaily.legacy-input-description.v1",
+  "captured_on": "2026-09-27",
+  "origin": "static input schema of the reviewed working tree; no live database rows",
+  "database": "chat-daily.db",
+  "user_version": 3,
+  "tables": [
+    {
+      "name": "growth_ab_log",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "segment_id",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "judged_at",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "rubric_version",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "winner",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "score_a",
+          "type": "REAL",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "score_b",
+          "type": "REAL",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "verdict",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "card_a",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "card_b",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": []
+    },
+    {
+      "name": "growth_mined_days",
+      "columns": [
+        {
+          "name": "chat_id",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "date",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 2
+        },
+        {
+          "name": "mined_at",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "segments_found",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": "0",
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": [
+        [
+          "chat_id",
+          "date"
+        ]
+      ]
+    },
+    {
+      "name": "growth_segments",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "chat_id",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "chat_name",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "date",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "start_msg_id",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "end_msg_id",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "start_hm",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "end_hm",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "msg_count",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": "0",
+          "primary_key_position": 0
+        },
+        {
+          "name": "theme",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "points_json",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'[]'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "quotes_json",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'[]'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "participants",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "score",
+          "type": "REAL",
+          "not_null": true,
+          "default_sql": "0",
+          "primary_key_position": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'pending'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "mined_at",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "sent_at",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "sent_style",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "slice_path",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "claim_run_id",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "claim_until",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": [
+        [
+          "chat_id",
+          "start_msg_id",
+          "end_msg_id"
+        ],
+        [
+          "id"
+        ]
+      ]
+    },
+    {
+      "name": "hot_leads",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "captured_at",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "summary",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "category",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "source_group",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "source_sender",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'alive'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "risk_notes",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "death_signal",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": [
+        [
+          "id"
+        ]
+      ]
+    },
+    {
+      "name": "permanent",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "fingerprint",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "captured_at",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "source_group",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "source_sender",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "category",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "type",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "content",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "url",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "expires_at",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_mentioned_at",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "mention_count",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": "1",
+          "primary_key_position": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'alive'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "death_signal",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": [
+        [
+          "fingerprint"
+        ],
+        [
+          "id"
+        ]
+      ]
+    },
+    {
+      "name": "repeat_topics",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 1
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "first_seen",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_seen",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": null,
+          "primary_key_position": 0
+        },
+        {
+          "name": "seen_dates",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'[]'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "mention_count",
+          "type": "INTEGER",
+          "not_null": true,
+          "default_sql": "1",
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_summary",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "'active'",
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_source_group",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_source_sender",
+          "type": "TEXT",
+          "not_null": true,
+          "default_sql": "''",
+          "primary_key_position": 0
+        },
+        {
+          "name": "last_new_information",
+          "type": "TEXT",
+          "not_null": false,
+          "default_sql": null,
+          "primary_key_position": 0
+        }
+      ],
+      "unique_keys": [
+        [
+          "id"
+        ]
+      ]
+    }
+  ],
+  "interpretation": {
+    "timestamps": "preserve original values; parse timezone with explicit import profile when absent",
+    "json_text_columns": [
+      "seen_dates",
+      "points_json",
+      "quotes_json"
+    ],
+    "growth_statuses": "preserve raw values; pending/sending/sent/rejected/ambiguous are classified during import; unknown values quarantined",
+    "fingerprints": "preserve as imported metadata, do not recompute to silently replace identity",
+    "active_claims": "do not migrate a live sending lease into automatic resend"
+  },
+  "other_inputs": {
+    "seen": "UTF-8 complete lines platform/content or chat:message keys; retain holes and overflow",
+    "markers": "retain bytes; content may be plain text or JSON depending on artifact/version",
+    "ledgers": "04-integrations.md#ledgers",
+    "derived_indexes": "preserve raw snapshots and generation metadata; rebuild rather than requiring legacy physical schema",
+    "intent_feedback": "preserve raw intent-feedback.v1 and intent-feedback.topic-reclassification.v1 events; import stable event IDs and idempotency keys without rewriting events"
+  }
+}

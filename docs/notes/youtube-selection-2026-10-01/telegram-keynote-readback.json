@@ -1,0 +1,14 @@
+[
+  {
+    "id": 201978,
+    "platform": "telegram",
+    "chat_id": 4424841223,
+    "chat_name": "Notification",
+    "msg_id": 10865,
+    "sender_id": 8307375018,
+    "sender_name": "通知",
+    "content": "**OpenAI DevDay 2026 Keynote (FULL)**\n👤 OpenAI · 53m35s\n📝 视频看点：完整主题演讲包含20余项发布及演示，涉及ChatGPT Spaces等产品。",
+    "timestamp": "2026-10-01T15:08:40+00:00",
+    "raw_json": "{\"reply_markup\": {\"_\": \"ReplyInlineMarkup\", \"rows\": [{\"_\": \"KeyboardButtonRow\", \"buttons\": [{\"_\": \"KeyboardButtonUrl\", \"text\": \"▶️ 在 YouTube 观看\", \"url\": \"https://www.youtube.com/watch?v=Fls_onRviPM\", \"style\": null}]}]}, \"media_type\": \"MessageMediaPhoto\"}"
+  }
+]

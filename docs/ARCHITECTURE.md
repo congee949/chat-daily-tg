@@ -4,18 +4,20 @@
 
 ## 全景
 
-四条管线，一个入口（`run_daily.py`），靠 flag 分流：
+多条管线，一个入口（`run_daily.py` / `chat-daily` 子命令），靠 flag 分流：
 
 | 管线 | flag | 触发 | 产物 |
 |---|---|---|---|
-| 每日日报 | 默认 | launchd 7:05，`--wait-for-wake` 单次探测睡眠；无数据立刻发 | 一条 TG 富消息（含内嵌图） |
-| 频道转发 | `--channels-only` | launchd 6–22 每 2 小时 | 每条频道消息一张卡片 |
-| 成长挖掘 | `--growth-only` / `--growth-weekly` | launchd 9:30/15:30/21:30，周六 9:45 | 每天最多一张成长卡 |
-| B站 digest | `--bilibili-only` | **r4s cron** 每小时 :30 | 每个新视频一张卡片 |
+| 每日日报 | 默认 | Mac launchd 7:05，`--wait-for-wake` 单次探测睡眠；无数据立刻发 | 一条 TG 富消息（含内嵌图） |
+| 频道转发 | `--channels-only` | Mac launchd `00/02/06/09/10/12/14/16/18/20/22`（`schedule.yaml` 事实源；wrapper 0–15min jitter） | 每条频道消息一张卡片 |
+| 成长挖掘 | `--growth-only` / `--growth-weekly` | Mac launchd 9:30/15:30/21:30；周六 9:45 周报；guarded wrapper 使用配置中的 `sol` 模型别名（模型 ID 以运行机配置和 `/v1/models` 为准） | 每天最多一张成长卡；周六 DM 周报 |
+| B站 digest | `--bilibili-only` | **仅 r4s cron**：`*/5` 探测 + `due_gate` 随机 **20–30min**（**不是**“每小时 :30”） | 每个新视频一张卡片 |
+| YouTube digest | `--youtube-only` | **仅 r4s cron**：`*/5` 探测 + `due_gate` 随机 **10–15min** | 每个新视频一张卡片 |
+| ledger-sync | （独立 wrapper） | Mac launchd `StartInterval` 60s | 从 r4s 拉取 media ledger，向 r4s 推送 Mac sent-content；[同步说明](runbook.md#ledger-sync) |
 
-四条共用：`~/chat-daily/config.yaml` 配置、`chat-daily.db` 数据层、`~/qwenproxy/.tg-notify-targets.json` 路由表、`archive/YYYY/MM/DD/` 归档、`notifier` 告警。
+共用：`~/chat-daily/config.yaml` 配置、`chat-daily.db` 数据层、`~/qwenproxy/.tg-notify-targets.json` 路由表、`archive/YYYY/MM/DD/` 归档、`notifier` 告警。
 
-它们**互不阻塞**：频道转发不依赖日报是否有内容（历史上耦合过，2026-06-06 解开），成长挖掘失败不影响日报，B站已整个搬到另一台机器。
+它们**互不阻塞**：频道转发不依赖日报是否有内容（历史上耦合过，2026-06-06 解开），成长挖掘失败不影响日报，B站 / YouTube 已整个搬到 r4s——**禁止在 Mac 恢复 bilibili/youtube launchd**，否则会与 r4s 双跑。
 
 ## 每日日报管线
 
@@ -64,7 +66,7 @@ post_process → 短于 100 字符则告警 return 1
 
 **微信侧是"先打分后下载"，Telegram 侧是"先下载后筛选"。** 两边不对称是有意的：`wx attachments --json` 的 `local_id` 与导出文本里的占位符是同一 ID，所以能在拿到文件前先用纯文本关键词打分（`score_media_context`），只下达标的。代价是"图很好但配文很短"的情况会误伤，Telegram 侧靠全下载 + vision 二次筛能兜住，微信侧为控制体积放弃了这个兜底。
 
-**vision 是三级漏斗**：`min_prefilter_score=0.45`（文本打分）→ `min_include_score=0.8`（模型打分）→ 零图天用 `fallback_min_score=0.65` 保底提升一张。进 vision 前还有 `_is_valid_image_file` 硬门槛（≥10KB 且 ≥300×300，PIL 解析失败即判无效），用来挡微信缩略图和 `wxgf` 私有格式坏文件。
+**vision 是三级漏斗**：`min_prefilter_score=0.45`（文本打分）→ `min_include_score=0.8`（模型打分）→ 零图天用 `fallback_min_score=0.65` 保底提升一张。`wx extract` 落盘后若发现 `wxgf` 私有容器（HEVC 封装），先经 `wxgf.py` 用本机 ffmpeg 转码成标准 JPEG（失败或 ffmpeg 缺失则保留原文件，走原丢弃路径）。进 vision 前还有 `_is_valid_image_file` 硬门槛（≥10KB 且 ≥300×300，PIL 解析失败即判无效），用来挡微信缩略图和未能转码的坏文件。
 
 0.8 这条线下**约一半的天数是零图天**，这是常态不是故障。管线为此专门做了可自证：`vision-audit.jsonl` 记录全量（含落选与失败），`vision_zero_image_failure(stats)` 是 ERROR 日志与 TG 告警**共用的单一判定**，防止两个口径分叉说不同的话。
 
@@ -90,11 +92,24 @@ citation_map 有图 且 img_relay 开启
 - **公开频道**：`t.me/<username>/<msg_id>` 链接 + `link_preview_options` 富预览 + inline「打开原文」按钮。读 tg-cli 的 `messages.db`（纯文本）。
 - **私有频道**：没有公开链接，Telegram 给不出预览。改用登录 session 下载媒体，经 bot 重新上传，媒体推送后立即 `shutil.rmtree`（文字已投递、媒体可重抓，不留二进制）。
 
-**增量靠 msg_id 高水位**（`SeenStore.max_msg_id`），公开走 SQL `AND msg_id > ?`，私有走 telethon `iter_messages(min_id=)`。这是每 2 小时能跑的前提——否则高产私有频道每轮重下当天全部媒体，会撞 600s 子进程超时。
+**增量靠 msg_id 高水位**（`SeenStore.max_msg_id`），公开走 SQL `AND msg_id > ?`，私有走 telethon `iter_messages(min_id=)`。这是多点调度能跑的前提——否则高产私有频道每轮重下当天全部媒体，会撞 600s 子进程超时。
 
 **相册折叠是推断出来的，不是读 `grouped_id`。** 私有路径能拿到 `grouped_id`，但公开路径读的 `messages.db` 里 `raw_json` 全表为空。所以公开路径改用"**空正文 + msg_id 连续 + 时间戳在 10s 窗口内**"推断相册成员，折进上一条卡片。规则保守：任何带文字的消息都另起一帖，保证两条真实文本帖永不被合并。
 
 **相册的每个成员 id 都要写 seen**，不只 head——只记 head 会让高水位卡在相册首条，下次重新抓到尾部媒体、当占位卡再推一次。
+
+### 投递歧义（AmbiguousDelivery）
+
+Telegram Bot API **没有** send 幂等键。读/写超时或对端半关闭后，请求可能已经落成消息，但本地拿不到响应。
+
+本地代码的语义如下；远端 digest 的实际行为仍须核对目标机器版本与回执，参见 runbook 的部署检查：
+
+1. **超时不自动重试 POST**——`AmbiguousDeliveryError` 阻止对同一条源消息再发一遍。
+2. **channels 终态化（terminalize）**：相册每个成员 id 写入 `SeenStore`，并记 `dedup_journal` 的 `layer=delivery / action=ambiguous`，同时告警「投递结果待确认」。
+3. **公开文本**可用 `channels resend -- "chat_id:msg_id"` 人工核对后补发。
+4. **私有媒体**不在 `channels resend` 覆盖范围内；漏推需人工核对目标话题后再定向补（见 runbook SOP）。
+
+代价：极少数“其实没发出去”的消息会被终态抑制，宁可漏一条也不自动刷屏。
 
 ## 成长挖掘管线
 
@@ -103,31 +118,39 @@ citation_map 有图 且 img_relay 开启
 ```
 mine_day(target_day)  → 切片入队（天级幂等，重跑快速返回）
   ↓ 部分失败 → 好 chunk 已入队，当天不标记 mined，次日 catch-up 重挖，不阻塞发卡
-pick_next(prefer_date)
+claim_next(prefer_date, run_id, daily_quota)
   ↓
-build_card_a（确定性模板，零捏造风险）
+build_card_a（确定性模板，引用从原始切片核验）
 build_card_b（LLM 叙事）
   ↓
-judge(judge_llm, A, B, rubric) ← 异源：A/B 由 deepseek 写，judge 用 grok-4.5
+judge(judge_llm, A, B, rubric) ← 评审模型由 Growth.judge_model 选择，未配置时使用生成模型
   ↓ 任一步异常 → 回落 A 卡
 发送 → mark_sent（daily_quota 门控）
 ```
 
-**judge 异源是方法学决定**：B 卡作者与评审同为一个模型时存在自评自偏好。`Growth.judge_model` 设空即回落同源，日卡永不因 judge 配置断供。
+评审模型可以独立于 B 卡生成模型配置。别名解析与回落见 [config.py](../src/chat_daily_tg/config.py) 的 `Growth`、`Config.resolve_model_alias` 和 [application.py](../src/chat_daily_tg/application.py) 的 `run_growth`；评审不可用时使用 A 卡。
 
 **溯源只靠本地切片。** 源群消息一天一清，所以 `t.me` 深链对任何账号 24h 内必成死链——卡片上的跳转按钮已整个删除，`~/chat-daily/growth/segments/` 的本地切片是原文的**唯一长期载体**，`INDEX.md` 由 DB 全量重建（幂等）提供快查。
 
 **金句必须逐字。** 展示文本从 DB 逐字反查片段，不用 LLM 排版版；零有效金句的段落降级 rejected（无可信锚点即不推送）。
 
-## B站 digest 管线
+日卡通过 `growth_mined_days`、`growth_store.claim_next` 的领取租约、`mark_sent` 和日配额控制重跑。周报的成功与发送歧义均保存 ISO 周 marker，正式重跑在消费反馈和调用模型前检查；marker 中的 `status` 区分 `delivered` 与 `ambiguous`。具体行为及无推送模式的副作用见 [周报运行说明](runbook.md#成长周报幂等weekly-sent)。
 
-已迁 r4s，代码仍在本仓库。
+## B站 / YouTube digest 管线
+
+已迁 **r4s**，代码仍在本仓库。Mac **不**装 bilibili/youtube launchd。
 
 **双 transport**：`api`（默认，medialist + view 两个接口，零 cookie 零 WBI 签名，单 UP 一次调用拿齐字段）和 `opencli`（fallback，走 Chrome bridge）。`arc/search` 会 -352 风控，已弃用。
 
 **B站请求必须直连**（`trust_env=False`，含 hdslb 封面 CDN）——海外出口即风控。这与同一台机器上 TG/Gemini 走 bwg tinyproxy 出海的需求直接冲突，所以是两套 client 而不是一套。
 
 -352 是 IP 级判决，首个 UP 命中即中止本轮（降频不绕过），不对已风控的 IP 连打 22 次。
+
+**调度（r4s）**：cron 用 `*/5` 探测，`scripts/due_gate.sh` 在成功后把下次 due 随机推到间隔窗口——B站 **20–30min**、YouTube **10–15min**。失败不推进 due，保持可重试。这不是固定的“每小时 :30”。
+
+**ledger**：r4s `/root/chat-daily/state/media_sent_ledger.jsonl` 是权威 write-after-send 源；Mac 历史索引副本按需显式同步；共享 ledger-sync 仅推送 sent-content ledger，见 [运行指南](runbook.md#ledger-sync)。
+
+**Ambiguous 目标态**：digest 推送超时也应终态化（写 seen/ledger 前按管线语义分流：已确认落成才 ledger；歧义写 journal + 告警、抑制自动重 POST），与 channels 一致。代码同步前以 r4s 副本行为为准，见 runbook 待部署清单。
 
 ## 横切关注点
 
@@ -143,7 +166,7 @@ judge(judge_llm, A, B, rubric) ← 异源：A/B 由 deepseek 写，judge 用 gro
 | `.run-complete` | 整轮 | **仅 push 成功才写**；`--no-push` 调试跑不得抑制补跑 |
 | `.text-push-state.json` | 多 chunk 续传 | 按 payload-hash，内容变了则整发 |
 
-频道转发与 B站的幂等不用 marker，用 `SeenStore`（append-only 文件，**发后才写**，key 为 `chat_id:msg_id` / `bilibili:<bvid>`）。
+频道转发与 B站 / YouTube 的幂等不用 day-level marker，用 `SeenStore`（append-only 文件，**发后才写**，key 为 `chat_id:msg_id` / `bilibili:<bvid>` / `youtube:<video_id>`）。`AmbiguousDelivery` 是例外的“终态抑制”：未确认落成也会推进 seen，并同步写 `dedup_journal`。
 
 ### 数据层
 

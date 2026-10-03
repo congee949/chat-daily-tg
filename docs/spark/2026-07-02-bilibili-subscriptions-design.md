@@ -1,5 +1,9 @@
 # ChatDaily Bilibili 订阅 Digest 设计文档
 
+> **历史设计，非现行。** 本文保留迁移前的方案与当时 Mac launchd / 每小时 :30 假设，供追溯。
+> 现行事实：B站 digest **只在 r4s** 跑（`*/5` + `due_gate` 随机 20–30min）；**勿在 Mac 恢复 bilibili launchd**（installer 也不装）。
+> 运维以 [docs/runbook.md](../runbook.md)、[docs/ARCHITECTURE.md](../ARCHITECTURE.md)、`schedule.yaml` 与 r4s cron 为准。
+
 ## 1. 背景与问题
 
 用户希望减少打开 B 站的次数。当前刷 B 站的主要动机是首页推荐/短视频，但"检查关注 UP 主是否更新"仍是打开 B 站的合理借口之一。如果能把关注 UP 主的新视频主动推送到 Telegram 群 topic，可以消除这个借口，减少不必要的打开频次。

@@ -1,0 +1,1070 @@
+--- a/twitter_monitor.py
++++ b/twitter_monitor.py
+@@ -20,6 +20,8 @@
+ import base64
+ from contextlib import contextmanager
+ import hashlib
++import quote_fold
++import thread_merge
+ import http.client
+ import json
+ import os
+@@ -2510,8 +2512,30 @@
+     # "product", nor "max" match "maximize". Phrases retain flexible spaces.
+     pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+     return re.search(pattern, body, re.IGNORECASE) is not None
++
++
++def _log_quote_fold(tweet: dict, fold: dict, *, dry_run: bool = False) -> None:
++    preview = " dry-run" if dry_run else ""
++    print(f"    quote-fold{preview}: tweet={tweet.get('id')} "
++          f"action={fold.get('action')} reason={fold.get('reason')} "
++          f"source={fold.get('source_id') or '-'} message={fold.get('message_id') or '-'}")
+ 
+ 
++def _journal_quote_fold(tweet: dict, fold: dict) -> None:
++    record = {"ts": datetime.now(timezone.utc).isoformat(),
++              "decision": "duplicate_terminal", "reason": fold["reason"],
++              "tweet_id": str(tweet.get("id") or ""), "matched": fold["source_id"],
++              "matched_message_id": fold["message_id"],
++              "target_chat_id": fold["target_chat_id"],
++              "target_thread_id": fold["target_thread_id"],
++              "content_snapshot": _event_body(_semantic_anchor_view(tweet))}
++    os.makedirs(os.path.dirname(SEMANTIC_DECISION_JOURNAL), exist_ok=True)
++    with open(SEMANTIC_DECISION_JOURNAL, "a", encoding="utf-8") as stream:
++        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
++        stream.flush()
++        os.fsync(stream.fileno())
++
++
+ def _event_body(t: dict) -> str:
+     return ((t.get("note_tweet") or {}).get("text") or t.get("text") or "").strip()
+ 
+@@ -2750,16 +2774,30 @@
+         db.close()
+ 
+ 
+-def event_dedup_gate_report(path: str | None = None) -> dict:
+-    """Repeatable Go/No-Go report. Enforce needs reviewed candidates, not uptime."""
+-    with _event_ledger_session(path) as db:
+-        row = db.execute("""
+-            SELECT count(*) AS candidates,
+-                   sum(CASE WHEN reviewed=1 AND false_positive IN (0,1)
+-                            THEN 1 ELSE 0 END) AS reviewed,
+-                   sum(CASE WHEN reviewed=1 AND false_positive=1 THEN 1 ELSE 0 END) AS fp
+-            FROM event_observations WHERE decision='would_suppress'
+-        """).fetchone()
++def event_dedup_gate_report(path: str | None = None, *, read_only: bool = False) -> dict:
++    """Repeatable Go/No-Go report. Preview never creates or migrates the ledger."""
++    query = """
++        SELECT count(*) AS candidates,
++               sum(CASE WHEN reviewed=1 AND false_positive IN (0,1)
++                        THEN 1 ELSE 0 END) AS reviewed,
++               sum(CASE WHEN reviewed=1 AND false_positive=1 THEN 1 ELSE 0 END) AS fp
++        FROM event_observations WHERE decision='would_suppress'
++    """
++    if read_only:
++        db = None
++        try:
++            uri = "file:" + urllib.parse.quote(os.path.abspath(path or EVENT_LEDGER_PATH)) + "?mode=ro"
++            db = sqlite3.connect(uri, uri=True, timeout=10)
++            db.row_factory = sqlite3.Row
++            row = db.execute(query).fetchone()
++        except sqlite3.Error:
++            row = {"candidates": 0, "reviewed": 0, "fp": 0}
++        finally:
++            if db is not None:
++                db.close()
++    else:
++        with _event_ledger_session(path) as db:
++            row = db.execute(query).fetchone()
+     reviewed = int(row["reviewed"] or 0)
+     fp = int(row["fp"] or 0)
+     rate = fp / reviewed if reviewed else None
+@@ -2830,12 +2868,12 @@
+     return cur.rowcount
+ 
+ 
+-def _init_event_dedup_mode(requested: str) -> str:
++def _init_event_dedup_mode(requested: str, *, read_only: bool = False) -> str:
+     global _EVENT_DEDUP_MODE, _EVENT_DEDUP_EFFECTIVE_MODE
+     requested = requested if requested in ("off", "observe", "enforce") else "observe"
+     _EVENT_DEDUP_MODE = requested
+     if requested == "enforce":
+-        report = event_dedup_gate_report()
++        report = event_dedup_gate_report(read_only=read_only)
+         if not report["ready"]:
+             print(f"  ⚠ event dedup enforce Go/No-Go=NO-GO {report}; 保持 observe")
+             _EVENT_DEDUP_EFFECTIVE_MODE = "observe"
+@@ -2843,7 +2881,7 @@
+             _EVENT_DEDUP_EFFECTIVE_MODE = "enforce"
+     else:
+         _EVENT_DEDUP_EFFECTIVE_MODE = requested
+-    if requested != "off":
++    if requested != "off" and not read_only:
+         recovered = recover_stale_event_claims()
+         if recovered:
+             print(f"  ⚠ event ledger 恢复 {recovered} 条 stale pending → ambiguous（不盲重发）")
+@@ -3064,6 +3102,9 @@
+ 
+ 
+ # ── 跨账号去重索引（纯转发 + Article；config 键 cross_account_dedup 开关）──
++_OFFICIAL_THREAD_MERGE_ENABLED = False
++_TRANSLATION_REPLY_ENABLED = False
++_OFFICIAL_QUOTE_GROUPS = []
+ _CROSS_DEDUP_ENABLED = False        # main 从 cfg 置位；默认关 = 行为与现状一致
+ _PUSHED_INDEX_CACHE: "dict | None" = None   # 单进程内存缓存 = 同轮跨账号共享
+ 
+@@ -5088,7 +5129,27 @@
+     reply_to_message_id：自回复串的父推消息锚点，各降级档都要带上，
+     否则 rich 被拒后评论会脱离线程变成孤立消息。
+     """
++    fold = t.get("_quote_fold") or {}
++    if fold.get("reason") == "translation_source_delivered":
++        link = _tweet_source_url(username, t)
++        text = "中文摘译 by @" + html.escape(username)
++        t["_delivered_fold_text"] = _html_to_plain(text)
++        return send_telegram(token, chat_id, text, link, thread_id=thread_id,
++                             reply_to_message_id=fold["message_id"])
+     html_text, rich_html, link = format_message(username, t, ai)
++    if fold.get("reason") == "official_quote_update":
++        # The original already exists in this target; keep only the comment.
++        bundle = _semantic_bundle(t)
++        anchor = bundle.get("anchor") or {}
++        own = anchor or t
++        own_media = (own.get("media") or (own.get("entities") or {}).get("media")
++                     or (own.get("extended_entities") or {}).get("media"))
++        if not own_media:
++            comment = _event_body(_semantic_anchor_view(t))
++            text = "补充 @" + html.escape(username) + "\n\n" + html.escape(comment)
++            t["_delivered_fold_text"] = _html_to_plain(text)
++            return send_telegram(token, chat_id, text, _tweet_source_url(username, t),
++                                 thread_id=thread_id, reply_to_message_id=fold["message_id"])
+     presentation = _quote_presentation_tweet(t)
+     media_view = (_semantic_media_view(presentation)
+                   if _semantic_use(t) else t)
+@@ -5167,6 +5228,14 @@
+     tweets = fetch_tweets(pool, username, limit=args.limit)
+     seen, last_post_iso = load_seen(username)
+     push_retry = load_push_retry(username)
++    # Idle-window retries retain original text even after falling out of the feed.
++    if not (args.test or args.seed):
++        present = {str(tweet.get("id") or "") for tweet in tweets}
++        for tid in push_retry - present - seen:
++            record = (_PUSH_RETRY_STATE_BY_USER.get(username) or {}).get(tid) or {}
++            saved = record.get("thread_tweet")
++            if isinstance(saved, dict) and str(saved.get("id") or "") == tid:
++                tweets.append(dict(saved))
+     if _semantic_gray_for(username) and push_retry and HAS_GRAPHQL:
+         present = {str(t.get("id") or "") for t in tweets}
+         for retry_id in sorted(push_retry - present)[:twitter_graphql.SEMANTIC_DETAIL_PER_BUNDLE]:
+@@ -5513,7 +5582,7 @@
+         tid = str(t.get("id") or "")
+         if not policy and _semantic_use(t) and tid not in push_retry:
+             _prepare_quote_translation(t, ai)
+-            # Pure translations already follow the user's source-only presentation policy.
++            # Pure translations retain the original source presentation.
+             low, quality_reason = ((False, "translation_source_only")
+                                    if (t.get("_quote_translation") or {}).get("action") == "source_only"
+                                    else _review_information_quality(t, ai))
+@@ -5550,12 +5619,33 @@
+     to_push.sort(key=lambda item: int(str(item[0].get("id") or "0") or "0")
+                  if str(item[0].get("id") or "").isdigit() else 0)
+ 
++    thread_deferred = []
++    to_push = thread_merge.merge_ready(
++        to_push, username, enabled=bool(_OFFICIAL_THREAD_MERGE_ENABLED and policy
++                                      and not args.test and not args.dry_run),
++        deferred=thread_deferred)
++    for tweet, _ in thread_deferred:
++        retry = note_push_retry(username, tweet)
++        retry["thread_tweet"] = {key: value for key, value in tweet.items()
++                                 if not key.startswith("_")}
+     push_failed: set[str] = set(resolution_deferred)
++    push_failed.update(str(tweet["id"]) for tweet, _ in thread_deferred)
+     push_deferred = False
+     delivered_count = 0
+     for t, _reason in to_push:
+         tid = str(t.get("id") or "")
+         if args.dry_run:
++            if not args.test and (_TRANSLATION_REPLY_ENABLED or _OFFICIAL_QUOTE_GROUPS):
++                if _TRANSLATION_REPLY_ENABLED and not policy:
++                    _prepare_quote_translation(t, ai)
++                fold = quote_fold.plan(
++                    t, username, chat_id=content_chat_id or chat_id,
++                    thread_id=content_thread_id if content_chat_id else None,
++                    ledger_path=EVENT_LEDGER_PATH,
++                    translation_reply=_TRANSLATION_REPLY_ENABLED,
++                    groups=_OFFICIAL_QUOTE_GROUPS,
++                    facts=_event_facts(_semantic_anchor_view(t)))
++                _log_quote_fold(t, fold, dry_run=True)
+             html_text, rich_html, link = format_message(username, t, ai)
+             print("----- DRY RUN -----")
+             print("[rich_html]")
+@@ -5579,6 +5669,31 @@
+             target_chat = content_chat_id or chat_id
+             target_thread = content_thread_id if content_chat_id else None
+             try:
++                fold = {"action": "deliver"}
++                t.pop("_quote_fold", None)
++                if not args.test:
++                    if _TRANSLATION_REPLY_ENABLED and not policy:
++                        _prepare_quote_translation(t, ai)
++                    fold = quote_fold.plan(
++                        t, username, chat_id=target_chat, thread_id=target_thread,
++                        ledger_path=EVENT_LEDGER_PATH,
++                        translation_reply=_TRANSLATION_REPLY_ENABLED,
++                        groups=_OFFICIAL_QUOTE_GROUPS,
++                        facts=_event_facts(_semantic_anchor_view(t)))
++                    if _TRANSLATION_REPLY_ENABLED or _OFFICIAL_QUOTE_GROUPS:
++                        _log_quote_fold(t, fold)
++                    if fold["action"] == "skip":
++                        try:
++                            _journal_quote_fold(t, fold)
++                        except OSError as exc:
++                            print(f"    quote-fold audit unavailable: {type(exc).__name__}; deliver")
++                            fold = {"action": "deliver"}
++                        else:
++                            seen.add(tid)
++                            save_seen(username, seen, last_post_iso)
++                            continue
++                    if fold["action"] == "reply":
++                        t["_quote_fold"] = fold
+                 if _EVENT_DEDUP_EFFECTIVE_MODE != "off" and not args.test:
+                     claim = claim_event_delivery(
+                         t, username, target_chat_id=target_chat,
+@@ -5611,9 +5726,9 @@
+                 # 自回复接线程：父推若已在同一目标推送过，就把这条评论挂到那条
+                 # Telegram 消息下面（原生 reply 会带出父推的引用条）。查不到锚点
+                 # （父推被过滤 / 超出保留期 / 话题改路由）时按独立消息发，不阻断。
+-                reply_anchor = None
++                reply_anchor = fold.get("message_id") if fold["action"] == "reply" else None
+                 parent_id = "" if args.test else self_reply_parent_id(t, username)
+-                if parent_id:
++                if parent_id and reply_anchor is None:
+                     try:
+                         reply_anchor = lookup_tweet_anchor(
+                             parent_id, target_chat_id=target_chat,
+@@ -5665,6 +5780,9 @@
+                     # 失败只打日志：末尾统一落盘 + _alert 兜底。
+                     # --test 不 checkpoint：测试推送发往调试目标，写生产 seen /
+                     # 摘 push_retry 会让生产群永久漏掉这些推文（基线语义如此）。
++                    merged_ids = {str(member.get("id") or "")
++                                  for member in t.get("_official_thread_members") or []}
++                    seen.update(merged_ids)
+                     seen.add(tid)
+                     try:
+                         save_seen(username, seen, last_post_iso)
+@@ -5686,6 +5804,23 @@
+                             target_chat_id=target_chat, target_thread_id=target_thread)
+                     except Exception as anchor_error:
+                         print(f"    线程锚点落盘失败（忽略）: {anchor_error}")
++                    for member in t.get("_official_thread_members") or []:
++                        try:
++                            record_tweet_anchor(str(member.get("id")), telegram_message_id_of(r),
++                                username=username, target_chat_id=target_chat,
++                                target_thread_id=target_thread)
++                        except Exception:
++                            pass
++                    source_id = (t.get("_quote_translation") or {}).get("source_id")
++                    if (source_id and not r.get("assumed_delivered")
++                            and (t.get("_quote_translation") or {}).get("action") == "source_only"
++                            and fold["action"] != "reply"):
++                        try:
++                            record_tweet_anchor(source_id, telegram_message_id_of(r),
++                                username=username, target_chat_id=target_chat,
++                                target_thread_id=target_thread)
++                        except Exception as anchor_error:
++                            print(f"    source anchor unavailable: {type(anchor_error).__name__}")
+                     # Preference provenance is strictly a post-confirmation
+                     # sidecar.  The helper rejects assumed/ambiguous results and
+                     # swallows local I/O failures so send/seen semantics stay intact.
+@@ -5701,7 +5836,8 @@
+                         # the repeated network probes for delivered videos/GIFs.
+                         delivered_html, _rich_html, _link = format_message(
+                             username, t, ai, embed_video=False)
+-                        delivered_content = _html_to_plain(delivered_html)
++                        delivered_content = (t.get("_delivered_fold_text")
++                                             or _html_to_plain(delivered_html))
+                     except Exception:
+                         # Rendering already succeeded inside send_tweet; this
+                         # fallback keeps the sidecar best-effort without exposing
+@@ -5710,7 +5846,8 @@
+                     _record_confirmed_sent_content(
+                         r, chat_id=target_chat, thread_id=target_thread,
+                         source_kind="x_tweet", source_ref=source_url,
+-                        source_message_ids=[source_id], url=source_url,
++                        source_message_ids=([m["id"] for m in t.get("_official_thread_members") or []]
++                                            or [source_id]), url=source_url,
+                         content=delivered_content,
+                         content_id=f"x-tweet:{source_id}",
+                         links=_tweet_outbound_links(t))
+@@ -5731,6 +5868,8 @@
+                         print(f"    semantic ambiguous journal 失败（不盲重发）: {journal_error}")
+                 delivered_count += 1
+                 if not args.test:
++                    seen.update(str(member.get("id") or "")
++                                for member in t.get("_official_thread_members") or [])
+                     seen.add(tid)
+                     try:
+                         # The request already left the host, so checkpoint this
+@@ -5755,6 +5894,13 @@
+                 print(f"    推送异常: {e}")
+                 push_failed.add(tid)
+ 
++    for tweet, _ in to_push:
++        if str(tweet.get("id") or "") in push_failed:
++            for member in tweet.get("_official_thread_members") or []:
++                push_failed.add(str(member["id"]))
++                record = note_push_retry(username, member)
++                record["thread_tweet"] = {key: value for key, value in member.items()
++                                           if not key.startswith("_")}
+     if args.seed:
+         seen |= ({str(t.get("id")) for t in tweets if t.get("id")}
+                  - resolution_deferred)
+@@ -5764,7 +5910,8 @@
+         # silently dropped when they go stale.
+         seen |= (new_ids - push_failed)
+ 
+-    pushed_ok = {str(t.get("id") or "") for t, _ in to_push} - push_failed
++    pushed_ok = {str(member.get("id") or "") for tweet, _ in to_push
++                 for member in tweet.get("_official_thread_members") or [tweet]} - push_failed
+     push_retry = (push_retry | push_failed) - pushed_ok
+     if not args.dry_run:
+         try:
+@@ -6237,7 +6384,8 @@
+         run_started = time.monotonic()
+         global _ARTICLE_QUEUE_RUN_START, _THREAD_FALLBACK_ID, _CROSS_DEDUP_ENABLED
+         global _ACCOUNT_CONFIG_BY_USERNAME, _ARTICLE_SUPERSEDE_ENABLED
+-        global _ARTICLE_QUOTE_CARD_ENABLED
++        global _ARTICLE_QUOTE_CARD_ENABLED, _TRANSLATION_REPLY_ENABLED, _OFFICIAL_QUOTE_GROUPS
++        global _OFFICIAL_THREAD_MERGE_ENABLED
+         _ARTICLE_QUEUE_RUN_START = run_started
+         if HAS_GRAPHQL:
+             twitter_graphql.reset_semantic_resolver_run()
+@@ -6245,6 +6393,12 @@
+ 
+         with open(CONFIG_PATH) as f:
+             cfg = json.load(f)
++        _OFFICIAL_THREAD_MERGE_ENABLED = cfg.get("official_thread_merge_enabled") is True
++        _TRANSLATION_REPLY_ENABLED = cfg.get("translation_reply_enabled") is True
++        _OFFICIAL_QUOTE_GROUPS = quote_fold.normalize_groups(cfg.get("official_quote_groups"))
++        print(f"  quote-fold config: translation_reply_enabled={_TRANSLATION_REPLY_ENABLED} "
++              f"official_quote_groups={len(_OFFICIAL_QUOTE_GROUPS)} "
++              f"official_thread_merge_enabled={_OFFICIAL_THREAD_MERGE_ENABLED}")
+         apply_route_overlay(cfg)  # 路由表优先，config.json 作回落
+         bot_token = args.bot_token or cfg["telegram_bot_token"]
+         chat_id = args.chat_id or cfg["telegram_chat_id"]
+@@ -6281,10 +6435,11 @@
+             print(f"  semantic bundle 灰度已启用（curators={sorted(_SEMANTIC_CURATOR_ALLOWLIST)}）")
+         elif _SEMANTIC_BUNDLE_SHADOW:
+             print("  semantic bundle shadow 已启用（observe-only）")
+-        event_mode = _init_event_dedup_mode(str(cfg.get("event_dedup_mode") or "observe"))
++        event_mode = _init_event_dedup_mode(str(cfg.get("event_dedup_mode") or "observe"),
++                                            read_only=args.dry_run)
+         print(f"  event ledger 已启用（requested={_EVENT_DEDUP_MODE}, effective={event_mode}）")
+         if event_mode == "observe":
+-            print(f"  event dedup observe Go/No-Go: {event_dedup_gate_report()}")
++            print(f"  event dedup observe Go/No-Go: {event_dedup_gate_report(read_only=args.dry_run)}")
+         # rich 可播视频内嵌：config 键开关，默认关 = 封面缩略图行为
+         global _RICH_VIDEO_ENABLED
+         _RICH_VIDEO_ENABLED = bool(cfg.get("rich_video_embed"))
+--- /dev/null
++++ b/quote_fold.py
+@@ -0,0 +1,96 @@
++"""Target-scoped folding for confirmed source translations and official quotes."""
++import json
++import sqlite3
++from datetime import datetime, timedelta, timezone
++
++
++def normalize_groups(value):
++    if not isinstance(value, dict):
++        return []
++    return [frozenset(str(name).lstrip('@').casefold() for name in names)
++            for names in value.values() if isinstance(names, list) and len(names) > 1]
++
++
++def confirmed_source(path, tweet_id, chat_id, thread_id):
++    """Read only. Pending, ambiguous, other-target and expired rows never anchor."""
++    try:
++        db = sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)
++        db.row_factory = sqlite3.Row
++        try:
++            cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
++            row = db.execute('''SELECT d.message_id,d.facts_json,d.username,d.tweet_id
++                FROM deliveries d WHERE d.target_chat_id=? AND d.target_thread_id=?
++                AND d.state='confirmed' AND d.updated_at>=? AND d.message_id IS NOT NULL
++                AND (d.tweet_id=? OR d.message_id IN (
++                    SELECT a.message_id FROM tweet_anchors a WHERE a.target_chat_id=?
++                    AND a.target_thread_id=? AND a.tweet_id=? AND a.updated_at>=?))
++                ORDER BY d.updated_at ASC LIMIT 1''',
++                (str(chat_id), '' if thread_id is None else str(thread_id), cutoff,
++                 str(tweet_id), str(chat_id), '' if thread_id is None else str(thread_id),
++                 str(tweet_id), cutoff)).fetchone()
++            if row is None or int(row['message_id']) <= 0:
++                return None
++            facts = json.loads(row['facts_json'])
++            if not isinstance(facts, list):
++                return None
++            return dict(row, message_id=int(row['message_id']), facts=facts)
++        finally:
++            db.close()
++    except (OSError, sqlite3.Error, ValueError, TypeError):
++        return None
++
++
++def _plan(tweet, username, *, chat_id, thread_id, ledger_path,
++          translation_reply, groups, facts):
++    """Return deliver/reply/skip; source identity and bundle identity stay distinct."""
++    result = {'action': 'deliver', 'reason': 'no_confirmed_source'}
++    if not translation_reply and not groups:
++        return result
++    bundle = tweet.get('semantic_bundle') or {}
++    if not isinstance(bundle, dict):
++        return result
++    if bundle and (bundle.get('resolution') or {}).get('status') != 'complete':
++        return result
++    contexts = bundle.get('context_nodes') or []
++    source = contexts[0] if contexts and isinstance(contexts[0], dict) else tweet.get('quoted_status') or {}
++    if not isinstance(source, dict):
++        return result
++    source_id = str(source.get('tweet_id') or source.get('id') or '')
++    translation = tweet.get('_quote_translation') or {}
++    is_translation = translation_reply and translation.get('action') == 'source_only'
++    if is_translation:
++        source_id = str(translation.get('source_id') or '')
++    author = source.get('author') or source.get('screen_name') or ''
++    if isinstance(author, dict):
++        author = author.get('screen_name') or author.get('username') or ''
++    candidate_author = (bundle.get('anchor') or {}).get('author') or username
++    official = any(str(candidate_author).lstrip('@').casefold() in group
++                   and str(username).lstrip('@').casefold() in group
++                   and str(author).lstrip('@').casefold() in group for group in groups)
++    if not source_id or not (is_translation or official):
++        return result
++    prior = confirmed_source(ledger_path, source_id, chat_id, thread_id)
++    if prior is None:
++        return result
++    result.update(source_id=source_id, message_id=prior['message_id'], action='reply',
++                  target_chat_id=str(chat_id), target_thread_id=thread_id)
++    if is_translation:
++        result['reason'] = 'translation_source_delivered'
++        return result
++    # An image may carry facts absent from its caption. Preserve the whole card as reply.
++    anchor = bundle.get('anchor') or tweet
++    own_media = anchor.get('media') or (anchor.get('entities') or {}).get('media') or (anchor.get('extended_entities') or {}).get('media')
++    result['reason'] = 'official_quote_update'
++    if prior['facts'] and set(facts) <= set(prior['facts']) and not own_media:
++        result.update(action='skip', reason='official_quote_no_new_facts')
++    return result
++
++def plan(tweet, username, *, chat_id, thread_id, ledger_path,
++         translation_reply, groups, facts):
++    """Malformed optional metadata never blocks the normal delivery path."""
++    try:
++        return _plan(tweet, username, chat_id=chat_id, thread_id=thread_id,
++                     ledger_path=ledger_path, translation_reply=translation_reply,
++                     groups=groups, facts=facts)
++    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
++        return {'action': 'deliver', 'reason': 'invalid_fold_metadata'}
+--- /dev/null
++++ b/thread_merge.py
+@@ -0,0 +1,86 @@
++"""Coalesce selected official text threads without advancing seen."""
++from datetime import datetime, timezone
++from email.utils import parsedate_to_datetime
++
++# Only release/API announcement threads benefit from a short idle window.
++# Entitlement and quota notices must be delivered on their first observation.
++IDLE_WINDOW_EVENT_TYPES = frozenset({
++    "dev_release", "model_api", "model_launch", "major_product_launch",
++})
++
++
++def timestamp(tweet):
++    value = tweet.get('createdAt') or tweet.get('created_at') or ''
++    try:
++        stamp = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
++    except (ValueError, TypeError):
++        try:
++            stamp = parsedate_to_datetime(str(value))
++        except (ValueError, TypeError, OverflowError):
++            return None
++    return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
++
++
++def has_context_or_media(tweet):
++    bundle = tweet.get('semantic_bundle') or {}
++    return bool(tweet.get('media') or (tweet.get('entities') or {}).get('media')
++                or (tweet.get('extended_entities') or {}).get('media')
++                or tweet.get('quoted_status') or tweet.get('retweeted_status')
++                or tweet.get('article') or bundle.get('assets') or bundle.get('context_nodes'))
++
++
++def body(tweet):
++    return (tweet.get('note_tweet') or {}).get('text') or tweet.get('text') or ''
++
++
++def merge_ready(items, username, *, enabled, now=None, idle_seconds=90, deferred=None):
++    if not enabled:
++        return items
++    now = now or datetime.now(timezone.utc)
++    result = []
++    for tweet, reason in items:
++        parent = tweet.get('in_reply_to_status') or {}
++        author = str(parent.get('screen_name') or '').lstrip('@').casefold()
++        conversation = str(tweet.get('conversation_id_str') or '')
++        prior = result[-1][0] if result else {}
++        members = prior.get('_official_thread_members') or [prior]
++        ids = {str(t.get('id')) for t in members}
++        if (tweet.get("_push_event_type") in IDLE_WINDOW_EVENT_TYPES
++                and prior.get("_push_event_type") in IDLE_WINDOW_EVENT_TYPES
++                and conversation and conversation == str(prior.get('conversation_id_str') or prior.get('id') or '')
++                and str(parent.get('id') or '') in ids and author == username.lstrip('@').casefold()
++                and timestamp(tweet) is not None and all(timestamp(t) is not None for t in members)
++                and not has_context_or_media(tweet) and not has_context_or_media(prior)
++                and len(body(tweet)) + len(body(prior)) < 3000):
++            combined = dict(prior)
++            merged_body = body(prior) + '\n\n' + body(tweet)
++            entities = {}
++            for member in members + [tweet]:
++                for source in (member.get('entities') or {},
++                               (member.get('note_tweet') or {}).get('entities') or {}):
++                    for key, values in source.items():
++                        if isinstance(values, list):
++                            entities.setdefault(key, []).extend(values)
++            combined.pop('semantic_bundle', None)
++            combined.update(text=merged_body, entities=entities,
++                            note_tweet={'text': merged_body, 'entities': entities},
++                            _official_thread_members=members + [tweet], _semantic_active=False)
++            result[-1] = (combined, reason)
++        else:
++            result.append((tweet, reason))
++    ready = []
++    for tweet, reason in result:
++        members = tweet.get('_official_thread_members') or [tweet]
++        stamps = [timestamp(member) for member in members]
++        # Callers without a durable retry queue get immediate separate cards.
++        # A caller with deferred persists every original member before exiting.
++        active = (all(member.get("_push_event_type") in IDLE_WINDOW_EVENT_TYPES
++                      for member in members)
++                  and not has_context_or_media(tweet) and all(stamps)
++                  and 0 <= (now - max(stamps)).total_seconds() < idle_seconds)
++        if active:
++            target = deferred if deferred is not None else ready
++            target.extend((member, reason) for member in members)
++        else:
++            ready.append((tweet, reason))
++    return ready
+--- /dev/null
++++ b/test_quote_fold.py
+@@ -0,0 +1,344 @@
++import json
++import sqlite3
++import tempfile
++import unittest
++from pathlib import Path
++from datetime import datetime, timedelta, timezone
++import quote_fold
++import thread_merge
++
++class FoldTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name)/'ledger.db'
++        db=sqlite3.connect(self.path)
++        db.executescript('''CREATE TABLE deliveries (message_id TEXT,facts_json TEXT,username TEXT,tweet_id TEXT,target_chat_id TEXT,target_thread_id TEXT,state TEXT,updated_at TEXT);
++        CREATE TABLE tweet_anchors (message_id TEXT,target_chat_id TEXT,target_thread_id TEXT,tweet_id TEXT,updated_at TEXT);''')
++        db.execute('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?)',('50','["opus 5.5", "price"]','claudeai','100','-1001','19','confirmed',datetime.now(timezone.utc).isoformat()))
++        db.commit();db.close()
++    def tearDown(self):self.tmp.cleanup()
++    def plan(self,tweet,**kw):
++        args=dict(username='bcherny',chat_id='-1001',thread_id=19,ledger_path=self.path,
++                  translation_reply=True,groups=quote_fold.normalize_groups({'a':['claudeai','bcherny']}),facts=['opus 5.5'])
++        args.update(kw);return quote_fold.plan(tweet,**args)
++    def quote(self):return {'id':'200','quoted_status':{'id':'100','screen_name':'claudeai'}}
++    def test_official_no_facts_skips_only_same_confirmed_target(self):
++        self.assertEqual(self.plan(self.quote())['action'],'skip')
++        self.assertEqual(self.plan(self.quote(),thread_id=41)['action'],'deliver')
++        self.assertEqual(self.plan(self.quote(),username='dotey')['action'],'deliver')
++    def test_increment_and_image_remain_reply(self):
++        self.assertEqual(self.plan(self.quote(),facts=['new-fact'])['action'],'reply')
++        t=self.quote();t['media']=[{'url':'photo'}]
++        self.assertEqual(self.plan(t)['action'],'reply')
++    def test_translation_known_source_reply_unknown_source_delivers(self):
++        t={'_quote_translation':{'action':'source_only','source_id':'100'}}
++        self.assertEqual(self.plan(t,username='dotey')['action'],'reply')
++        t['_quote_translation']['source_id']='404'
++        self.assertEqual(self.plan(t)['action'],'deliver')
++    def test_ambiguous_never_anchors(self):
++        db=sqlite3.connect(self.path);db.execute("UPDATE deliveries SET state='ambiguous'");db.commit();db.close()
++        self.assertEqual(self.plan(self.quote())['action'],'deliver')
++    def test_off_disables_even_malformed_bundle(self):
++        self.assertEqual(self.plan({'semantic_bundle':'bad'},groups=[],translation_reply=False)['action'],'deliver')
++    def test_source_only_alias_resolves_confirmed_full_card(self):
++        db=sqlite3.connect(self.path);db.execute('INSERT INTO tweet_anchors VALUES (?,?,?,?,?)',('50','-1001','19','300',datetime.now(timezone.utc).isoformat()));db.commit();db.close()
++        t={'_quote_translation':{'action':'source_only','source_id':'300'}}
++        self.assertEqual(self.plan(t)['message_id'],50)
++
++    def test_same_round_source_later_becomes_foldable_after_confirmation(self):
++        # ClaudeDevs may be visited before claudeai. Before the source is confirmed,
++        # folding must fail open. A later call sees the confirmed source; account
++        # ordering makes that happen before the quote's single delivery pass.
++        db=sqlite3.connect(self.path)
++        db.execute("DELETE FROM deliveries")
++        db.commit();db.close()
++        quote = self.quote()
++        args = {'username': 'ClaudeDevs',
++                'groups': quote_fold.normalize_groups({'a': ['claudeai', 'ClaudeDevs']})}
++        self.assertEqual(self.plan(quote, **args)['action'], 'deliver')
++        db=sqlite3.connect(self.path)
++        db.execute('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?)',
++                   ('51','["opus 5.5", "price"]','claudeai','100','-1001','19',
++                    'confirmed',datetime.now(timezone.utc).isoformat()))
++        db.commit();db.close()
++        self.assertEqual(self.plan(quote, **args)['action'], 'skip')
++        self.assertEqual(self.plan(quote, facts=['new-api-fact'], **args)['action'], 'reply')
++
++    def test_malformed_metadata_fails_open(self):
++        for tweet in ({'semantic_bundle': {'context_nodes': 'bad'}},
++                      {'_quote_translation': ['bad']},
++                      {'quoted_status': 'bad'}):
++            self.assertEqual(self.plan(tweet)['action'], 'deliver')
++
++    def test_curator_anchor_in_official_repost_is_preserved(self):
++        tweet = {'semantic_bundle': {'anchor': {'author': 'curator'},
++                 'context_nodes': [{'tweet_id':'100','author':'claudeai'}],
++                 'resolution': {'status':'complete'}}}
++        self.assertEqual(self.plan(tweet)['action'],'deliver')
++
++    def test_idle_thread_merge_preserves_member_ids(self):
++        now=datetime.now(timezone.utc);stamp=(now-timedelta(minutes=3)).isoformat()
++        a={'id':'100','text':'release','conversation_id_str':'100','created_at':stamp,'_push_event_type':'model_launch'}
++        b={'id':'101','text':'price','conversation_id_str':'100','created_at':stamp,'in_reply_to_status':{'id':'100','screen_name':'claudeai'},'_push_event_type':'model_launch'}
++        result=thread_merge.merge_ready([(a,'a'),(b,'b')],'claudeai',enabled=True,now=now)
++        self.assertEqual(len(result),1)
++        self.assertEqual([t['id'] for t in result[0][0]['_official_thread_members']],['100','101'])
++        b['created_at']=now.isoformat()
++        self.assertEqual(len(thread_merge.merge_ready([(a,'a'),(b,'b')],'claudeai',enabled=True,now=now)),2)
++
++
++class IdleWindowTests(unittest.TestCase):
++    def test_only_release_event_types_enter_the_idle_window(self):
++        now = datetime.now(timezone.utc)
++        for event_type in thread_merge.IDLE_WINDOW_EVENT_TYPES:
++            with self.subTest(event_type=event_type):
++                tweet = {'id': '100', 'text': 'Announcement',
++                         'created_at': now.isoformat(), '_push_event_type': event_type}
++                deferred = []
++                ready = thread_merge.merge_ready([(tweet, 'test')], 'claudeai',
++                    enabled=True, now=now, deferred=deferred)
++                self.assertEqual(ready, [])
++                self.assertEqual(deferred, [(tweet, 'test')])
++
++    def test_quota_and_entitlement_first_posts_are_immediate(self):
++        now = datetime.now(timezone.utc)
++        for event_type in ('quota_reset', 'quota_compensation', 'credit_grant',
++                           'quota_policy', 'plan_entitlement', 'model_access', None, 'unknown'):
++            with self.subTest(event_type=event_type):
++                tweet = {'id': '100', 'text': 'Announcement',
++                         'created_at': now.isoformat(), '_push_event_type': event_type}
++                deferred = []
++                ready = thread_merge.merge_ready([(tweet, 'test')], 'claudeai',
++                    enabled=True, now=now, deferred=deferred)
++                self.assertEqual(ready, [(tweet, 'test')])
++                self.assertEqual(deferred, [])
++
++    def test_urgent_member_cannot_inherit_release_delay(self):
++        now = datetime.now(timezone.utc)
++        root = {'id': '100', 'text': 'Release', 'created_at': now.isoformat(),
++                'conversation_id_str': '100', '_push_event_type': 'model_launch'}
++        reply = {'id': '101', 'text': 'Quota compensation', 'created_at': now.isoformat(),
++                 'conversation_id_str': '100', '_push_event_type': 'quota_compensation',
++                 'in_reply_to_status': {'id': '100', 'screen_name': 'claudeai'}}
++        deferred = []
++        ready = thread_merge.merge_ready([(root, 'a'), (reply, 'b')], 'claudeai',
++            enabled=True, now=now, deferred=deferred)
++        self.assertEqual([item[0]['id'] for item in deferred], ['100'])
++        self.assertEqual([item[0]['id'] for item in ready], ['101'])
++
++    def test_media_first_post_never_enters_idle_window(self):
++        now = datetime.now(timezone.utc)
++        tweet = {'id': '100', 'text': 'Release', 'created_at': now.isoformat(),
++                 '_push_event_type': 'model_launch', 'media': [{'type': 'photo'}]}
++        deferred = []
++        ready = thread_merge.merge_ready([(tweet, 'test')], 'claudeai',
++            enabled=True, now=now, deferred=deferred)
++        self.assertEqual(ready, [(tweet, 'test')])
++        self.assertEqual(deferred, [])
++
++
++class ThreadDeliveryTest(unittest.TestCase):
++    def process(self, tweets, *, outcome=None, now=None, retry_records=None,
++                fold=None, journal_error=None):
++        from contextlib import ExitStack
++        from unittest.mock import patch, Mock
++        import argparse
++        import twitter_monitor as tm
++        from test_twitter_monitor import FakeAI
++        clock = now or datetime.now(timezone.utc)
++        class Clock(datetime):
++            @classmethod
++            def now(cls, tz=None):
++                return clock if tz is not None else clock.replace(tzinfo=None)
++        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
++            stack.enter_context(patch.object(tm, 'SEEN_DIR', directory))
++            stack.enter_context(patch.object(tm, 'EVENT_LEDGER_PATH', str(Path(directory)/'ledger.db')))
++            stack.enter_context(patch.object(tm, 'SEMANTIC_DECISION_JOURNAL', str(Path(directory)/'journal')))
++            stack.enter_context(patch.object(tm, '_ACCOUNT_CONFIG_BY_USERNAME',
++                                           {'claudeai': {'push_policy': 'test'}}))
++            stack.enter_context(patch.object(tm, '_OFFICIAL_THREAD_MERGE_ENABLED', True))
++            stack.enter_context(patch.object(tm, '_SENT_CONTENT_LEDGER_ENABLED', False))
++            stack.enter_context(patch.object(tm, '_SEMANTIC_BUNDLE_ENABLED', False))
++            stack.enter_context(patch.object(tm, '_SEMANTIC_BUNDLE_SHADOW', False))
++            stack.enter_context(patch.object(tm, '_EVENT_DEDUP_EFFECTIVE_MODE', 'off'))
++            stack.enter_context(patch.object(tm, '_CROSS_DEDUP_ENABLED', False))
++            stack.enter_context(patch.object(tm, 'datetime', Clock))
++            stack.enter_context(patch.object(tm, 'fetch_tweets', return_value=tweets))
++            stack.enter_context(patch.object(tm, 'classify_official_push',
++                                           side_effect=lambda _policy, tweet: ('pass', 'test', tweet.get('_push_event_type') or 'model_launch')))
++            stack.enter_context(patch.object(tm, '_verify_configured_account_identity'))
++            stack.enter_context(patch.object(tm.time, 'sleep'))
++            stack.enter_context(patch.object(tm, '_article_queue_time_remaining', return_value=10000))
++            if fold is not None:
++                stack.enter_context(patch.object(tm.quote_fold, 'plan', return_value=fold))
++                stack.enter_context(patch.object(tm, '_journal_quote_fold',
++                                               side_effect=journal_error))
++            tm.save_seen('claudeai', {'old'})
++            if retry_records:
++                tm._PUSH_RETRY_STATE_BY_USER['claudeai'] = retry_records
++                tm.save_push_retry('claudeai', set(retry_records))
++            send=stack.enter_context(patch.object(tm, 'send_tweet',
++                        return_value=outcome or {'ok':True,'result':{'message_id':50}}))
++            tm.process_user(None, FakeAI(False), 'claudeai', 'test', 'group',
++                            argparse.Namespace(test=False, seed=False, dry_run=False,
++                                               limit=20, max_push_age_minutes=0))
++            seen=tm.load_seen('claudeai')[0]
++            retry=tm.load_push_retry('claudeai')
++            records=dict(tm._PUSH_RETRY_STATE_BY_USER.get('claudeai') or {})
++            return send.call_args_list, seen, retry, records
++
++    def pair(self, seconds=180):
++        stamp=(datetime.now(timezone.utc)-timedelta(seconds=seconds)).isoformat()
++        return [{'id':'100','text':'A complete launch announcement with enough text.',
++                 'created_at':stamp,'conversation_id_str':'100','_push_event_type':'model_launch'},
++                {'id':'101','text':'Pricing and API availability details with enough text.',
++                 'created_at':stamp,'conversation_id_str':'100',
++                 'in_reply_to_status':{'id':'100','screen_name':'claudeai'},'_push_event_type':'model_launch'}]
++
++    def test_merged_success_checkpoints_all_members_and_clears_retry(self):
++        tweets=self.pair()
++        calls,seen,retry,_=self.process(tweets,retry_records={'100':{},'101':{}})
++        self.assertEqual(len(calls),1)
++        self.assertEqual({t['id'] for t in calls[0].args[3]['_official_thread_members']},{'100','101'})
++        self.assertTrue({'100','101'}<=seen)
++        self.assertEqual(retry,set())
++
++    def test_merged_send_failure_keeps_all_members_retryable(self):
++        calls,seen,retry,records=self.process(self.pair(),outcome={'ok':False})
++        self.assertEqual(len(calls),1)
++        self.assertFalse({'100','101'} & seen)
++        self.assertEqual(retry,{'100','101'})
++        self.assertEqual(records['101']['thread_tweet']['id'],'101')
++
++
++    def test_failed_terminal_journal_delivers_instead_of_skipping(self):
++        calls,seen,retry,_=self.process(self.pair()[:1],
++            fold={'action':'skip'},journal_error=OSError('full disk'))
++        self.assertEqual(len(calls),1)
++        self.assertIn('100',seen)
++        self.assertEqual(retry,set())
++
++    def test_active_thread_defers_every_member_without_seen(self):
++        calls,seen,retry,records=self.process(self.pair(seconds=10))
++        self.assertEqual(calls,[])
++        self.assertFalse({'100','101'} & seen)
++        self.assertEqual(retry,{'100','101'})
++        self.assertEqual(records['101']['thread_tweet']['id'],'101')
++
++    def test_idle_thread_recovered_from_retry_even_when_not_in_timeline(self):
++        tweets=self.pair()
++        records={t['id']:{'thread_tweet':t} for t in tweets}
++        calls,seen,retry,_=self.process([],retry_records=records)
++        self.assertEqual(len(calls),1)
++        self.assertTrue({'100','101'}<=seen)
++        self.assertEqual(retry,set())
++
++    def test_quota_event_is_immediate_even_inside_idle_window(self):
++        tweets=self.pair(seconds=10)
++        for tweet in tweets:
++            tweet['_push_event_type'] = 'quota_reset'
++        calls,seen,retry,_=self.process(tweets)
++        self.assertEqual(len(calls),2)
++        self.assertTrue({'100','101'} <= seen)
++        self.assertEqual(retry,set())
++
++
++class DryRunFoldTest(unittest.TestCase):
++    def test_preview_uses_same_fold_plan_without_writing_delivery_state(self):
++        import argparse
++        import io
++        from contextlib import ExitStack, redirect_stdout
++        from unittest.mock import patch
++        import twitter_monitor as tm
++        from test_twitter_monitor import FakeAI
++        tweet = {'id': '200', 'text': 'Opus 5.5 launch and API pricing details',
++                 'created_at': (datetime.now(timezone.utc)-timedelta(minutes=3)).isoformat(),
++                 'quoted_status': {'id': '100', 'screen_name': 'claudeai'}}
++        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
++            for name, value in {
++                'SEEN_DIR': directory, 'EVENT_LEDGER_PATH': str(Path(directory)/'ledger.db'),
++                '_ACCOUNT_CONFIG_BY_USERNAME': {'claudedevs': {'push_policy': 'test'}},
++                '_OFFICIAL_THREAD_MERGE_ENABLED': True, '_TRANSLATION_REPLY_ENABLED': False,
++                '_OFFICIAL_QUOTE_GROUPS': quote_fold.normalize_groups(
++                    {'a': ['claudeai', 'ClaudeDevs']}),
++                '_SEMANTIC_BUNDLE_ENABLED': False, '_SEMANTIC_BUNDLE_SHADOW': False,
++                '_EVENT_DEDUP_EFFECTIVE_MODE': 'off', '_CROSS_DEDUP_ENABLED': False,
++            }.items():
++                stack.enter_context(patch.object(tm, name, value))
++            stack.enter_context(patch.object(tm, 'fetch_tweets', return_value=[tweet]))
++            stack.enter_context(patch.object(tm, 'load_seen', return_value=({'old'}, None)))
++            stack.enter_context(patch.object(tm, 'load_push_retry', return_value=set()))
++            stack.enter_context(patch.object(tm, '_verify_configured_account_identity'))
++            stack.enter_context(patch.object(tm, 'classify_official_push',
++                                           return_value=('pass', 'launch', 'model_launch')))
++            stack.enter_context(patch.object(tm, 'format_message',
++                                           return_value=('text', 'rich', 'https://x.com/x/status/200')))
++            planned = stack.enter_context(patch.object(tm.quote_fold, 'plan',
++                              return_value={'action': 'skip', 'reason': 'official_quote_no_new_facts',
++                                            'source_id': '100', 'message_id': 50}))
++            writes = [stack.enter_context(patch.object(tm, name)) for name in
++                      ('send_tweet', 'save_seen', 'save_push_retry', '_journal_quote_fold',
++                       'claim_event_delivery')]
++            output = io.StringIO()
++            with redirect_stdout(output):
++                tm.process_user(None, FakeAI(False), 'ClaudeDevs', 'test', 'dm',
++                    argparse.Namespace(test=False, seed=False, dry_run=True, limit=20,
++                                       max_push_age_minutes=0),
++                    content_chat_id='group', content_thread_id=19)
++            self.assertIn('quote-fold dry-run: tweet=200 action=skip', output.getvalue())
++            self.assertEqual(planned.call_args.kwargs['chat_id'], 'group')
++            self.assertEqual(planned.call_args.kwargs['thread_id'], 19)
++            for write in writes:
++                write.assert_not_called()
++
++
++class DryRunStartupTest(unittest.TestCase):
++    def test_main_preview_does_not_recover_pending_or_create_missing_ledger(self):
++        import io
++        import sys
++        from contextlib import ExitStack, redirect_stdout
++        from unittest.mock import patch
++        import twitter_monitor as tm
++        from test_twitter_monitor import FakeAI
++        for existing in (False, True):
++            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
++                directory = Path(directory)
++                config = directory/'config.json'
++                config.write_text(json.dumps({'telegram_bot_token': 'bot', 'telegram_chat_id': 'chat',
++                    'event_dedup_mode': 'observe', 'translation_reply_enabled': True,
++                    'official_quote_groups': {}, 'official_thread_merge_enabled': False}))
++                ledger = directory/'event.sqlite3'
++                if existing:
++                    db = sqlite3.connect(ledger)
++                    db.executescript("CREATE TABLE deliveries (state TEXT, updated_at TEXT);"
++                        "INSERT INTO deliveries VALUES ('pending','2026-01-01T00:00:00+00:00');"
++                        "CREATE TABLE event_observations (decision TEXT,reviewed INTEGER,false_positive INTEGER);")
++                    db.commit(); db.close()
++                    before = ledger.read_bytes()
++                for name, value in {'CONFIG_PATH': str(config), 'SCRIPT_DIR': str(directory),
++                                    'EVENT_LEDGER_PATH': str(ledger), 'HAS_GRAPHQL': False}.items():
++                    stack.enter_context(patch.object(tm, name, value))
++                stack.enter_context(patch.object(tm, 'apply_route_overlay'))
++                stack.enter_context(patch.object(tm.TokenPool, 'load', return_value=None))
++                stack.enter_context(patch.object(tm.AIClassifier, 'load', return_value=FakeAI(False)))
++                stack.enter_context(patch.object(tm, 'load_accounts', return_value=[{'username': 'u'}]))
++                stack.enter_context(patch.object(tm, 'load_account_failures', return_value={}))
++                stack.enter_context(patch.object(tm, 'process_user', return_value=(0,0,0,0)))
++                stack.enter_context(patch.object(tm, 'process_article_queue', return_value=0))
++                stack.enter_context(patch.object(tm, 'note_account_success'))
++                recover = stack.enter_context(patch.object(tm, 'recover_stale_event_claims'))
++                stack.enter_context(patch.object(sys, 'argv', ['twitter_monitor.py', '--dry-run']))
++                output = io.StringIO()
++                with redirect_stdout(output):
++                    self.assertEqual(tm.main(), 0)
++                recover.assert_not_called()
++                self.assertIn('translation_reply_enabled=True official_quote_groups=0 official_thread_merge_enabled=False', output.getvalue())
++                if existing:
++                    self.assertEqual(ledger.read_bytes(), before)
++                    db=sqlite3.connect(ledger)
++                    self.assertEqual(db.execute('SELECT state FROM deliveries').fetchone()[0], 'pending')
++                    db.close()
++                else:
++                    self.assertFalse(ledger.exists())
++
++if __name__ == '__main__':
++    unittest.main()
+--- /dev/null
++++ b/reorder_twitter_accounts.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""Safely move product accounts before their developer accounts.
++
++The command preserves every account object and the relative order of all accounts
++outside the requested precedence groups. It prints a plan by default; --apply is
++required before changing a file.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import shutil
++import tempfile
++from pathlib import Path
++
++DEFAULT_GROUPS = (
++    ("claudeai", "ClaudeDevs"),
++    ("OpenAI", "OpenAIDevs", "thsottiaux"),
++)
++
++
++def canonical(value: object) -> str:
++    return str(value or "").strip().lstrip("@").casefold()
++
++
++def reorder(records: list[dict], groups=DEFAULT_GROUPS) -> tuple[list[dict], list[str]]:
++    seen: dict[str, int] = {}
++    for index, record in enumerate(records):
++        if not isinstance(record, dict):
++            raise ValueError(f"account at index {index} is not an object")
++        name = canonical(record.get("username"))
++        if not name:
++            raise ValueError(f"account at index {index} has no username")
++        if name in seen:
++            raise ValueError(f"duplicate account username: {record.get('username')}")
++        seen[name] = index
++
++    result = list(records)
++    changed: list[str] = []
++    for group in groups:
++        names = [canonical(name) for name in group]
++        positions = sorted(seen[name] for name in names if name in seen)
++        ordered = [records[seen[name]] for name in names if name in seen]
++        if len(positions) < 2:
++            continue
++        if [result[index] for index in positions] != ordered:
++            for index, record in zip(positions, ordered):
++                result[index] = record
++            changed.append(" -> ".join(record["username"] for record in ordered))
++    return result, changed
++
++
++def write_json(path: Path, records: list[dict]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    payload = json.dumps(records, ensure_ascii=False, indent=2) + "\n"
++    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
++                                    prefix=f".{path.name}.", delete=False) as stream:
++        stream.write(payload)
++        stream.flush()
++        os.fsync(stream.fileno())
++        temporary = Path(stream.name)
++    if path.exists():
++        os.chmod(temporary, path.stat().st_mode & 0o777)
++    temporary.replace(path)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("path", type=Path, help="twitter_accounts.json")
++    parser.add_argument("--output", type=Path, help="write to another path instead of path")
++    parser.add_argument("--apply", action="store_true", help="write the planned order")
++    parser.add_argument("--backup", action="store_true", help="with --apply, save path.bak first")
++    args = parser.parse_args()
++    source = args.path
++    target = args.output or source
++    records = json.loads(source.read_text(encoding="utf-8"))
++    if not isinstance(records, list):
++        raise SystemExit("twitter_accounts.json must contain a JSON array")
++    updated, changed = reorder(records)
++    before = [record.get("username") for record in records]
++    after = [record.get("username") for record in updated]
++    if not changed:
++        print("No configured precedence group needs reordering.")
++        return 0
++    print("Planned account order:")
++    print("  " + " -> ".join(map(str, before)))
++    print("  " + " -> ".join(map(str, after)))
++    print("Changed groups: " + ", ".join(changed))
++    if not args.apply:
++        print("Dry run only; pass --apply to write the file.")
++        return 0
++    if args.backup:
++        backup = source.with_name(source.name + ".bak")
++        if backup.exists():
++            raise SystemExit(f"Backup already exists; preserve it and choose a separate backup: {backup}")
++        shutil.copy2(source, backup)
++        print(f"Backup: {backup}")
++    write_json(target, updated)
++    print(f"Wrote: {target}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- /dev/null
++++ b/test_reorder_twitter_accounts.py
+@@ -0,0 +1,53 @@
++import json
++import tempfile
++import unittest
++from pathlib import Path
++
++import reorder_twitter_accounts as reorder
++
++
++class ReorderTests(unittest.TestCase):
++    def records(self):
++        return [
++            {"username": "vista8", "enabled": True, "topic": "ai_cn"},
++            {"username": "ClaudeDevs", "enabled": True, "token_ref": "keep"},
++            {"username": "other", "enabled": False, "extra": {"x": 1}},
++            {"username": "claudeai", "enabled": True, "topic": "official"},
++            {"username": "OpenAIDevs", "enabled": True},
++            {"username": "OpenAI", "enabled": True},
++            {"username": "tail", "enabled": True},
++        ]
++
++    def test_only_target_slots_are_reordered_and_objects_are_unchanged(self):
++        before = self.records()
++        after, changed = reorder.reorder(before)
++        self.assertEqual([x["username"] for x in after],
++                         ["vista8", "claudeai", "other", "ClaudeDevs",
++                          "OpenAI", "OpenAIDevs", "tail"])
++        self.assertEqual(after[2], before[2])
++        self.assertEqual(after[0], before[0])
++        self.assertEqual(changed, ["claudeai -> ClaudeDevs", "OpenAI -> OpenAIDevs"])
++
++    def test_disabled_accounts_and_all_fields_are_preserved(self):
++        before = self.records()
++        after, _ = reorder.reorder(before)
++        self.assertEqual(sorted(after, key=lambda x: x["username"]),
++                         sorted(before, key=lambda x: x["username"]))
++        by_name = {item["username"]: item for item in after}
++        self.assertEqual(by_name["claudeai"]["topic"], "official")
++        self.assertEqual(by_name["other"]["extra"], {"x": 1})
++
++    def test_write_can_preview_separate_output_without_replacing_source(self):
++        before = self.records()
++        with tempfile.TemporaryDirectory() as directory:
++            src = Path(directory) / "twitter_accounts.json"
++            out = Path(directory) / "preview.json"
++            src.write_text(json.dumps(before, ensure_ascii=False, indent=2) + "\n")
++            updated, _ = reorder.reorder(before)
++            reorder.write_json(out, updated)
++            self.assertEqual(json.loads(out.read_text())[1]["username"], "claudeai")
++            self.assertEqual(json.loads(src.read_text())[1]["username"], "ClaudeDevs")
++
++
++if __name__ == "__main__":
++    unittest.main()

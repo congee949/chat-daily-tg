@@ -1,0 +1,30 @@
+# 功能到当前源码的依据
+
+观察日期：2026-09-27。以下为工作树静态依据；符号存在性已校验，未据此宣称代码已在生产执行。新实现仅需独立规格，本文供审查者追溯。
+
+| 功能 | 文件与符号 | 地位说明 |
+|---|---|---|
+| [F01](../../rewrite/02-capabilities.md#f01) | [config.py](../../../src/chat_daily_tg/config.py#L461) `Config`；[cli.py](../../../src/chat_daily_tg/cli.py#L26) `build_parser` | 现有实现，运行情况按对应证据另判定 |
+| [F02](../../rewrite/02-capabilities.md#f02) | [wx_exporter.py](../../../src/chat_daily_tg/wx_exporter.py#L405) `export_group` | 现有实现，运行情况按对应证据另判定 |
+| [F03](../../rewrite/02-capabilities.md#f03) | [telegram_exporter.py](../../../src/chat_daily_tg/telegram_exporter.py#L257) `read_messages`；[telegram_exporter.py](../../../src/chat_daily_tg/telegram_exporter.py#L59) `export_chat` | 现有实现，运行情况按对应证据另判定 |
+| [F04](../../rewrite/02-capabilities.md#f04) | [application.py](../../../src/chat_daily_tg/application.py#L1410) `_run`；[summarizer.py](../../../src/chat_daily_tg/summarizer.py#L148) `run_summary` | 现有实现，运行情况按对应证据另判定 |
+| [F05](../../rewrite/02-capabilities.md#f05) | [vision.py](../../../src/chat_daily_tg/vision.py#L194) `analyze_media_candidates`；[vision.py](../../../src/chat_daily_tg/vision.py#L608) `resolve_citations` | 现有实现，运行情况按对应证据另判定 |
+| [F06](../../rewrite/02-capabilities.md#f06) | [raw_channels.py](../../../src/chat_daily_tg/raw_channels.py#L521) `push_raw_channel_cards`；[private_media.py](../../../src/chat_daily_tg/private_media.py#L301) `push_private_channel` | 现有实现，运行情况按对应证据另判定 |
+| [F07](../../rewrite/02-capabilities.md#f07) | [tg_sender.py](../../../src/chat_daily_tg/tg_sender.py#L347) `TelegramSender._send_resumable`；[tg_sender.py](../../../src/chat_daily_tg/tg_sender.py#L13) `AmbiguousDeliveryError` | 现有实现，运行情况按对应证据另判定 |
+| [F08](../../rewrite/02-capabilities.md#f08) | [content_seen.py](../../../src/chat_daily_tg/content_seen.py#L566) `check_duplicate`；[dedup_journal.py](../../../src/chat_daily_tg/dedup_journal.py#L24) `record` | 现有实现，运行情况按对应证据另判定 |
+| [F09](../../rewrite/02-capabilities.md#f09) | [topic_dedup.py](../../../src/chat_daily_tg/topic_dedup.py#L1003) `TopicDedupGate`；[application.py](../../../src/chat_daily_tg/application.py#L238) `_build_dedup_gates` | 现有实现，运行情况按对应证据另判定 |
+| [F10](../../rewrite/02-capabilities.md#f10) | [bilibili_fetcher.py](../../../src/chat_daily_tg/bilibili_fetcher.py#L502) `fetch_new_content`；[bilibili_digest.py](../../../src/chat_daily_tg/bilibili_digest.py#L178) `push_digest` | 现有实现，运行情况按对应证据另判定 |
+| [F11](../../rewrite/02-capabilities.md#f11) | [youtube_fetcher.py](../../../src/chat_daily_tg/youtube_fetcher.py#L509) `fetch_new_videos`；[youtube_digest.py](../../../src/chat_daily_tg/youtube_digest.py#L157) `push_digest` | 现有实现，运行情况按对应证据另判定 |
+| [F12](../../rewrite/02-capabilities.md#f12) | [application.py](../../../src/chat_daily_tg/application.py#L148) `_persist_opportunities`；[db.py](../../../src/chat_daily_tg/db.py#L135) `PermanentDB.upsert_many` | 现有实现，运行情况按对应证据另判定 |
+| [F13](../../rewrite/02-capabilities.md#f13) | [growth_miner.py](../../../src/chat_daily_tg/growth_miner.py#L327) `mine_day`；[growth_store.py](../../../src/chat_daily_tg/growth_store.py#L180) `claim_next` | 现有实现，运行情况按对应证据另判定 |
+| [F14](../../rewrite/02-capabilities.md#f14) | [application.py](../../../src/chat_daily_tg/application.py#L1014) `run_growth_weekly`；[growth_weekly.py](../../../src/chat_daily_tg/growth_weekly.py#L224) `consume_inbox` | 现有实现，运行情况按对应证据另判定 |
+| [F15](../../rewrite/02-capabilities.md#f15) | [config.py](../../../src/chat_daily_tg/config.py#L407) `HealthBriefing`；[health_briefing.py](../../../src/chat_daily_tg/health_briefing.py#L79) `HealthReport` | 现有实现，运行情况按对应证据另判定 |
+| [F16](../../rewrite/02-capabilities.md#f16) | [knowledge_sources.py](../../../src/chat_daily_tg/knowledge_sources.py#L1142) `collect_sources`；[knowledge_cli.py](../../../src/chat_daily_tg/knowledge_cli.py#L2722) `main`；[knowledge_index.py](../../../src/chat_daily_tg/knowledge_index.py#L2942) `GenerationReader` | 现有索引与发布工具；机会库直收及访问范围过滤为新目标 |
+| [F17](../../rewrite/02-capabilities.md#f17) | [intent_feedback.py](../../../src/chat_daily_tg/intent_feedback.py#L573) `FeedbackStore`；[intent_feedback.py](../../../src/chat_daily_tg/intent_feedback.py#L896) `record_feedback` | 事件库/API已实现；助手自动接入未列作已有能力 |
+| [F18](../../rewrite/02-capabilities.md#f18) | [schedule.py](../../../scripts/schedule.py#L68) `entries_for`；[schedule.py](../../../scripts/schedule.py#L204) `cmd_apply`；[guard_common.sh](../../../scripts/guard_common.sh#L1)；[due_gate.sh](../../../scripts/due_gate.sh#L1) | 现有实现，运行情况按对应证据另判定 |
+| [F19](../../rewrite/02-capabilities.md#f19) | [notifier.py](../../../src/chat_daily_tg/notifier.py#L16) `notify_failure`；[logging_setup.py](../../../src/chat_daily_tg/logging_setup.py#L1) | 现有实现，运行情况按对应证据另判定 |
+| [F20](../../rewrite/02-capabilities.md#f20) | [sent_ledger.py](../../../src/chat_daily_tg/sent_ledger.py#L47) `append_sent`；[sent_content_ledger.py](../../../src/chat_daily_tg/sent_content_ledger.py#L38) `append_message_ids`；[sent_content_mirror.py](../../../src/chat_daily_tg/sent_content_mirror.py#L89) `read_snapshot` | 现有实现，运行情况按对应证据另判定 |
+| [F21](../../rewrite/02-capabilities.md#f21) | [cli.py](../../../src/chat_daily_tg/cli.py#L26) `build_parser`；[schedule-designer.html](../../../docs/schedule-designer.html#L1) | 已有 CLI 与静态定时设计器；完整网页为新目标 |
+| [F22](../../rewrite/02-capabilities.md#f22) | [sqlite_util.py](../../../src/chat_daily_tg/sqlite_util.py#L154) `Database.initialize`；[migrate_jsonl_to_sqlite.py](../../../scripts/migrate_jsonl_to_sqlite.py#L1)；[paths.py](../../../src/chat_daily_tg/paths.py#L1) | 现有实现，运行情况按对应证据另判定 |
+| [F23](../../rewrite/02-capabilities.md#f23) | [ai91shop_codex_monitor.py](../../../scripts/ai91shop_codex_monitor.py#L124) `classify_codex_stock`；[ai91shop_codex_monitor.py](../../../scripts/ai91shop_codex_monitor.py#L250) `StockMonitor` | 现有实现，运行情况按对应证据另判定 |
+| [F24](../../rewrite/02-capabilities.md#f24) | [research_loop.py](../../../scripts/research_loop.py#L1)；[research_loop.py](../../../src/chat_daily_tg/research_loop.py#L1)；[img_relay.py](../../../src/chat_daily_tg/img_relay.py#L1) | 实验或兼容遗留，逐项决定是否替代 |

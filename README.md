@@ -8,13 +8,23 @@
 
 <sub>从本地已有内容到 Telegram 的四步流程：整理与筛选、本地归档、安全投递。图中不包含真实聊天、密钥或账号信息。</sub>
 
+## 独立重写规格
+
+[重写规格包](docs/rewrite/README.md) 定义新实现的功能、状态、外部接口、界面、迁移和验收，可整体复制到新目录使用。它描述目标行为；当前实现与差异依据见 [2026-09-27 审查记录](docs/process/rewrite-2026-09-27/README.md)。
+
+## 增量迭代设计
+
+[内容迭代操作指南](docs/content-iteration-guide.md) 说明回放、反馈、候选偏好与检索任务的本地入口。
+[迭代设计](docs/design/2026-09-29-content-iteration.md) 保留阶段要求，
+[实施记录](docs/process/content-iteration-2026-09-29.md) 列出验证结果和未完成验收。
+
 ## 30 秒理解
 
 | 问题 | 回答 |
 |---|---|
 | 它做什么？ | 读取你已有的消息或订阅，整理后发到 Telegram，同时保留本地归档。 |
-| 什么在 Mac 上跑？ | `daily` 日报、`channels` 频道转发、`growth` 成长内容挖掘。 |
-| 什么在 r4s 上跑？ | Bilibili 和 YouTube digest；仓库中的 wrapper 是现有环境脚本，不是通用安装器。 |
+| 什么在 Mac 上跑？ | `daily` 日报、`channels` 频道转发、`growth` / `growth-weekly` 成长挖掘、以及 `ledger-sync`（拉取 r4s media、推送 Mac sent-content；见 [同步说明](docs/runbook.md#ledger-sync)）。 |
+| 什么在 r4s 上跑？ | **仅** Bilibili / YouTube digest（`due_gate` 随机间隔，非固定每小时 :30）；wrapper 是现有环境脚本，不是通用安装器。**不要**在 Mac 恢复这两个 launchd。 |
 | 会把数据上传到哪里？ | 只有你启用的 LLM、Telegram 和内容平台接口。原始归档和状态默认留在 `~/chat-daily/`。 |
 | 增强功能失败会怎样？ | 设计目标是“正文优先”：图片、富消息、持久化等失败时应降级，不能阻塞正文。 |
 | 测试会真的发 Telegram 吗？ | `tests/e2e` 不会。它用临时 SQLite、临时目录和 HTTP mock，是 hermetic E2E，不是真实生产 E2E。 |
@@ -126,6 +136,7 @@ YAML
 - `endpoint`、`model` 和 `api_key_env` 必须与实际模型服务匹配。
 - `db_path` 是输入消息数据库，不是本项目自己的状态库。
 - `sync_before_export: false` 表示只读取现有 SQLite；改成 `true` 前先单独确认 `tg-cli` 可用。
+- `include_patterns`（可选）用于日报 Telegram 源的关键词白名单；配置后只有匹配至少一个正则的消息才进入日报。`exclude_patterns` 仍可用于排除整条消息；两者都只作用于日报，不影响 `raw_channels` 原文转发。
 - 至少配置一个实际数据源。只有 `raw_channels` 时可以跑 `channels`，但不能生成 `daily` 日报。
 - 图片理解、embedding、growth、Bilibili 和 YouTube 都是可选项；首次安装不要同时开启。
 
@@ -216,12 +227,15 @@ find ~/chat-daily/archive -name .run-complete -print
 ```bash
 uv run chat-daily daily run
 uv run chat-daily channels run
-uv run chat-daily channels resend -- "-1001234567890:42"
+uv run chat-daily channels resend -- "-1001234567890:42"   # 公开文本卡；私有媒体见 runbook SOP
 uv run chat-daily growth run
 uv run chat-daily growth weekly
 uv run chat-daily bilibili run
 uv run chat-daily youtube run
 ```
+
+OpenAI、Claude 等官方 AI 频道的精选订阅、筛选规则和 X 链接去重见
+[YouTube 官方频道指南](docs/youtube-selection.md)。
 
 查看完整参数：
 
@@ -249,7 +263,7 @@ bash scripts/install-launchd.sh
 launchctl list | grep chat-daily-tg
 ```
 
-当前 installer 加载 5 个 label：daily agent、channels、growth、growth-weekly 和 ledger-sync。`scripts/schedule.py` 只管理前 4 个日历型 label；ledger-sync 使用固定间隔。Bilibili 和 YouTube 不应再添加到 Mac launchd，以免与 r4s 双跑。
+当前 installer 加载 5 个 label：daily agent、channels、growth、growth-weekly 和 ledger-sync。`scripts/schedule.py` 只管理前 4 个日历型 label（channels 含 **00:00、02:00、09:00**；growth 为 09:30/15:30/21:30）；ledger-sync 使用固定间隔。growth / growth-weekly 的模型选择以 [运行 wrapper](scripts/run_growth_guarded.sh) 和 [周报 wrapper](scripts/run_growth_weekly_guarded.sh) 传入的别名为准，具体模型 ID 在目标机器配置中查询。Bilibili 和 YouTube 不应再添加到 Mac launchd，以免与 r4s 双跑。
 
 修改时间前先 dry-run：
 
@@ -263,6 +277,12 @@ uv run python scripts/schedule.py apply -n
 
 仓库中的 `scripts/run_bilibili_r4s.sh`、`scripts/run_youtube_r4s.sh` 和 `scripts/due_gate.sh` 是现有 FriendlyWrt/OpenWrt 拓扑的参考实现，包含固定路径、代理地址、锁和 cron 假设。公开复用时必须逐项审查后复制，不能承诺一键部署。
 
+调度语义（生产）：
+
+- cron 用 `*/5` 探测；`due_gate` 在成功后随机安排下次：B站 **20–30min**，YouTube **10–15min**。
+- 这不是“每小时 :30”的固定表；失败不推进 due，保持可重试。
+- Mac installer **不**装 bilibili/youtube label；恢复它们会导致与 r4s 双跑。
+
 必须保持的网络边界：
 
 - Bilibili API 与封面 CDN 使用 `httpx` 的 `trust_env=False`，直接连接，不继承代理。
@@ -271,7 +291,7 @@ uv run python scripts/schedule.py apply -n
 - OpenWrt/musl 上若没有 IANA 时区数据库，现有 wrapper 使用 POSIX `TZ=CST-8`。
 - cron 必须有非重叠锁；成功后再推进 due gate，失败时保持可重试。
 
-r4s 的配置和 `.env` 应留在机器的数据目录，不随代码归档发布。Mac 上同步回来的 media ledger 是只读派生副本；不要让公开复用改动把它变成第二写入源。
+r4s 的配置和 `.env` 应留在机器的数据目录，不随代码归档发布。Mac 的 media ledger 保留为历史索引副本，按需同步，见 [账本同步](docs/runbook.md#ledger-sync)；**r4s 上的 `media_sent_ledger.jsonl` 才是权威写源**。digest 侧的 `AmbiguousDelivery`（超时不盲重 POST）需与 Mac channels 语义对齐后才算部署完成，见 [docs/runbook.md](docs/runbook.md) 待部署清单。
 
 ## 常见错误
 
@@ -287,7 +307,9 @@ r4s 的配置和 `.env` 应留在机器的数据目录，不随代码归档发�
 | `--no-push` 后没有 `.run-complete` | 这是正确行为；dry run 不算真实交付。 |
 | mock E2E 通过但真实发送失败 | E2E 不覆盖真实 token、Bot 权限、代理、平台限流和生产数据。按“首次真实投递”分层排查。 |
 
-更详细的运行故障见 [docs/runbook.md](docs/runbook.md)，测试边界见 [docs/testing.md](docs/testing.md)，架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+更详细的运行故障见 [docs/runbook.md](docs/runbook.md)，测试边界见 [docs/testing.md](docs/testing.md)，架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Jev 主裁判接入与验证见 [docs/jev-dedup.md](docs/jev-dedup.md)。
+
+通过 TypeSafe System One API 调用 Jev 的服务端布尔判断示例、运行命令和密钥配置见 [examples/jev-sdk](examples/jev-sdk/README.md)。
 
 ## 交付与数据不变量
 
@@ -327,3 +349,6 @@ microbenchmark 同时报告墙钟时间和操作次数。性能结论应基于�
 开始修改前阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。PR 应说明改动属于 unit、hermetic E2E 还是真实人工验证，并列出未验证项。不要提交真实消息、数据库、归档、Bot token、模型 key、路由表或机器专用配置。
 
 本项目以 [MIT License](LICENSE) 发布。提交前仍须确认你拥有新增内容的版权，并且不要把真实消息、密钥、数据库或机器专用配置加入仓库。
+
+
+跨来源去重、caption 镜像及人工复核见 [去重运行指南](docs/dedup-policy.md)。

@@ -1,0 +1,58 @@
+{
+  "observed_on": "2026-09-27",
+  "host": "MateBook-Fold.local",
+  "user": "Apple",
+  "execution": "local macOS; no SSH inspections",
+  "code_repository": "/Users/Apple/Projects/chat-daily-tg",
+  "runtime_root": "~/chat-daily",
+  "runtime_access": "read-only config allowlist and file metadata; no Telegram readback",
+  "config_observations": {
+    "telegram_enabled": true,
+    "growth_enabled": true,
+    "health_briefing_enabled": true,
+    "vision_enabled": true,
+    "topic_enabled": true,
+    "topic_requested_mode": "report",
+    "topic_enforce_enabled": false,
+    "topic_judge_provider": "jev",
+    "xmonitor_caption_import_enabled": true
+  },
+  "artifact_observations": {
+    "2026-09-26": [
+      "summary.md",
+      "concise.md",
+      "verification.json",
+      "fact-risk-report.md",
+      "health-briefing.md",
+      "health-data-gaps.json",
+      "vision.jsonl",
+      "vision-audit.jsonl",
+      ".digest-sent",
+      ".run-complete"
+    ],
+    "state_artifact_types": [
+      "chat-daily.db",
+      "content_seen.db",
+      "delivered_index.db",
+      "dedup_journal.jsonl",
+      "media_sent_ledger.jsonl",
+      "sent_content_ledger.jsonl",
+      "xmonitor_sent_snapshot.json"
+    ]
+  },
+  "interpretation": "File presence and requested config establish local artifacts/settings, not independent delivery or deployment verification. Bilibili/YouTube enabled in Mac config does not imply scheduled Mac execution.",
+  "historical_evidence": [
+    {
+      "path": "acceptance-report-refactor-20260908/report.md",
+      "kind": "historical controlled local performance and regression report; includes retracted SQL experiment"
+    },
+    {
+      "path": "acceptance-report-source-performance-final/report.md",
+      "kind": "historical synthetic/local performance; no production deployment"
+    },
+    {
+      "path": "acceptance-report-wx-production-yesterday/report.md",
+      "kind": "historical real-source run with existing delivery markers; not a new Telegram send"
+    }
+  ]
+}

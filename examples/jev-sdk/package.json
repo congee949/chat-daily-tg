@@ -1,0 +1,13 @@
+{
+  "name": "chat-daily-jev-sdk-example",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node evaluate.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {}
+}

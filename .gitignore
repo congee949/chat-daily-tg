@@ -16,11 +16,16 @@ venv/
 
 # Local secrets / runtime
 .env
+.env.*
+!.env.example
+node_modules/
 *.log
 
 # Never commit real data
 /data/
 /output/
+/outputs/
+/work/
 
 # Project-private bash copy (adhoc-signed launcher; rebuilt by scripts/install-launchd.sh)
 /bin/

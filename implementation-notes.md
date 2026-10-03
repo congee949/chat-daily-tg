@@ -90,6 +90,12 @@
 
 ### Open Questions
 
+## 2026-08-01 Channel Card Rich Text
+
+### Design Decisions
+
+- Render the source channel's common inline Markdown (`**bold**`, `_italic_`, `~~strike~~`, inline code, and Markdown links) into Telegram HTML in the raw-channel boundary; all unsupported or malformed syntax remains escaped text so a bad post cannot invalidate the whole card.
+
 
 ## 2026-07-23 Bilibili Article Subscription
 
@@ -118,3 +124,61 @@
 - Missing optional health media is omitted from the rich message instead of forcing the entire digest onto the text-plus-trailing-photo fallback.
 
 ### Open Questions
+
+## 2026-08-01 Growth QwenProxy Completion Repair
+
+### Design Decisions
+
+- The `qwenproxy` alias now uses `qwen3.7-plus-no-thinking`: a live OpenAI-compatible completion returned content, whereas the configured `Qwen3.8-Max-Preview (Thinking)` path exhausted the proxy's browser-stream retries and returned HTTP 500.
+
+### Tradeoffs
+
+- This keeps the user-selected local QwenProxy provider and avoids reverting to the invalid DeepSeek credential. The growth miner loses Qwen3.8 thinking mode until its upstream browser-stream path produces a completed response reliably.
+
+## 2026-08-02 Channel Duplicate Delivery Repair
+
+### Design Decisions
+
+- Telegram read/write timeouts after a send request are classified as an ambiguous remote outcome, not a retryable failure. Raw-channel source IDs are terminally journaled and marked seen on that outcome, preventing both same-process retries and the next incremental cycle from multiplying a message that Telegram likely accepted.
+- The guarded channel forwarder holds one process-wide lock across jitter, fetch, send, and seen commit so a manual catch-up cannot race launchd from the same SeenStore snapshot.
+
+### Tradeoffs
+
+- Telegram Bot API exposes no idempotency key. Suppressing automatic replay on an ambiguous timeout favors avoiding repeated notifications; the journal and explicit alert retain the evidence needed to inspect and manually recover the rarer true non-delivery.
+
+## 2026-08-07 Documentation Drift Repair
+
+### Design Decisions
+
+- Local docs were realigned to the live Mac/r4s topology without touching pipeline code: Mac launchd remains the five labels `agent` / `channels` / `growth` / `growth-weekly` / `ledger-sync`; `schedule.yaml` is the calendar source (channels include **09:00**; growth stays 09:30/15:30/21:30).
+- Bilibili and YouTube are documented as **r4s-only** with `*/5` probes and `due_gate` random intervals (Bilibili 20–30min, YouTube 10–15min). The obsolete "hourly :30" and Mac bilibili launchd stories are demoted to historical spark text with an explicit do-not-restore warning.
+- Ambiguous Telegram write timeouts are documented as non-retryable POSTs: channels terminalize via seen + `dedup_journal`; `channels resend` is public-text only; private media needs a manual verify-then-targeted-resend SOP in the runbook.
+- Growth weekly idempotency is described as the target `weekly-*.sent` marker (write-after-successful-push only; `--no-push` does not suppress). Guard wrappers stay on `--model qwenproxy` as the dirty/target state.
+- A pending R4S checklist records that digest Ambiguous semantics and due_gate schedule must be verified on the router copy after code deploy; Mac media ledger remains a read-only overlay of the r4s authority file.
+
+### Tradeoffs
+
+- Documenting target-state Ambiguous handling for digests/growth before every remote process is upgraded makes the runbook slightly ahead of some r4s binaries; the checklist makes that gap explicit instead of implying Mac docs alone prove production delivery.
+
+## 2026-08-07 Ambiguous Delivery + Ops Guardrails Repair
+
+### Design Decisions
+
+- Ambiguous Telegram write timeouts remain terminal at every producer boundary (daily rich, growth card/weekly, bilibili/youtube photo, channels, private): no second POST, no `release_claim`, digest/card markers written to block catch-up doubles.
+- Seen HWM uses a sibling `*.holes` file so soft-failed ids below a later success are re-fetched; successful add clears the hole.
+- `send_media_group` shards albums >10; caption rides the first shard only; mid-shard Ambiguous does not invent a second album.
+- Growth weekly push is gated by `growth/weekly-%G-W%V.sent` (ok or ambiguous marker); `--no-push` does not write the marker.
+- Channels process lock is mkdir + stale reclaim via atomic `mv` (not pid-file TOCTOU); concurrent manual vs launchd soft-skips with heartbeat 0.
+- Ledger sync: scp-first → JSONL required keys → shrink guard (new < 80% of local when local > 10) → `${LOCAL}.bak` then atomic replace; no live remote exercise in this task.
+- Alert paths load `TG_BOT_TOKEN` inside Python so tokens never appear on curl argv (Mac `guard_common`, r4s bilibili/youtube wrappers).
+- deploy/install-launchd abort on in-flight `com.chat-daily-tg.*` unless `CHAT_DAILY_FORCE_RELOAD=1`.
+
+### Tradeoffs
+
+- Prefer missing a true non-delivery over duplicate spam; recovery is journal + alert + manual SOP (public resend / private targeted).
+- Local docs and worktree code are ahead of R4S runtime until an explicit r4s deploy; Mac launchd still points at whatever worktree is installed today and was not reloaded here.
+
+### Open Questions
+
+- Whether to add a hermetic concurrent shell test for the channels lock under CI.
+- Whether weekly ambiguous marker should be a separate filename so operators can force a single safe resend without deleting the whole week key.

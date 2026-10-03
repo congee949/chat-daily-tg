@@ -1,0 +1,734 @@
+{
+  "schema": "chatdaily.rewrite.coverage.v1",
+  "scope_note": "IDs and links only; authoritative requirements live in the linked documents.",
+  "features": [
+    {
+      "id": "F01",
+      "spec": "02-capabilities.md#f01",
+      "acceptance": [
+        "AT01",
+        "AT02",
+        "AT43",
+        "AT51"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F02",
+      "spec": "02-capabilities.md#f02",
+      "acceptance": [
+        "AT03",
+        "AT05"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F03",
+      "spec": "02-capabilities.md#f03",
+      "acceptance": [
+        "AT04",
+        "AT05"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F04",
+      "spec": "02-capabilities.md#f04",
+      "acceptance": [
+        "AT06",
+        "AT07",
+        "AT08",
+        "AT26",
+        "AT49",
+        "AT52"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F05",
+      "spec": "02-capabilities.md#f05",
+      "acceptance": [
+        "AT05",
+        "AT07",
+        "AT50"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F06",
+      "spec": "02-capabilities.md#f06",
+      "acceptance": [
+        "AT09",
+        "AT10",
+        "AT11",
+        "AT15",
+        "AT49",
+        "AT52"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F07",
+      "spec": "02-capabilities.md#f07",
+      "acceptance": [
+        "AT02",
+        "AT10",
+        "AT11",
+        "AT12",
+        "AT13",
+        "AT14",
+        "AT46"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F08",
+      "spec": "02-capabilities.md#f08",
+      "acceptance": [
+        "AT16",
+        "AT17"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F09",
+      "spec": "02-capabilities.md#f09",
+      "acceptance": [
+        "AT17",
+        "AT18",
+        "AT19",
+        "AT20",
+        "AT50"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F10",
+      "spec": "02-capabilities.md#f10",
+      "acceptance": [
+        "AT21",
+        "AT22",
+        "AT23",
+        "AT49"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F11",
+      "spec": "02-capabilities.md#f11",
+      "acceptance": [
+        "AT23",
+        "AT24",
+        "AT49"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F12",
+      "spec": "02-capabilities.md#f12",
+      "acceptance": [
+        "AT25",
+        "AT26"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F13",
+      "spec": "02-capabilities.md#f13",
+      "acceptance": [
+        "AT27",
+        "AT28",
+        "AT29",
+        "AT50"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F14",
+      "spec": "02-capabilities.md#f14",
+      "acceptance": [
+        "AT30",
+        "AT31",
+        "AT46"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F15",
+      "spec": "02-capabilities.md#f15",
+      "acceptance": [
+        "AT32"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F16",
+      "spec": "02-capabilities.md#f16",
+      "acceptance": [
+        "AT20",
+        "AT33",
+        "AT34",
+        "AT35",
+        "AT50"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F17",
+      "spec": "02-capabilities.md#f17",
+      "acceptance": [
+        "AT36"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F18",
+      "spec": "02-capabilities.md#f18",
+      "acceptance": [
+        "AT08",
+        "AT15",
+        "AT22",
+        "AT28",
+        "AT37",
+        "AT38",
+        "AT51"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F19",
+      "spec": "02-capabilities.md#f19",
+      "acceptance": [
+        "AT14",
+        "AT39",
+        "AT49"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F20",
+      "spec": "02-capabilities.md#f20",
+      "acceptance": [
+        "AT33",
+        "AT38",
+        "AT40",
+        "AT45"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F21",
+      "spec": "02-capabilities.md#f21",
+      "acceptance": [
+        "AT35",
+        "AT41",
+        "AT42",
+        "AT43"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F22",
+      "spec": "02-capabilities.md#f22",
+      "acceptance": [
+        "AT44",
+        "AT45",
+        "AT46",
+        "AT51",
+        "AT52"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F23",
+      "spec": "02-capabilities.md#f23",
+      "acceptance": [
+        "AT47"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    },
+    {
+      "id": "F24",
+      "spec": "02-capabilities.md#f24",
+      "acceptance": [
+        "AT48"
+      ],
+      "implementation_status": "not_implemented",
+      "verification_status": "not_run"
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "AT01",
+      "spec": "09-acceptance.md#at01",
+      "features": [
+        "F01"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT02",
+      "spec": "09-acceptance.md#at02",
+      "features": [
+        "F01",
+        "F07"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT03",
+      "spec": "09-acceptance.md#at03",
+      "features": [
+        "F02"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT04",
+      "spec": "09-acceptance.md#at04",
+      "features": [
+        "F03"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT05",
+      "spec": "09-acceptance.md#at05",
+      "features": [
+        "F02",
+        "F03",
+        "F05"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT06",
+      "spec": "09-acceptance.md#at06",
+      "features": [
+        "F04"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT07",
+      "spec": "09-acceptance.md#at07",
+      "features": [
+        "F04",
+        "F05"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT08",
+      "spec": "09-acceptance.md#at08",
+      "features": [
+        "F04",
+        "F18"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT09",
+      "spec": "09-acceptance.md#at09",
+      "features": [
+        "F06"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT10",
+      "spec": "09-acceptance.md#at10",
+      "features": [
+        "F06",
+        "F07"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT11",
+      "spec": "09-acceptance.md#at11",
+      "features": [
+        "F06",
+        "F07"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT12",
+      "spec": "09-acceptance.md#at12",
+      "features": [
+        "F07"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT13",
+      "spec": "09-acceptance.md#at13",
+      "features": [
+        "F07"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT14",
+      "spec": "09-acceptance.md#at14",
+      "features": [
+        "F07",
+        "F19"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT15",
+      "spec": "09-acceptance.md#at15",
+      "features": [
+        "F06",
+        "F18"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT16",
+      "spec": "09-acceptance.md#at16",
+      "features": [
+        "F08"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT17",
+      "spec": "09-acceptance.md#at17",
+      "features": [
+        "F08",
+        "F09"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT18",
+      "spec": "09-acceptance.md#at18",
+      "features": [
+        "F09"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT19",
+      "spec": "09-acceptance.md#at19",
+      "features": [
+        "F09"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT20",
+      "spec": "09-acceptance.md#at20",
+      "features": [
+        "F09",
+        "F16"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT21",
+      "spec": "09-acceptance.md#at21",
+      "features": [
+        "F10"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT22",
+      "spec": "09-acceptance.md#at22",
+      "features": [
+        "F10",
+        "F18"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT23",
+      "spec": "09-acceptance.md#at23",
+      "features": [
+        "F10",
+        "F11"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT24",
+      "spec": "09-acceptance.md#at24",
+      "features": [
+        "F11"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT25",
+      "spec": "09-acceptance.md#at25",
+      "features": [
+        "F12"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT26",
+      "spec": "09-acceptance.md#at26",
+      "features": [
+        "F12",
+        "F04"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT27",
+      "spec": "09-acceptance.md#at27",
+      "features": [
+        "F13"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT28",
+      "spec": "09-acceptance.md#at28",
+      "features": [
+        "F13",
+        "F18"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT29",
+      "spec": "09-acceptance.md#at29",
+      "features": [
+        "F13"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT30",
+      "spec": "09-acceptance.md#at30",
+      "features": [
+        "F14"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT31",
+      "spec": "09-acceptance.md#at31",
+      "features": [
+        "F14"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT32",
+      "spec": "09-acceptance.md#at32",
+      "features": [
+        "F15"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT33",
+      "spec": "09-acceptance.md#at33",
+      "features": [
+        "F16",
+        "F20"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT34",
+      "spec": "09-acceptance.md#at34",
+      "features": [
+        "F16"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT35",
+      "spec": "09-acceptance.md#at35",
+      "features": [
+        "F16",
+        "F21"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT36",
+      "spec": "09-acceptance.md#at36",
+      "features": [
+        "F17"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT37",
+      "spec": "09-acceptance.md#at37",
+      "features": [
+        "F18"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT38",
+      "spec": "09-acceptance.md#at38",
+      "features": [
+        "F18",
+        "F20"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT39",
+      "spec": "09-acceptance.md#at39",
+      "features": [
+        "F19"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT40",
+      "spec": "09-acceptance.md#at40",
+      "features": [
+        "F20"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT41",
+      "spec": "09-acceptance.md#at41",
+      "features": [
+        "F21"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT42",
+      "spec": "09-acceptance.md#at42",
+      "features": [
+        "F21"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT43",
+      "spec": "09-acceptance.md#at43",
+      "features": [
+        "F01",
+        "F21"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT44",
+      "spec": "09-acceptance.md#at44",
+      "features": [
+        "F22"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT45",
+      "spec": "09-acceptance.md#at45",
+      "features": [
+        "F22",
+        "F20"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT46",
+      "spec": "09-acceptance.md#at46",
+      "features": [
+        "F22",
+        "F07",
+        "F14"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT47",
+      "spec": "09-acceptance.md#at47",
+      "features": [
+        "F23"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT48",
+      "spec": "09-acceptance.md#at48",
+      "features": [
+        "F24"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT49",
+      "spec": "09-acceptance.md#at49",
+      "features": [
+        "F04",
+        "F06",
+        "F10",
+        "F11",
+        "F19"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT50",
+      "spec": "09-acceptance.md#at50",
+      "features": [
+        "F05",
+        "F09",
+        "F13",
+        "F16"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT51",
+      "spec": "09-acceptance.md#at51",
+      "features": [
+        "F01",
+        "F18",
+        "F22"
+      ],
+      "status": "not_run"
+    },
+    {
+      "id": "AT52",
+      "spec": "09-acceptance.md#at52",
+      "features": [
+        "F04",
+        "F06",
+        "F22"
+      ],
+      "status": "not_run"
+    }
+  ]
+}

@@ -7,7 +7,8 @@
 
 - Mac 运行日报、频道转发、成长挖掘和 ledger-sync（launchd）。
 - r4s 运行 B站、YouTube 订阅 digest（cron）；不要在 Mac 恢复这两个定时任务。
-- r4s 的 `media_sent_ledger.jsonl` 是权威源；Mac 副本只供 Podcast4Bot 读取，会被同步覆盖。
+- r4s 的 `media_sent_ledger.jsonl` 是权威源；Mac 保留历史索引副本，按需显式同步。
+- ledger-sync 只推送 Mac sent-content ledger 到 r4s，详见 `docs/runbook.md#ledger-sync`。
 - TG 话题路由的事实源是 `~/qwenproxy/.tg-notify-targets.json`；修改后用
   `scripts/sync_tg_targets.sh` 同步，远端副本只读。
 

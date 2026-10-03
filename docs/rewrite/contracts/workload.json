@@ -1,0 +1,71 @@
+{
+  "schema": "chatdaily.rewrite.workload.v1",
+  "kind": "proposed_synthetic_workload",
+  "seed": 20260927,
+  "unicode_mix": {
+    "chinese": 0.6,
+    "english": 0.2,
+    "mixed_code_urls": 0.2
+  },
+  "text_length_characters": {
+    "short": {
+      "share": 0.7,
+      "min": 20,
+      "max": 300
+    },
+    "medium": {
+      "share": 0.25,
+      "min": 301,
+      "max": 2000
+    },
+    "long": {
+      "share": 0.05,
+      "min": 2001,
+      "max": 12000
+    }
+  },
+  "messages_with_media_share": 0.15,
+  "media_message_album_share": 0.3,
+  "duplicate_variants_share": 0.2,
+  "profiles": {
+    "smoke": {
+      "sources": 3,
+      "new_messages": 60,
+      "history_rows": 0,
+      "pending_deliveries": 6
+    },
+    "nominal": {
+      "sources": 50,
+      "new_messages": 10000,
+      "history_rows": 100000,
+      "pending_deliveries": 500,
+      "window_days": 1
+    },
+    "backlog": {
+      "base": "nominal",
+      "window_days": 7,
+      "new_messages": 70000,
+      "pending_deliveries": 3500
+    },
+    "history": {
+      "base": "nominal",
+      "history_rows": 1000000
+    },
+    "degraded": {
+      "base": "nominal",
+      "inject": [
+        "slow_model",
+        "rate_limit_429",
+        "offline_source",
+        "primary_write_error",
+        "accepted_response_lost"
+      ]
+    }
+  },
+  "generation_requirements": [
+    "stable content IDs and source membership",
+    "save full input manifest and output counts",
+    "include known-new-info duplicates, independent text posts, sparse IDs and source edits",
+    "avoid real credentials, chats and messages"
+  ]
+}

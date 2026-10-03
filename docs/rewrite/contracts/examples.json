@@ -1,0 +1,176 @@
+{
+  "schema": "chatdaily.rewrite.examples.v1",
+  "synthetic": true,
+  "test_clock": "2026-09-01T02:02:00+00:00",
+  "note": "All names, IDs, text and URLs are synthetic. These examples illustrate semantics, not a required future API schema.",
+  "normalized_source_item": {
+    "source": {
+      "platform": "telegram",
+      "account_scope": "synthetic-reader",
+      "source_id": "synthetic-chat"
+    },
+    "item_id": "101",
+    "source_time": "2026-09-01T09:59:59+08:00",
+    "observed_at": "2026-09-01T02:00:00Z",
+    "text": "合成案例：某工具增加离线导出功能。",
+    "source_url": "https://example.invalid/source/101",
+    "revision": "1",
+    "group_members": [
+      "101",
+      "102",
+      "103"
+    ],
+    "media": [
+      {
+        "member_id": "102",
+        "kind": "photo",
+        "availability": "available"
+      },
+      {
+        "member_id": "103",
+        "kind": "video",
+        "availability": "missing"
+      }
+    ]
+  },
+  "confirmed_content_row": {
+    "schema": "sent-content.v1",
+    "chat_id": -1000000000001,
+    "thread_id": 10,
+    "message_id": 501,
+    "producer": "x_monitor",
+    "source_kind": "x",
+    "source_ref": "synthetic-account",
+    "source_message_ids": [
+      101
+    ],
+    "url": "https://example.invalid/source/101",
+    "content": "合成案例：某工具增加离线导出功能。",
+    "content_hash": "8c0bf79a45f4218da90ad9643cf995835b6475f2326b154706b3356b27eaa47f",
+    "sent_at": "2026-09-01T02:00:00+00:00",
+    "delivery_state": "confirmed",
+    "content_id": "synthetic:x:101"
+  },
+  "caption_snapshot": {
+    "schema": "chatdaily.sent-content-mirror.v1",
+    "source": "synthetic-export",
+    "fetched_at": "2026-09-01T02:01:00+00:00",
+    "rows_sha256": "22687068fe8cb26044f341569e8cbc61cacb255713140e1994943b3535003530",
+    "rows": [
+      {
+        "schema": "sent-content.v1",
+        "chat_id": -1000000000001,
+        "thread_id": 10,
+        "message_id": 501,
+        "producer": "x_monitor",
+        "source_kind": "x",
+        "source_ref": "synthetic-account",
+        "source_message_ids": [
+          101
+        ],
+        "url": "https://example.invalid/source/101",
+        "content": "合成案例：某工具增加离线导出功能。",
+        "content_hash": "8c0bf79a45f4218da90ad9643cf995835b6475f2326b154706b3356b27eaa47f",
+        "sent_at": "2026-09-01T02:00:00+00:00",
+        "delivery_state": "confirmed",
+        "content_id": "synthetic:x:101"
+      }
+    ]
+  },
+  "media_ledger_row": {
+    "chat_id": -1000000000001,
+    "thread_id": 11,
+    "message_id": 601,
+    "url": "https://example.invalid/video/synthetic-video-1",
+    "producer": "youtube",
+    "ts": "2026-09-01T10:00:00+08:00",
+    "id": "synthetic-video-1"
+  },
+  "delivery_scenarios": [
+    {
+      "id": "partial_text",
+      "parts": [
+        "text-1",
+        "text-2",
+        "text-3"
+      ],
+      "observations": [
+        {
+          "part": "text-1",
+          "state": "confirmed",
+          "target_message_ids": [
+            701
+          ]
+        },
+        {
+          "part": "text-2",
+          "state": "failed_retryable",
+          "proof": "synthetic transport proves request was never transmitted"
+        },
+        {
+          "part": "text-3",
+          "state": "pending"
+        }
+      ],
+      "expected_resume": [
+        "text-2",
+        "text-3"
+      ],
+      "expected_no_replay": [
+        "text-1"
+      ]
+    },
+    {
+      "id": "lost_receipt",
+      "observations": [
+        {
+          "part": "text-1",
+          "remote_accepted": true,
+          "local_response": "read_timeout",
+          "state": "ambiguous"
+        }
+      ],
+      "expected_automatic_posts_after_restart": 0,
+      "expected_next_action": "reconcile"
+    },
+    {
+      "id": "report_dedup",
+      "requested_mode": "report",
+      "proposed_action": "skip",
+      "expected_actual_action": "deliver",
+      "expected_suppressed_count_increment": 0
+    },
+    {
+      "id": "unknown_legacy_seen",
+      "legacy_key": "synthetic-chat:88",
+      "receipt": null,
+      "decision": null,
+      "expected_migration_state": "legacy_processed",
+      "expected_confirmed_count_increment": 0
+    },
+    {
+      "id": "source_gap",
+      "fetched_ids": [
+        101,
+        102,
+        103
+      ],
+      "failed_ids": [
+        102
+      ],
+      "confirmed_ids": [
+        101,
+        103
+      ],
+      "expected_recovery_includes": [
+        102
+      ]
+    },
+    {
+      "id": "feedback_duplicate",
+      "idempotency_key": "synthetic-feedback-1",
+      "same_payload_replays": 2,
+      "expected_business_consumptions": 1
+    }
+  ]
+}

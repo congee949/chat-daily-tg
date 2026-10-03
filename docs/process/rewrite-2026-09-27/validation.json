@@ -1,0 +1,29 @@
+{
+  "schema": "chatdaily.spec-document-validation.v1",
+  "checked_on": "2026-09-27",
+  "status": "pass",
+  "scope": "documentation and distribution only; no product acceptance or production verification",
+  "checks": {
+    "local_links_checked": 274,
+    "fragments_checked": 192,
+    "pack_files": 23,
+    "json_files": 5,
+    "features": 24,
+    "acceptance_scenarios_defined": 52,
+    "acceptance_scenarios_executed": 0,
+    "source_references": 53,
+    "python_symbols_verified": 44,
+    "legacy_files_unchanged": 341,
+    "cli_help_checks": 3,
+    "license_byte_identical": true,
+    "portable_archive_sha256": "b5e3aacdc42c930c04a07917524f7b9dfda2f70cc03d4df770a3bce9049edc53"
+  },
+  "errors": [],
+  "production_mutations": false,
+  "legacy_document_edits": [
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/runbook.md"
+  ],
+  "release": "not_implemented"
+}

@@ -1,0 +1,42 @@
+{
+  "schema": "chatdaily.benchmark-report.v1",
+  "status": "not_run",
+  "build": null,
+  "config_hash": null,
+  "input_hash": null,
+  "profile": null,
+  "environment": {
+    "hardware": null,
+    "os": null,
+    "runtime": null,
+    "cpu_limit": null,
+    "memory_limit_bytes": null
+  },
+  "protocol": {
+    "seed": null,
+    "warmup": null,
+    "samples": null,
+    "cache_state": null,
+    "concurrency": null,
+    "external_service_profile": null
+  },
+  "correctness": {
+    "source_coverage": null,
+    "delivery_outcome_equivalence": null,
+    "missing_items": null,
+    "duplicate_confirmed_posts": null
+  },
+  "results": {
+    "latency_stages": {},
+    "peak_rss_bytes": null,
+    "queue_max": null,
+    "oldest_task_age_seconds": null,
+    "backlog_drain_rate": null,
+    "error_rate": null,
+    "model_calls": null,
+    "tokens": null,
+    "cost": null
+  },
+  "raw_measurements": [],
+  "failures": []
+}

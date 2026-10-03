@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "owner_id": 123456789,
+  "root": "/absolute/private/content-feedback",
+  "targets": [{"chat_id": -1001234567890, "thread_id": 2}],
+  "text_ledger": "/absolute/private/sent_content_ledger.jsonl",
+  "media_ledger": "/absolute/private/media_sent_ledger.jsonl",
+  "originals": "/absolute/private/verified-media-originals.jsonl"
+}

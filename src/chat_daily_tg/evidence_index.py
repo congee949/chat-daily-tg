@@ -46,8 +46,7 @@ def _discover_loopback_runtime_revision(endpoint: str, model_path_key: str) -> s
 
     Generic OpenAI-compatible providers are not required to expose ChatDaily's
     revision extension. The bundled loopback runtime is: its configured model
-    path and response attestations use the same fingerprint implementation as
-    Knowledge generation manifests.
+    path and response attestations share the local model fingerprint.
     """
     if not _is_bundled_loopback_runtime(endpoint):
         return ""
@@ -57,7 +56,7 @@ def _discover_loopback_runtime_revision(endpoint: str, model_path_key: str) -> s
     try:
         runtime = json.loads(runtime_config.read_text(encoding="utf-8"))
         model_path = Path(runtime[model_path_key]).expanduser()
-        from chat_daily_tg.knowledge_index import model_revision_fingerprint
+        from chat_daily_tg.model_identity import model_revision_fingerprint
 
         return model_revision_fingerprint(model_path)
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):

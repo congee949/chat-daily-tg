@@ -863,7 +863,6 @@ def push_raw_channel_cards(
                         authority=authority, url_authority_skip=url_authority_skip,
                         xmon=xmon):
                     continue
-
                 l2_verdict = None
                 annotation = ""
                 if content_plain:

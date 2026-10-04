@@ -352,3 +352,4 @@ microbenchmark 同时报告墙钟时间和操作次数。性能结论应基于�
 
 
 跨来源去重、caption 镜像及人工复核见 [去重运行指南](docs/dedup-policy.md)。
+频道去重的版本范围与验证结果见 [去重整改发布范围](docs/notes/dedup-remediation-release-2026-09-24.md)。

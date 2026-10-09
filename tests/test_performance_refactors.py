@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from chat_daily_tg import content_seen, knowledge_index, knowledge_sources, sent_ledger
+from chat_daily_tg import content_seen, knowledge_index, sent_ledger
 from chat_daily_tg.application import _export_wechat_lane
 from chat_daily_tg.content_seen import ContentSeenStore
 from chat_daily_tg.evidence_index import EmbeddingGeneration, EvidenceChunk, EvidenceIndex
@@ -30,7 +30,6 @@ from tests.test_knowledge_index import (
     build_generation,
     document,
 )
-from tests.test_knowledge_sources import _podcast_meta
 from tests.test_media_summarizer_model_routing import _config
 from tests.test_wx_exporter import _cand
 
@@ -204,54 +203,8 @@ def test_wechat_lane_passes_disabled_vision_to_export(tmp_path, monkeypatch):
     assert groups and captured[0]["download_images"] is False
 
 
-def test_podcast_url_index_preserves_all_links_and_bounds_canonicalization(tmp_path, monkeypatch):
-    rows = []
-    for number in range(40):
-        url = f"https://example.com/video/{number}"
-        rows.extend(
-            dict(
-                url=url,
-                id=f"video-{number}",
-                producer="youtube",
-                chat_id=8,
-                message_id=number * 2 + i,
-                ts="2026-09-01",
-            )
-            for i in (2, 1)
-        )
-    for number in range(12):
-        _podcast_meta(
-            tmp_path / "transcripts" / f"p{number}.meta.json",
-            key=f"p{number}",
-            url=rows[number * 2]["url"],
-            description="source description",
-        )
-    calls = 0
-    original = knowledge_sources.canonical_url
-
-    def counted(value):
-        nonlocal calls
-        calls += 1
-        return original(value)
-
-    monkeypatch.setattr(knowledge_sources, "canonical_url", counted)
-    documents, _ = knowledge_sources.load_podcast(tmp_path, rows)
-    assert len(documents) == 12
-    assert calls < 80 + 12 * 12
-    for item in documents:
-        number = int(item.content_id.split("-")[1])
-        assert [link.message_id for link in item.source_links] == [number * 2 + 2, number * 2 + 1]
 
 
-def test_empty_podcast_urls_do_not_parse_unrelated_invalid_ledger(tmp_path):
-    _podcast_meta(
-        tmp_path / "transcripts" / "empty.meta.json",
-        key="empty",
-        url="",
-        description="source description",
-    )
-    documents, _ = knowledge_sources.load_podcast(tmp_path, [{"url": "https://[invalid"}])
-    assert documents[0].mapping_status == "source_only"
 
 
 def test_fresh_generation_chunks_once_and_resume_revalidates(

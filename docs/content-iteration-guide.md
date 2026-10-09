@@ -331,11 +331,6 @@ B站/YouTube digest 在每条卡片的发送作用域使用 `delivery_identity` 
 `event-status` 请求为 key、state（following/paused/closed）、actor、reason。状态只通过明确操作改变，
 不会因长期无更新自动关闭。paused/closed 的 suggest 不调用模型；档案继续显示已有来源与最后来源时间。
 
-`media-originals` 可从已配置的 Podcast4Bot 归档与媒体投递账本生成 originals JSONL。
-请求提供 podcast_root、media_ledger、output_path。只收录明确投递关联的 article/srt/transcript，
-排除 metadata_description 和未确认来源。目录中的 verified_original 仅表示归档正文与投递关联通过校验，
-不表示 ASR 文本已经人工校对。设置反馈配置 originals 为该文件后，映射仍逐次验证文本 hash 和唯一性。
-
 ### 反馈试用统计
 
 `feedback-report` 使用原入口 root，请求为 `{}`，只读 operations.sqlite3。

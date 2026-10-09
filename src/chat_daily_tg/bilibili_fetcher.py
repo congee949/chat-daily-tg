@@ -442,7 +442,7 @@ def fetch_new_articles(src: BilibiliSource, seen: SeenStore, *,
     """Discover recent articles for UPs which explicitly opted in.
 
     This is intentionally a low-frequency, serial list fetch.  It never fetches
-    full article bodies: those are demand-driven by Podcast4Bot after a ❤️.
+    full article bodies.
     """
     now = now or datetime.now()
     cutoff = now - timedelta(hours=src.fetch.lookback_hours)

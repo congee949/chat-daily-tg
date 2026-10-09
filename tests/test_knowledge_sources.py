@@ -23,7 +23,6 @@ from chat_daily_tg.knowledge_sources import (
     load_chat_db,
     load_feedback,
     load_media_ledger,
-    load_podcast,
     load_sent_ledger,
 )
 
@@ -82,34 +81,20 @@ def _feedback_event(event_id: str, content_id: str, episode_key: str) -> dict:
     }
 
 
-def _podcast_meta(path: Path, *, key: str, url: str, platform: str = "youtube", **extra) -> None:
-    payload = {
-        "key": key,
-        "url": url,
-        "platform": platform,
-        "title": "Synthetic title",
-        **extra,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
 
 def _patch_collect_loaders(
     monkeypatch: pytest.MonkeyPatch,
     *,
     sent: list[SourceDocument],
-    podcast: list[SourceDocument],
+    database: list[SourceDocument],
 ) -> None:
     monkeypatch.setattr(knowledge_sources, "load_archive", lambda _path: ([], {}))
-    monkeypatch.setattr(knowledge_sources, "load_chat_db", lambda _path: ([], {}))
+    monkeypatch.setattr(knowledge_sources, "load_chat_db", lambda _path: (database, {}))
     monkeypatch.setattr(
         knowledge_sources, "load_sent_ledger", lambda _path: (sent, {})
     )
     monkeypatch.setattr(
         knowledge_sources, "load_media_ledger", lambda _path: ([], {})
-    )
-    monkeypatch.setattr(
-        knowledge_sources, "load_podcast", lambda _path, _rows: (podcast, {})
     )
     monkeypatch.setattr(
         knowledge_sources, "load_feedback", lambda _events, _reclassifications: ([], {})
@@ -122,7 +107,6 @@ def _empty_source_paths(tmp_path: Path) -> SourcePaths:
         chat_db=tmp_path / "chat-daily.db",
         sent_ledger=tmp_path / "sent.jsonl",
         media_ledger=tmp_path / "media.jsonl",
-        podcast_root=tmp_path / "Podcast4Bot",
         feedback_events=tmp_path / "feedback.jsonl",
         feedback_reclassifications=tmp_path / "reclassifications.jsonl",
     )
@@ -440,42 +424,6 @@ def test_sent_ledger_accepts_identical_duplicate_delivery_idempotently(tmp_path:
     assert cursor["delivery_ids"] == ["-100123:10"]
 
 
-def test_media_and_podcast_require_url_id_producer_agreement(tmp_path: Path) -> None:
-    ledger_path = tmp_path / "media.jsonl"
-    url = "https://www.youtube.com/watch?v=abcdefghijk"
-    row = {
-        "chat_id": -100123,
-        "thread_id": 9,
-        "message_id": 55,
-        "id": "youtube:abcdefghijk",
-        "url": url,
-        "producer": "youtube",
-        "ts": "2026-08-25T10:00:00+08:00",
-    }
-    _write_jsonl(ledger_path, [row])
-    media_rows, _cursor = load_media_ledger(ledger_path)
-    root = tmp_path / "Podcast4Bot"
-    _podcast_meta(root / "transcripts" / "abcd1234.meta.json", key="abcd1234", url=url)
-    (root / "transcripts" / "abcd1234.srt").write_text(
-        "1\n00:00:00,000 --> 00:00:01,000\nhello\n",
-        encoding="utf-8",
-    )
-
-    documents, _cursor = load_podcast(root, media_rows)
-
-    assert len(documents) == 1
-    assert documents[0].content_id == "youtube:abcdefghijk"
-    assert documents[0].mapping_status == "confirmed"
-    assert len(documents[0].source_links) == 1
-
-    _podcast_meta(
-        root / "transcripts" / "abcd1234.meta.json",
-        key="abcd1234",
-        url=url,
-        platform="bilibili",
-    )
-    with pytest.raises(ValueError, match="producer"):
-        load_podcast(root, media_rows)
 
 
 def test_media_ledger_rejects_url_or_content_authority_conflicts(tmp_path: Path) -> None:
@@ -625,118 +573,17 @@ def test_media_ledger_rejects_mixed_schema_rows(tmp_path: Path) -> None:
         load_media_ledger(path)
 
 
-def test_bilibili_article_uses_explicit_subscription_producer_adapter(tmp_path: Path) -> None:
-    url = "https://www.bilibili.com/read/cv12345"
-    media_rows = [
-        {
-            "chat_id": -100123,
-            "thread_id": 9,
-            "message_id": 3,
-            "id": "bilibili:article:12345",
-            "url": url,
-            "producer": "bilibili",
-        }
-    ]
-    root = tmp_path / "Podcast4Bot"
-    _podcast_meta(
-        root / "articles" / "abcd1234.meta.json",
-        key="abcd1234",
-        url=url,
-        platform="bilibili_article",
-        kind="article",
-    )
-    (root / "articles" / "abcd1234.txt").write_text("article body", encoding="utf-8")
-
-    documents, _cursor = load_podcast(root, media_rows)
-
-    assert documents[0].content_id == "bilibili:article:12345"
-    assert documents[0].mapping_status == "confirmed"
-    assert documents[0].producer == "bilibili_article"
 
 
-def test_podcast_nonmonotonic_srt_falls_back_to_strict_txt(tmp_path: Path) -> None:
-    root = tmp_path / "Podcast4Bot"
-    folder = root / "transcripts"
-    _podcast_meta(
-        folder / "abcd1234.meta.json",
-        key="abcd1234",
-        url="https://www.youtube.com/watch?v=abcdefghijk",
-    )
-    (folder / "abcd1234.srt").write_text(
-        "1\n00:00:05,000 --> 00:00:06,000\nlater\n\n2\n00:00:01,000 --> 00:00:02,000\nearlier\n",
-        encoding="utf-8",
-    )
-    (folder / "abcd1234.txt").write_text("clean transcript", encoding="utf-8")
-
-    documents, cursor = load_podcast(root, [])
-
-    assert len(documents) == 1
-    document = documents[0]
-    assert document.text == "clean transcript"
-    assert document.representation_type == "transcript"
-    assert document.document_role == "original"
-    assert document.metadata["srt_fallback_reason"] == "nonmonotonic_or_invalid_srt"
-    assert document.content_id.startswith("podcast:v1:")
-    assert cursor["count"] == 3  # meta + examined SRT + selected TXT
 
 
-def test_podcast_metadata_only_is_not_original_transcript(tmp_path: Path) -> None:
-    root = tmp_path / "Podcast4Bot"
-    folder = root / "transcripts"
-    _podcast_meta(
-        folder / "withdesc.meta.json",
-        key="withdesc",
-        url="https://example.com/with-description",
-        description="metadata description",
-    )
-    _podcast_meta(
-        folder / "empty000.meta.json",
-        key="empty000",
-        url="https://example.com/empty",
-        description="",
-    )
-
-    documents, _cursor = load_podcast(root, [])
-
-    assert len(documents) == 1
-    assert documents[0].representation_type == "metadata_description"
-    assert documents[0].document_role == "metadata"
-    assert documents[0].mapping_status == "source_only"
 
 
-def test_podcast_preserves_multiple_representations_for_one_content(tmp_path: Path) -> None:
-    root = tmp_path / "Podcast4Bot"
-    url = "https://example.com/shared"
-    _podcast_meta(
-        root / "articles" / "shared.meta.json",
-        key="shared",
-        url=url,
-        media_modality="gallery",
-    )
-    (root / "articles" / "shared.txt").write_text(
-        "caption and OCR facts", encoding="utf-8"
-    )
-    _podcast_meta(
-        root / "transcripts" / "shared.meta.json",
-        key="shared",
-        url=url,
-        description="episode metadata description",
-    )
-
-    documents, cursor = load_podcast(root, [])
-
-    assert len(documents) == 1
-    document = documents[0]
-    representations = {
-        document.representation_type,
-        *(value.representation_type for value in document.alternate_representations),
-    }
-    assert representations == {"vision_text", "metadata_description"}
-    assert len(document.metadata["representations"]) == 2
-    assert cursor["document_ids"] == [document.content_id]
 
 
-def test_feedback_stays_pending_until_source_document_resolves(tmp_path: Path) -> None:
+def test_feedback_stays_pending_until_source_document_resolves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     feedback_path = tmp_path / "feedback" / "events.jsonl"
     unresolved = _feedback_event("event-unresolved", "sha256:" + "1" * 64, "missing")
     _write_jsonl(feedback_path, [unresolved])
@@ -748,13 +595,15 @@ def test_feedback_stays_pending_until_source_document_resolves(tmp_path: Path) -
     assert rows[0]["confirmed"] is False
     assert rows[0]["delivery_content_id"] == unresolved["content_id"]
 
-    podcast_root = tmp_path / "Podcast4Bot"
-    _podcast_meta(
-        podcast_root / "transcripts" / "knownkey.meta.json",
-        key="knownkey",
-        url="https://example.com/known",
+    known = SourceDocument(
+        content_id="known-content",
+        source_kind="database",
+        source_ref="https://example.com/known",
+        text="source body",
+        authority="chat_db",
+        metadata={"key": "knownkey"},
     )
-    (podcast_root / "transcripts" / "knownkey.txt").write_text("source body", encoding="utf-8")
+    monkeypatch.setattr(knowledge_sources, "load_chat_db", lambda _path: ([known], {}))
     resolved = _feedback_event("event-resolved", "sha256:" + "2" * 64, "knownkey")
     _write_jsonl(feedback_path, [resolved, unresolved])
     snapshot = collect_sources(
@@ -763,7 +612,6 @@ def test_feedback_stays_pending_until_source_document_resolves(tmp_path: Path) -
             chat_db=tmp_path / "missing.db",
             sent_ledger=tmp_path / "missing-sent.jsonl",
             media_ledger=tmp_path / "missing-media.jsonl",
-            podcast_root=podcast_root,
             feedback_events=feedback_path,
             feedback_reclassifications=(tmp_path / "feedback" / "topic_reclassifications.jsonl"),
         )
@@ -772,7 +620,7 @@ def test_feedback_stays_pending_until_source_document_resolves(tmp_path: Path) -
     assert by_event["event-resolved"]["mapping_status"] == "confirmed"
     assert by_event["event-resolved"]["confirmed"] is True
     assert by_event["event-resolved"]["delivery_content_id"] == resolved["content_id"]
-    assert by_event["event-resolved"]["content_id"].startswith("podcast:v1:")
+    assert by_event["event-resolved"]["content_id"] == "known-content"
     assert by_event["event-unresolved"]["mapping_status"] == "pending"
 
 
@@ -797,7 +645,7 @@ def test_collect_sources_rejects_same_text_with_conflicting_provenance(
             )
         ],
     )
-    podcast = SourceDocument(
+    database = SourceDocument(
         content_id="shared-content",
         source_kind="youtube",
         source_ref="https://youtube.com/watch?v=shared",
@@ -806,8 +654,8 @@ def test_collect_sources_rejects_same_text_with_conflicting_provenance(
         metadata={"key": "shared-episode"},
         assets=[AssetRecord(asset_id="shared-cover", sha256="a" * 64)],
     )
-    assert sent.content_hash == podcast.content_hash
-    _patch_collect_loaders(monkeypatch, sent=[sent], podcast=[podcast])
+    assert sent.content_hash == database.content_hash
+    _patch_collect_loaders(monkeypatch, sent=[sent], database=[database])
 
     with pytest.raises(ValueError, match="duplicate content provenance conflict"):
         collect_sources(_empty_source_paths(tmp_path))
@@ -844,7 +692,7 @@ def test_collect_sources_collapses_only_fully_equivalent_duplicates(
         metadata={"source_message_ids": [101]},
         source_links=list(first.source_links),
     )
-    _patch_collect_loaders(monkeypatch, sent=[first], podcast=[equivalent])
+    _patch_collect_loaders(monkeypatch, sent=[first], database=[equivalent])
 
     snapshot = collect_sources(_empty_source_paths(tmp_path))
 

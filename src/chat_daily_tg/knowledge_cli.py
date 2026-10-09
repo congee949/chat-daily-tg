@@ -242,7 +242,6 @@ def _source_paths(args: argparse.Namespace) -> SourcePaths:
         chat_db=args.chat_db or defaults.chat_db,
         sent_ledger=args.sent_ledger or defaults.sent_ledger,
         media_ledger=args.media_ledger or defaults.media_ledger,
-        podcast_root=args.podcast_root or defaults.podcast_root,
         feedback_events=args.feedback or defaults.feedback_events,
         feedback_reclassifications=(
             args.feedback_reclassifications or defaults.feedback_reclassifications
@@ -2567,7 +2566,6 @@ def _add_sources(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--chat-db", type=Path)
     parser.add_argument("--sent-ledger", type=Path)
     parser.add_argument("--media-ledger", type=Path)
-    parser.add_argument("--podcast-root", type=Path)
     parser.add_argument("--feedback", type=Path)
     parser.add_argument("--feedback-reclassifications", type=Path)
 

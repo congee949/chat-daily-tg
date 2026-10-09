@@ -13,14 +13,11 @@ from urllib.parse import urlsplit
 
 from chat_daily_tg.knowledge_index import (
     ArchiveMessage,
-    AssetRecord,
     SourceDocument,
     SourceLink,
-    SourceRepresentation,
     canonical_json,
     canonical_url,
     parse_archive_messages,
-    parse_srt,
     sha256_file,
     sha256_text,
     split_archive_message_sessions,
@@ -33,7 +30,6 @@ class SourcePaths:
     chat_db: Path
     sent_ledger: Path
     media_ledger: Path
-    podcast_root: Path
     feedback_events: Path
     feedback_reclassifications: Path
 
@@ -45,7 +41,6 @@ class SourcePaths:
             chat_db=data / "chat-daily.db",
             sent_ledger=data / "state" / "sent_content_ledger.jsonl",
             media_ledger=data / "state" / "media_sent_ledger.jsonl",
-            podcast_root=Path("~/Projects/Podcast4Bot").expanduser(),
             feedback_events=data / "intent-feedback" / "events.jsonl",
             feedback_reclassifications=(data / "intent-feedback" / "topic_reclassifications.jsonl"),
         )
@@ -696,297 +691,6 @@ def load_media_ledger(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]
     return unique_rows, cursor
 
 
-def _media_links(
-    rows: Sequence[dict[str, Any]], url: str, content_id: str, producer: str
-) -> list[SourceLink]:
-    canonical = canonical_url(url)
-    ledger_producer = _ledger_producer(producer)
-    output: list[SourceLink] = []
-    for row in rows:
-        if not (
-            canonical_url(str(row.get("url") or "")) == canonical
-            and str(row.get("id") or "").strip() == content_id
-            and str(row.get("producer") or "").strip() == ledger_producer
-        ):
-            continue
-        output.append(
-            SourceLink(
-                chat_id=int(row["chat_id"]),
-                thread_id=int(row["thread_id"]) if row.get("thread_id") is not None else None,
-                message_id=int(row["message_id"]),
-                source_message_id=None,
-                ledger_schema=_media_row_schema(row),
-                confirmed=True,
-            )
-        )
-    return output
-
-
-def _ledger_producer(producer: str) -> str:
-    # The subscription ledger uses one Bilibili producer for both videos and
-    # articles; Podcast metadata keeps the narrower article adapter name.
-    return "bilibili" if producer == "bilibili_article" else producer
-
-
-def _media_id(
-    rows: Sequence[dict[str, Any]], url: str, producer: str, key: str
-) -> tuple[str, bool]:
-    canonical = canonical_url(url)
-    matching_url = [
-        row for row in rows if canonical and canonical_url(str(row.get("url") or "")) == canonical
-    ]
-    if not matching_url:
-        material = f"{producer}|{canonical or f'cache-key:{key}'}"
-        return "podcast:v1:" + sha256_text(material), False
-    ledger_producer = _ledger_producer(producer)
-    matching_producer = [
-        row for row in matching_url if str(row.get("producer") or "").strip() == ledger_producer
-    ]
-    if not matching_producer:
-        raise ValueError("Podcast4Bot producer contradicts media ledger authority")
-    ids = {str(row.get("id") or "").strip() for row in matching_producer}
-    if len(ids) > 1:
-        raise ValueError("media ledger URL maps to multiple content ids")
-    content_id = next(iter(ids))
-    if not content_id:
-        raise ValueError("media ledger URL maps to an empty content id")
-    return content_id, True
-
-
-def _strict_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="strict")
-
-
-def _srt_is_monotonic(text: str) -> tuple[bool, list[tuple[int, int, str]]]:
-    cues = parse_srt(text)
-    previous_start = -1
-    for start, end, _body in cues:
-        if start < previous_start or end < start:
-            return False, cues
-        previous_start = start
-    return bool(cues), cues
-
-
-def load_podcast(
-    root: Path, media_rows: Sequence[dict[str, Any]]
-) -> tuple[list[SourceDocument], dict[str, Any]]:
-    if not root.is_dir():
-        return [], {
-            "mode": "set",
-            "count": 0,
-            "set_hash": sha256_text("[]"),
-            "items": [],
-            "document_ids": [],
-        }
-    meta_files = sorted([*root.glob("transcripts/*.meta.json"), *root.glob("articles/*.meta.json")])
-    cursor_files: set[Path] = set(meta_files)
-    selected: dict[str, dict[str, tuple[int, str, SourceDocument]]] = {}
-    media_rows_by_url: dict[str, list[dict[str, Any]]] | None = None
-    for meta_path in meta_files:
-        try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8", errors="strict"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ValueError(f"invalid Podcast4Bot metadata: {meta_path}") from exc
-        if not isinstance(metadata, dict):
-            raise ValueError(f"Podcast4Bot metadata is not an object: {meta_path}")
-        key = str(metadata.get("key") or meta_path.name.removesuffix(".meta.json"))
-        if metadata.get("key") and key != meta_path.name.removesuffix(".meta.json"):
-            raise ValueError("Podcast4Bot metadata key contradicts its filename")
-        url = canonical_url(str(metadata.get("url") or ""))
-        producer = str(metadata.get("platform") or "Podcast4Bot").strip()
-        # Build once, lazily: empty/source-only caches previously never parsed
-        # ledger URLs. Preserve that boundary and all helper authority checks.
-        if url and media_rows_by_url is None:
-            media_rows_by_url = {}
-            for row in media_rows:
-                row_url = canonical_url(str(row.get("url") or ""))
-                media_rows_by_url.setdefault(row_url, []).append(row)
-        matching_media_rows = (media_rows_by_url or {}).get(url, []) if url else []
-        content_id, media_confirmed = _media_id(matching_media_rows, url, producer, key)
-        base = meta_path.with_name(key)
-        srt_path = base.with_suffix(".srt")
-        txt_path = base.with_suffix(".txt")
-        fallback_reason = ""
-        if srt_path.is_file():
-            srt_text = _strict_text(srt_path)
-            cursor_files.add(srt_path)
-            monotonic, cues = _srt_is_monotonic(srt_text)
-            if monotonic:
-                text = srt_text.strip()
-                representation = "srt"
-            elif txt_path.is_file():
-                text = _strict_text(txt_path).strip()
-                cursor_files.add(txt_path)
-                representation = "transcript"
-                fallback_reason = "nonmonotonic_or_invalid_srt"
-            elif cues:
-                text = " ".join(body for _start, _end, body in cues).strip()
-                representation = "transcript"
-                fallback_reason = "nonmonotonic_srt_without_txt"
-            else:
-                text = str(metadata.get("description") or "").strip()
-                representation = "metadata_description"
-                fallback_reason = "invalid_srt_without_txt"
-        elif txt_path.is_file():
-            text = _strict_text(txt_path).strip()
-            cursor_files.add(txt_path)
-            if meta_path.parent.name == "transcripts":
-                representation = "transcript"
-            elif metadata.get("media_modality") == "gallery":
-                representation = "vision_text"
-            else:
-                representation = "article"
-        else:
-            text = str(metadata.get("description") or "").strip()
-            representation = "metadata_description"
-        if not text:
-            continue
-        text_hash = sha256_text(text)
-        assets: list[AssetRecord] = []
-        gallery_paths = metadata.get("gallery_paths")
-        gallery_hashes = metadata.get("gallery_sha256")
-        if isinstance(gallery_paths, list):
-            for index, local_ref in enumerate(gallery_paths):
-                digest = (
-                    str(gallery_hashes[index])
-                    if isinstance(gallery_hashes, list) and index < len(gallery_hashes)
-                    else ""
-                )
-                asset_path = Path(str(local_ref)).expanduser()
-                if not asset_path.is_absolute():
-                    asset_path = root / asset_path
-                if digest:
-                    if not asset_path.is_file():
-                        raise ValueError("Podcast4Bot gallery asset is missing")
-                    if sha256_file(asset_path) != digest:
-                        raise ValueError("Podcast4Bot gallery asset hash mismatch")
-                    try:
-                        asset_path.relative_to(root)
-                    except ValueError:
-                        pass
-                    else:
-                        cursor_files.add(asset_path)
-                assets.append(
-                    AssetRecord(
-                        asset_id=f"{content_id}:asset:{key}:{index + 1}",
-                        sha256=digest,
-                        local_ref=str(local_ref),
-                        vision_json={
-                            "visual_evidence_verified": metadata.get("visual_evidence_verified")
-                        },
-                    )
-                )
-        source_kind = (
-            "podcast_transcript" if meta_path.parent.name == "transcripts" else "podcast_article"
-        )
-        links = _media_links(matching_media_rows, url, content_id, producer) if media_confirmed else []
-        if media_confirmed and not links:
-            raise ValueError("Podcast4Bot media authority resolved without a delivery link")
-        document_role = "metadata" if representation == "metadata_description" else "original"
-        document = SourceDocument(
-            content_id=content_id,
-            source_kind=source_kind,
-            source_ref=url or meta_path.relative_to(root).as_posix(),
-            text=text,
-            title=str(metadata.get("title") or ""),
-            canonical_url=url,
-            producer=producer,
-            authority="Podcast4Bot",
-            mapping_status="confirmed" if links else "source_only",
-            metadata={
-                "key": key,
-                "channel": metadata.get("channel"),
-                "duration": metadata.get("duration"),
-                "asr_engine": metadata.get("asr_engine"),
-                "asr_model": metadata.get("asr_model"),
-                "asr_quality": metadata.get("asr_quality"),
-                "media_modality": metadata.get("media_modality"),
-                "srt_fallback_reason": fallback_reason or None,
-            },
-            document_role=document_role,
-            modality="text",
-            representation_type=representation,
-            source_links=links,
-            assets=assets,
-        )
-        # Producer caches can legitimately contain multiple representations of
-        # one stable content item. Preserve each as chunks under that one
-        # content_id so the reader's per-content cap prevents duplicate ranking
-        # occupancy. Divergent artifacts of the same type remain an authority
-        # error.
-        priority = {
-            "vision_text": 50,
-            "article": 40,
-            "srt": 30,
-            "transcript": 20,
-        }.get(representation, 10)
-        representations = selected.setdefault(content_id, {})
-        previous = representations.get(representation)
-        if previous is None:
-            representations[representation] = (priority, text_hash, document)
-        elif text_hash != previous[1]:
-            raise ValueError(f"Podcast4Bot content conflict for {content_id}")
-    documents: list[SourceDocument] = []
-    for content_id, representations in selected.items():
-        ordered = sorted(
-            representations.values(),
-            key=lambda value: (-value[0], value[2].representation_type, value[1]),
-        )
-        primary = ordered[0][2]
-        links: list[SourceLink] = []
-        seen_links: set[str] = set()
-        assets: list[AssetRecord] = []
-        seen_assets: set[str] = set()
-        representation_inventory: list[dict[str, Any]] = []
-        alternates: list[SourceRepresentation] = []
-        for _priority, text_hash, value in ordered:
-            for link in value.source_links:
-                key = canonical_json(link.__dict__)
-                if key not in seen_links:
-                    links.append(link)
-                    seen_links.add(key)
-            for asset in value.assets:
-                if asset.asset_id not in seen_assets:
-                    assets.append(asset)
-                    seen_assets.add(asset.asset_id)
-            locator = (
-                f"{value.source_kind}:{value.metadata.get('key') or value.source_ref}:"
-                f"{value.representation_type}"
-            )
-            representation_inventory.append(
-                {
-                    "locator": locator,
-                    "text_hash": text_hash,
-                    "source_kind": value.source_kind,
-                    "source_ref": value.source_ref,
-                    "document_role": value.document_role,
-                    "representation_type": value.representation_type,
-                }
-            )
-            if value is not primary:
-                alternates.append(
-                    SourceRepresentation(
-                        text=value.text,
-                        document_role=value.document_role,
-                        representation_type=value.representation_type,
-                        modality=value.modality,
-                        source_kind=value.source_kind,
-                        source_ref=value.source_ref,
-                        title=value.title,
-                        locator=locator,
-                    )
-                )
-        primary.metadata = {
-            **primary.metadata,
-            "representations": representation_inventory,
-        }
-        primary.source_links = links
-        primary.assets = assets
-        primary.alternate_representations = tuple(alternates)
-        documents.append(primary)
-    return documents, _with_document_ids(_file_cursor(cursor_files, base=root), documents)
-
-
 def load_feedback(
     path: Path,
     reclassifications_path: Path | None = None,
@@ -1139,17 +843,28 @@ def _resolve_feedback_events(
     return resolved_rows
 
 
+# Podcast4Bot transcripts are no longer a source.  Existing index generations
+# still carry a "podcast" cursor, and incremental builds reject a baseline cursor
+# that disappears, so keep reporting the empty set it would have produced.
+_RETIRED_PODCAST_CURSOR: dict[str, Any] = {
+    "mode": "set",
+    "count": 0,
+    "set_hash": sha256_text("[]"),
+    "items": [],
+    "document_ids": [],
+}
+
+
 def collect_sources(paths: SourcePaths) -> SourceSnapshot:
     archive, archive_cursor = load_archive(paths.archive)
     database, database_cursor = load_chat_db(paths.chat_db)
     sent, sent_cursor = load_sent_ledger(paths.sent_ledger)
-    media_rows, media_cursor = load_media_ledger(paths.media_ledger)
-    podcast, podcast_cursor = load_podcast(paths.podcast_root, media_rows)
+    _media_rows, media_cursor = load_media_ledger(paths.media_ledger)
     feedback, feedback_cursor = load_feedback(
         paths.feedback_events,
         paths.feedback_reclassifications,
     )
-    documents = [*archive, *database, *sent, *podcast]
+    documents = [*archive, *database, *sent]
     unique: dict[str, SourceDocument] = {}
     for document in documents:
         prior = unique.get(document.content_id)
@@ -1170,7 +885,7 @@ def collect_sources(paths: SourcePaths) -> SourceSnapshot:
             "chat_db": database_cursor,
             "sent_content_ledger": sent_cursor,
             "media_sent_ledger": media_cursor,
-            "podcast": podcast_cursor,
+            "podcast": _RETIRED_PODCAST_CURSOR,
             "feedback": feedback_cursor,
         },
         feedback_events=tuple(resolved_feedback),

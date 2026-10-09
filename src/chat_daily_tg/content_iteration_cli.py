@@ -12,7 +12,7 @@ from chat_daily_tg.value_profiles import rank_candidates, blind_comparison
 
 COMMANDS=('freeze','replay','rubric-draft','rubric-evaluate','rubric-review','rubric-activate','rubric-rollback',
           'event-create','event-status','event-suggest','event-propose','event-decide','event-rebuild','review-add','review-decide',
-          'review-report','health','rank','blind','source-quality','calls-report','calls-export','daily-review','value-preview','blind-prepare','blind-result','model-replay','health-notify','health-collect','fetch-health','reply-review','growth-review','source-weekly','daily-candidates','daily-preview','media-originals','feedback-report')
+          'review-report','health','rank','blind','source-quality','calls-report','calls-export','daily-review','value-preview','blind-prepare','blind-result','model-replay','health-notify','health-collect','fetch-health','reply-review','growth-review','source-weekly','daily-candidates','daily-preview','feedback-report')
 
 
 def read(path):return json.loads(Path(path).read_text(encoding='utf-8'))
@@ -22,9 +22,6 @@ def execute(command,request,root):
     if command=='feedback-report':
         from chat_daily_tg.feedback_report import feedback_report
         return feedback_report(root=root)
-    if command=='media-originals':
-        from chat_daily_tg.media_originals import build_media_originals
-        return build_media_originals(**request)
     if command=='daily-candidates':
         from chat_daily_tg.daily_candidates import daily_candidates
         return daily_candidates(**request)

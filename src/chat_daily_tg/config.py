@@ -261,10 +261,26 @@ class DedupAuthority(BaseModel):
     url_authority_skip: bool = True
 
 
+class DedupRelay(BaseModel):
+    """Relay detection for channel cards against X Monitor deliveries (relay_observe.py).
+
+    ``channels`` lists channel ids or names; observe mode only journals decisions.
+    """
+    mode: Literal["off", "observe"] = "off"
+    channels: list[str] = Field(default_factory=list)
+    model_alias: str = "sol"
+    timeout_seconds: float = Field(default=90, gt=0, le=600)
+    snapshot_path: Path = Path("~/chat-daily/state/xmonitor_sent_snapshot.json")
+    journal_path: Path = Path("~/chat-daily/state/relay-observe.jsonl")
+    window_hours: int = Field(default=72, ge=1, le=168)
+    max_ai_calls_per_run: int = Field(default=12, ge=0, le=50)
+
+
 class DedupConfig(BaseModel):
     content: DedupContent = Field(default_factory=DedupContent)
     topic: DedupTopic = Field(default_factory=DedupTopic)
     authority: DedupAuthority = Field(default_factory=DedupAuthority)
+    relay: DedupRelay = Field(default_factory=DedupRelay)
 
 
 class TelegramSource(BaseModel):

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chat_daily_tg.config import RawChannel
+from chat_daily_tg import relay_observe
 from chat_daily_tg.raw_seen import SeenStore
 from chat_daily_tg.telegram_exporter import (
     LOCAL_TZ,
@@ -429,7 +430,18 @@ def _l2_check(topic_gate, ch: RawChannel, content_plain: str, ids: list[int],
     """L2 topic-gate decision, shared by the public and private send paths.
     Returns (skip, annotation_html, verdict). skip=True means the card was
     journaled (with its own chat_id:msg_id for --resend) and marked seen.
-    Any failure returns (False, "", None) — deliver."""
+    Any failure returns (False, "", None) — deliver.
+
+    The relay observer sees every card afterwards; L2's nearest delivered
+    message joins its candidates because vector recall finds cross-language
+    matches that token overlap misses."""
+    result = _l2_decide(topic_gate, ch, content_plain, ids, seen, has_media=has_media)
+    relay_observe.observe_card(ch, content_plain, ids, l2_verdict=result[2])
+    return result
+
+
+def _l2_decide(topic_gate, ch: RawChannel, content_plain: str, ids: list[int],
+               seen: SeenStore, *, has_media: bool = False) -> tuple[bool, str, object]:
     if topic_gate is None or not ch.dedup:
         return False, "", None
     try:

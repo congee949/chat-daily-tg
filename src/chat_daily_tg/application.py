@@ -390,6 +390,30 @@ def _push_raw_channels(cfg, since, until, archive_dir, *, no_push: bool, increme
             closer = getattr(topic_gate.judge, "close", None)
             if callable(closer):
                 resources.callback(closer)
+        relay_cfg = cfg.sources.telegram.dedup.relay
+        if not no_push and relay_cfg.mode == "observe" and relay_cfg.channels:
+            try:
+                from chat_daily_tg import relay_observe
+                model = cfg.resolve_model_alias(relay_cfg.model_alias)
+                if model.api_key_file:
+                    load_env_file(model.api_key_file)
+                relay_llm = LLMClient(
+                    endpoint=model.endpoint, model=model.model,
+                    api_key=os.environ[model.api_key_env],
+                    max_tokens=min(model.max_tokens, 4000),
+                    timeout=min(model.timeout, relay_cfg.timeout_seconds),
+                    retry_max_attempts=1, extra_body=model.extra_body,
+                )
+                resources.callback(relay_llm.close)
+                token = relay_observe.current_observer.set(relay_observe.RelayObserver(
+                    llm=relay_llm, snapshot_path=relay_cfg.snapshot_path,
+                    journal_path=relay_cfg.journal_path, channels=relay_cfg.channels,
+                    window_hours=relay_cfg.window_hours,
+                    max_calls=relay_cfg.max_ai_calls_per_run,
+                ))
+                resources.callback(relay_observe.current_observer.reset, token)
+            except Exception as exc:
+                log.warning("relay-observe unavailable error_type=%s", type(exc).__name__)
         auth_cfg = getattr(cfg.sources.telegram.dedup, "authority", None)
         authority = dict(getattr(auth_cfg, "weights", {}) or {})
         # First-arrival URL collapse no longer depends on weights: once any

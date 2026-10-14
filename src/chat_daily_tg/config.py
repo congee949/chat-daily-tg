@@ -75,6 +75,17 @@ class Sanitize(BaseModel):
     enabled: bool = False
 
 
+class Triage(BaseModel):
+    enabled: bool = False
+    endpoint: str = "https://opencode.ai/zen/v1/systemone"
+    model: str = "jev-1.13-free"
+    min_value: float = 0.4
+    injection_threshold: float = 0.5
+    drop_flagged: bool = False
+    max_chars: int = 8000
+    timeout: float = 30.0
+
+
 class Config(BaseModel):
     groups: list[str] | None = None
     sources: Sources = Field(default_factory=Sources)
@@ -86,6 +97,7 @@ class Config(BaseModel):
     telegram: Telegram
     retry: Retry = Field(default_factory=Retry)
     sanitize: Sanitize = Field(default_factory=Sanitize)
+    triage: Triage = Field(default_factory=Triage)
     source_abbreviations: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("groups")

@@ -130,6 +130,12 @@ def _run(date_str: str) -> int:
         except Exception as e:
             log.warning("vision analysis skipped: %s", e)
 
+    if cfg.triage.enabled:
+        from chat_daily_tg.triage import triage_groups
+        groups_with_content, verdicts = triage_groups(groups_with_content, cfg.triage)
+        log.info("jev triage: kept %d/%d, flagged %d", len(groups_with_content), len(verdicts),
+                 sum(v.flagged for v in verdicts))
+
     summary_model = cfg.models.summary
     api_key = os.environ[summary_model.api_key_env]
     llm = LLMClient(

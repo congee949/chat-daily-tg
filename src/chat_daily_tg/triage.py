@@ -64,9 +64,11 @@ def judge(client: httpx.Client, cfg, name: str, text: str) -> Verdict:
         log.warning("jev triage failed for %s, keeping: %s", name, e)
         return Verdict(name, None, None, keep=True, flagged=False, error=str(e))
     flagged = inj >= cfg.injection_threshold
-    keep = value >= cfg.min_value or flagged and not cfg.drop_flagged
-    if flagged and cfg.drop_flagged:
-        keep = False
+    if flagged:
+        # flagged items are kept (marked as data) unless drop_flagged is set
+        keep = not cfg.drop_flagged
+    else:
+        keep = value >= cfg.min_value
     return Verdict(name, value, inj, keep=keep, flagged=flagged)
 
 
